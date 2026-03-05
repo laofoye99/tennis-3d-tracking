@@ -148,6 +148,11 @@ def run_video_pipeline(
                 last_pixel_detection = (px, py, conf)
                 wx, wy = homography.pixel_to_world(px, py)
 
+                # Unique frame index: each output corresponds to an input frame
+                # Batch N processes frames (N-1)*frames_in+1 .. N*frames_in
+                # Output i corresponds to frame processed_count - frames_out + i + 1
+                fi = processed_count - frames_out + i + 1
+
                 detection = {
                     "camera_name": camera_name,
                     "x": wx,
@@ -156,7 +161,7 @@ def run_video_pipeline(
                     "pixel_y": py,
                     "confidence": conf,
                     "timestamp": time.time(),
-                    "frame_index": start_frame + processed_count,
+                    "frame_index": fi,  # relative to clip start for cross-camera matching
                 }
 
                 try:

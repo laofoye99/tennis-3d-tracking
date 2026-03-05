@@ -159,7 +159,7 @@ class Orchestrator:
 
         while not self._stopped.is_set():
             got_any = False
-            for name, handle in self._handles.items():
+            for name, handle in list(self._handles.items()):
                 # 消费检测结果
                 if handle.result_queue is not None:
                     try:

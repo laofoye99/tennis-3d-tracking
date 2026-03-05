@@ -465,6 +465,10 @@ body{font-family:'Lato',sans-serif;background:var(--bg);color:var(--text);height
           </div>
           <!-- Range slider -->
           <div class="range-slider-section" id="vt-range-section" style="display:none">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
+              <span id="vt-active-view-label" style="font-size:11px;color:var(--accent);font-weight:600;display:none">View 1 (cam66)</span>
+              <span id="vt-anchor-hint" style="font-size:9px;color:var(--text-muted);display:none"></span>
+            </div>
             <div class="range-slider" id="vt-range-slider">
               <div class="range-track" id="vt-range-track"></div>
               <div class="range-selected" id="vt-range-selected"></div>
@@ -838,6 +842,10 @@ let _vtDragging=null;
 let _vtRunning=false;
 let _vtPhase='idle'; // 'idle'|'cam66'|'cam68'|'3d'|'done'
 let _vt3dPoints=[];  // computed 3D points
+// Per-view clip ranges: View1=anchor (start+end), View2=start only (duration from View1)
+let _vtViewRanges={1:{start:0,end:1,duration:0,configured:false,filename:''},
+                   2:{start:0,end:1,duration:0,configured:false,filename:''}};
+let _vtActiveView=null;  // which view (1 or 2) is currently shown
 
 // ---- Three.js 3D Scene ----
 let _vtScene, _vtCamera3d, _vtRenderer, _vtControls;
@@ -855,9 +863,17 @@ function vtInit3D(){
   _vtScene=new THREE.Scene();
   _vtScene.background=new THREE.Color(0x1a1a2e);
 
+  // Court coordinate system (from homography_matrices.json):
+  // (0,0) at top-left from cam68 view, x:0→8.23 (singles width), y:0→23.77 (length)
+  // Net at y=11.885, service lines at y=5.485 and y=18.285
+  // Three.js mapping: court_x → three_x, court_z(height) → three_y, court_y → three_z
+  const CX=4.115, CW=8.23, CL=23.77, NET_Y=11.885, SRV_N=5.485, SRV_F=18.285;
+  // Doubles alley: 1.3715m per side
+  const DW_HALF=1.3715, DX_MIN=-DW_HALF, DX_MAX=CW+DW_HALF;
+
   _vtCamera3d=new THREE.PerspectiveCamera(50,W/H,0.1,200);
-  _vtCamera3d.position.set(18,-18,14);
-  _vtCamera3d.lookAt(0,0,0);
+  _vtCamera3d.position.set(CX+16,14,CL/2-12);
+  _vtCamera3d.lookAt(CX,0,CL/2);
 
   _vtRenderer=new THREE.WebGLRenderer({antialias:true});
   _vtRenderer.setSize(W,H);
@@ -865,14 +881,14 @@ function vtInit3D(){
   container.appendChild(_vtRenderer.domElement);
 
   _vtControls=new THREE.OrbitControls(_vtCamera3d,_vtRenderer.domElement);
-  _vtControls.target.set(0,0.5,0);
+  _vtControls.target.set(CX,0.5,CL/2);
   _vtControls.enableDamping=true;
   _vtControls.dampingFactor=0.1;
   _vtControls.update();
 
   _vtScene.add(new THREE.AmbientLight(0xffffff,0.8));
   const dirLight=new THREE.DirectionalLight(0xffffff,0.5);
-  dirLight.position.set(10,20,10);
+  dirLight.position.set(CX+10,20,CL/2);
   _vtScene.add(dirLight);
 
   // Ground
@@ -880,64 +896,98 @@ function vtInit3D(){
   const groundMat=new THREE.MeshBasicMaterial({color:0x1a2e1a,side:THREE.DoubleSide});
   const ground=new THREE.Mesh(groundGeom,groundMat);
   ground.rotation.x=-Math.PI/2;
-  ground.position.y=-0.01;
+  ground.position.set(CX,-0.01,CL/2);
   _vtScene.add(ground);
 
-  // Court surface
-  const courtGeom=new THREE.PlaneGeometry(10.973,23.77);
+  // Court surface (doubles area)
+  const courtGeom=new THREE.PlaneGeometry(CW+2*DW_HALF,CL);
   const courtMat=new THREE.MeshBasicMaterial({color:0x2d5a3d,side:THREE.DoubleSide});
   const courtMesh=new THREE.Mesh(courtGeom,courtMat);
   courtMesh.rotation.x=-Math.PI/2;
+  courtMesh.position.set(CX,0,CL/2);
   _vtScene.add(courtMesh);
 
-  // Court lines (using LineSegments for efficiency)
+  // Court lines
   const positions=[];
   function seg(x1,z1,x2,z2){positions.push(x1,0.01,z1, x2,0.01,z2)}
   // Outer boundary (doubles)
-  seg(-5.4865,-11.885, 5.4865,-11.885);
-  seg(5.4865,-11.885, 5.4865,11.885);
-  seg(5.4865,11.885, -5.4865,11.885);
-  seg(-5.4865,11.885, -5.4865,-11.885);
+  seg(DX_MIN,0, DX_MAX,0);
+  seg(DX_MAX,0, DX_MAX,CL);
+  seg(DX_MAX,CL, DX_MIN,CL);
+  seg(DX_MIN,CL, DX_MIN,0);
   // Singles lines
-  seg(-4.115,-11.885, -4.115,11.885);
-  seg(4.115,-11.885, 4.115,11.885);
+  seg(0,0, 0,CL);
+  seg(CW,0, CW,CL);
   // Service lines
-  seg(-4.115,6.4, 4.115,6.4);
-  seg(-4.115,-6.4, 4.115,-6.4);
+  seg(0,SRV_N, CW,SRV_N);
+  seg(0,SRV_F, CW,SRV_F);
   // Center service line
-  seg(0,-6.4, 0,6.4);
+  seg(CX,SRV_N, CX,SRV_F);
   // Center marks
-  seg(0,-11.885, 0,-11.485);
-  seg(0,11.885, 0,11.485);
+  seg(CX,0, CX,0.4);
+  seg(CX,CL, CX,CL-0.4);
 
   const lineGeom=new THREE.BufferGeometry();
   lineGeom.setAttribute('position',new THREE.Float32BufferAttribute(positions,3));
   _vtScene.add(new THREE.LineSegments(lineGeom,new THREE.LineBasicMaterial({color:0xffffff})));
 
-  // Net (semi-transparent plane)
-  const netGeom=new THREE.PlaneGeometry(10.973,1.07);
+  // Net (semi-transparent plane at y=NET_Y)
+  const netGeom=new THREE.PlaneGeometry(CW+2*DW_HALF,1.07);
   const netMat=new THREE.MeshBasicMaterial({color:0x888888,side:THREE.DoubleSide,transparent:true,opacity:0.3});
   const netMesh=new THREE.Mesh(netGeom,netMat);
-  netMesh.position.set(0,1.07/2,0);
+  netMesh.position.set(CX,1.07/2,NET_Y);
   _vtScene.add(netMesh);
 
   // Net top line
   const ntGeom=new THREE.BufferGeometry().setFromPoints([
-    new THREE.Vector3(-5.4865,1.07,0),new THREE.Vector3(5.4865,1.07,0)
+    new THREE.Vector3(DX_MIN,1.07,NET_Y),new THREE.Vector3(DX_MAX,1.07,NET_Y)
   ]);
   _vtScene.add(new THREE.Line(ntGeom,new THREE.LineBasicMaterial({color:0x333333})));
 
   // Net posts
   const ppGeom=new THREE.BufferGeometry();
   ppGeom.setAttribute('position',new THREE.Float32BufferAttribute([
-    -5.4865,0,0, -5.4865,1.07,0, 5.4865,0,0, 5.4865,1.07,0
+    DX_MIN,0,NET_Y, DX_MIN,1.07,NET_Y, DX_MAX,0,NET_Y, DX_MAX,1.07,NET_Y
   ],3));
   _vtScene.add(new THREE.LineSegments(ppGeom,new THREE.LineBasicMaterial({color:0x666666})));
 
   // Grid
   const grid=new THREE.GridHelper(30,30,0x333333,0x222222);
-  grid.position.y=-0.02;
+  grid.position.set(CX,-0.02,CL/2);
   _vtScene.add(grid);
+
+  // Camera position markers (from config.yaml)
+  // cam66: [4.094, -5.21, 6.2], cam68: [4.115, 28.97, 5.2]
+  const camGeom=new THREE.ConeGeometry(0.3,0.6,4);
+  const cam66Mat=new THREE.MeshBasicMaterial({color:0x4f88fa});
+  const cam66Mesh=new THREE.Mesh(camGeom,cam66Mat);
+  cam66Mesh.position.set(4.094,6.2,-5.21);
+  cam66Mesh.rotation.x=Math.PI;
+  _vtScene.add(cam66Mesh);
+
+  const cam68Mat=new THREE.MeshBasicMaterial({color:0xfa4e4e});
+  const cam68Mesh=new THREE.Mesh(camGeom.clone(),cam68Mat);
+  cam68Mesh.position.set(4.115,5.2,28.97);
+  cam68Mesh.rotation.x=Math.PI;
+  _vtScene.add(cam68Mesh);
+
+  // Camera labels
+  function makeCamLabel(text,color,pos){
+    const c=document.createElement('canvas');
+    c.width=128;c.height=32;
+    const ctx=c.getContext('2d');
+    ctx.fillStyle=color;ctx.font='bold 20px Lato';
+    ctx.fillText(text,4,22);
+    const tex=new THREE.CanvasTexture(c);
+    const mat=new THREE.SpriteMaterial({map:tex,transparent:true});
+    const sprite=new THREE.Sprite(mat);
+    sprite.position.copy(pos);
+    sprite.position.y+=0.8;
+    sprite.scale.set(2,0.5,1);
+    return sprite;
+  }
+  _vtScene.add(makeCamLabel('cam66','#4f88fa',new THREE.Vector3(4.094,6.2,-5.21)));
+  _vtScene.add(makeCamLabel('cam68','#fa4e4e',new THREE.Vector3(4.115,5.2,28.97)));
 
   // Ball group
   _vt3dBallGroup=new THREE.Group();
@@ -1075,7 +1125,15 @@ function vtOnViewSelect(viewNum){
   const sel=document.getElementById('vt-view'+viewNum+'-video');
   const filename=sel.value;
   if(!filename) return;
-  vtPreviewVideo(filename);
+  // Save current view's slider state before switching
+  vtSaveActiveViewRange();
+  // Reset range for this view if user picked a different video
+  const prevFilename=_vtViewRanges[viewNum].filename||'';
+  if(prevFilename!==filename){
+    _vtViewRanges[viewNum]={start:0,end:1,duration:0,configured:false,filename:filename};
+  }
+  _vtActiveView=viewNum;
+  vtPreviewVideo(filename, viewNum);
   vtUpdateRunButton();
 }
 
@@ -1085,7 +1143,22 @@ function vtUpdateRunButton(){
   document.getElementById('vt-run-btn').disabled=!(v1&&v2);
 }
 
-function vtPreviewVideo(filename){
+function vtSaveActiveViewRange(){
+  if(_vtActiveView && _vtViewRanges[_vtActiveView]){
+    _vtViewRanges[_vtActiveView].start=_vtClipStart;
+    _vtViewRanges[_vtActiveView].end=_vtClipEnd;
+    _vtViewRanges[_vtActiveView].duration=_vtDuration;
+  }
+}
+
+// Get anchor clip duration (seconds) from View 1
+function vtGetAnchorClipSec(){
+  const vr1=_vtViewRanges[1];
+  if(!vr1.configured) return 0;
+  return (vr1.end-vr1.start)*vr1.duration;
+}
+
+function vtPreviewVideo(filename, viewNum){
   const video=document.getElementById('vt-video');
   const placeholder=document.getElementById('vt-placeholder');
   const stream=document.getElementById('vt-stream');
@@ -1098,18 +1171,69 @@ function vtPreviewVideo(filename){
   bar.style.display='flex';
   rangeSection.style.display='block';
 
-  video.src='/api/video-preview/frame?filename='+encodeURIComponent(filename)+'&time=0';
-  document.getElementById('vt-video-name').textContent=filename;
-
   const info=_vtVideos.find(v=>v.filename===filename);
+  const vr=viewNum?_vtViewRanges[viewNum]:null;
+
   if(info){
     document.getElementById('vt-resolution').textContent=
       (info.width?info.width+'x'+info.height:'')+(info.fps?' @ '+info.fps+'fps':'');
-    _vtDuration=info.duration||0;
-    _vtClipStart=0;
-    _vtClipEnd=1;
+    const dur=info.duration||0;
+
+    if(vr && vr.configured){
+      // Restore previously saved range for this view
+      _vtDuration=vr.duration;
+      _vtClipStart=vr.start;
+      _vtClipEnd=vr.end;
+    } else {
+      // First time viewing this video in this slot
+      _vtDuration=dur;
+      _vtClipStart=0;
+      if(viewNum===2){
+        // View 2: auto-compute end from anchor duration
+        const anchorSec=vtGetAnchorClipSec();
+        _vtClipEnd=(anchorSec>0&&dur>0)?Math.min(anchorSec/dur,1):1;
+      } else {
+        _vtClipEnd=1;
+      }
+      if(vr){
+        vr.duration=dur;
+        vr.start=_vtClipStart;
+        vr.end=_vtClipEnd;
+        vr.configured=true;
+        vr.filename=filename;
+      }
+    }
     vtUpdateSlider();
   }
+
+  // Update active view label & slider mode
+  const viewLabel=document.getElementById('vt-active-view-label');
+  const anchorHint=document.getElementById('vt-anchor-hint');
+  const handleEndEl=document.getElementById('vt-handle-end');
+  if(viewNum){
+    const camName=viewNum===1?'cam66':'cam68';
+    const modeHint=viewNum===1?'Select clip range (anchor)':'Set start position';
+    viewLabel.textContent='View '+viewNum+' ('+camName+') — '+modeHint;
+    viewLabel.style.display='inline';
+    // View 2: hide end handle, show anchor duration hint
+    handleEndEl.style.display=(viewNum===2)?'none':'block';
+    if(viewNum===2){
+      const anchorSec=vtGetAnchorClipSec();
+      anchorHint.textContent=anchorSec>0?'Clip: '+vtFormatTime(anchorSec)+' (from View 1)':'Set View 1 range first';
+      anchorHint.style.display='inline';
+    } else {
+      anchorHint.style.display='none';
+    }
+  } else {
+    viewLabel.style.display='none';
+    anchorHint.style.display='none';
+    handleEndEl.style.display='block';
+  }
+
+  // Show frame at clip start position
+  const t=_vtClipStart*_vtDuration;
+  video.src='/api/video-preview/frame?filename='+encodeURIComponent(filename)+'&time='+t;
+  document.getElementById('vt-video-name').textContent=filename;
 }
 
 async function vtDeleteVideo(filename){
@@ -1117,8 +1241,8 @@ async function vtDeleteVideo(filename){
     await fetch('/api/uploaded-video/'+filename,{method:'DELETE'});
     const d1=document.getElementById('vt-view1-video');
     const d2=document.getElementById('vt-view2-video');
-    if(d1.value===filename) d1.value='';
-    if(d2.value===filename) d2.value='';
+    if(d1.value===filename){d1.value='';_vtViewRanges[1]={start:0,end:1,duration:0,configured:false,filename:''};}
+    if(d2.value===filename){d2.value='';_vtViewRanges[2]={start:0,end:1,duration:0,configured:false,filename:''};}
     vtUpdateRunButton();
     vtLoadVideoList();
   }catch(e){console.error(e)}
@@ -1143,18 +1267,32 @@ function vtOnDrag(clientX){
   const rect=rangeTrack.getBoundingClientRect();
   let pct=(clientX-rect.left)/rect.width;
   pct=Math.max(0,Math.min(1,pct));
-  if(_vtDragging==='start'){
-    _vtClipStart=Math.min(pct,_vtClipEnd-0.005);
+
+  if(_vtActiveView===2){
+    // View 2: only move start handle; end is auto-computed from anchor duration
+    _vtClipStart=pct;
+    const anchorSec=vtGetAnchorClipSec();
+    if(anchorSec>0&&_vtDuration>0){
+      _vtClipEnd=Math.min(_vtClipStart+anchorSec/_vtDuration,1);
+    } else {
+      _vtClipEnd=Math.min(_vtClipStart+0.1,1);
+    }
   } else {
-    _vtClipEnd=Math.max(pct,_vtClipStart+0.005);
+    // View 1 (anchor): normal dual-handle behavior
+    if(_vtDragging==='start'){
+      _vtClipStart=Math.min(pct,_vtClipEnd-0.005);
+    } else {
+      _vtClipEnd=Math.max(pct,_vtClipStart+0.005);
+    }
   }
   vtUpdateSlider();
   // Fetch preview frame at dragged position
-  const v1=document.getElementById('vt-view1-video').value;
-  if(v1){
-    const t=(_vtDragging==='start'?_vtClipStart:_vtClipEnd)*_vtDuration;
+  const activeFilename=_vtActiveView?
+    document.getElementById('vt-view'+_vtActiveView+'-video').value:null;
+  if(activeFilename){
+    const t=_vtClipStart*_vtDuration;
     document.getElementById('vt-video').src=
-      '/api/video-preview/frame?filename='+encodeURIComponent(v1)+'&time='+t;
+      '/api/video-preview/frame?filename='+encodeURIComponent(activeFilename)+'&time='+t;
   }
 }
 
@@ -1192,6 +1330,9 @@ async function vtToggleRun(){
   const vid2=document.getElementById('vt-view2-video').value;
   if(!vid1||!vid2) return;
 
+  // Save current slider state so we have up-to-date ranges
+  vtSaveActiveViewRange();
+
   vtStartUI();
 
   // Clear all previous detections
@@ -1204,18 +1345,20 @@ async function vtToggleRun(){
   vtUpdate3DBalls([]);
   vtRender3DTable();
 
-  // Phase 1: Process cam66 video
+  // Phase 1: Process cam66 video (using View 1 range)
   _vtPhase='cam66';
   document.getElementById('vt-phase-label').textContent='Processing cam66 (View 1)...';
   document.getElementById('vt-progress-fill').style.width='0%';
-  const ok1=await vtRunSingleVideo(vid1,'cam66');
+  const range1=_vtViewRanges[1];
+  const ok1=await vtRunSingleVideo(vid1,'cam66',range1);
   if(!_vtRunning) return;
 
-  // Phase 2: Process cam68 video
+  // Phase 2: Process cam68 video (using View 2 range)
   _vtPhase='cam68';
   document.getElementById('vt-phase-label').textContent='Processing cam68 (View 2)...';
   document.getElementById('vt-progress-fill').style.width='0%';
-  const ok2=await vtRunSingleVideo(vid2,'cam68');
+  const range2=_vtViewRanges[2];
+  const ok2=await vtRunSingleVideo(vid2,'cam68',range2);
   if(!_vtRunning) return;
 
   // Phase 3: Compute 3D
@@ -1241,10 +1384,10 @@ async function vtToggleRun(){
     'Done: '+_vt3dPoints.length+' 3D points computed';
 }
 
-function vtRunSingleVideo(filename,camera){
+function vtRunSingleVideo(filename,camera,range){
   return new Promise(async(resolve)=>{
-    const startTime=_vtClipStart*_vtDuration;
-    const endTime=_vtClipEnd*_vtDuration;
+    const startTime=range.start*range.duration;
+    const endTime=range.end*range.duration;
 
     try{
       const r=await fetch('/api/video-test/run',{
@@ -1349,7 +1492,9 @@ function vtSeekTo3D(index){
   if(vid1&&pt.cam1_pixel){
     const info=_vtVideos.find(v=>v.filename===vid1);
     const fps=(info&&info.fps)?info.fps:30;
-    const t=pt.frame_index/fps;
+    // frame_index is relative to clip start, add View 1's clip start time
+    const clipStartSec=_vtViewRanges[1].start*_vtViewRanges[1].duration;
+    const t=clipStartSec + pt.frame_index/fps;
     const video=document.getElementById('vt-video');
     video.src='/api/video-preview/frame?filename='+encodeURIComponent(vid1)
       +'&time='+t+'&pixel_x='+pt.cam1_pixel[0]+'&pixel_y='+pt.cam1_pixel[1];

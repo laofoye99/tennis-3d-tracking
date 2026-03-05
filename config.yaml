@@ -1,11 +1,11 @@
 cameras:
   cam66:
     rtsp_url: "rtsp://admin:motion168@192.168.1.66:554/Streaming/Channels/101"
-    position_3d: [4.094, -5.21, 6.2]  # TODO: 用户提供实际坐标
+    position_3d: [4.094, -5.21, 6.2]
     homography_key: "cam66"
   cam68:
     rtsp_url: "rtsp://admin:motion168@192.168.1.68:554/Streaming/Channels/101"
-    position_3d: [4.115, 28.97, 5.2]  # TODO: 用户提供实际坐标
+    position_3d: [4.115, 28.97, 5.2]
     homography_key: "cam68"
 
 model:
