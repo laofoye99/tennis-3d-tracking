@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+
+# Model weights (large binary)
+model_weight/
+
+# Recordings (large video files)
+recordings/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Claude
+.claude/
+
+# Test output
+image_test/test_result.jpg
