@@ -243,8 +243,16 @@ async def delete_uploaded_video(filename: str):
 # ---- Video Frame Preview (codec-agnostic) ----
 
 @router.get("/api/video-preview/frame")
-async def video_preview_frame(filename: str, time: float = 0):
-    """Return a JPEG frame at the given timestamp using OpenCV (supports H.265)."""
+async def video_preview_frame(
+    filename: str,
+    time: float = 0,
+    pixel_x: float | None = None,
+    pixel_y: float | None = None,
+):
+    """Return a JPEG frame at the given timestamp using OpenCV (supports H.265).
+
+    Optionally draws a ball marker at (pixel_x, pixel_y) if both are provided.
+    """
     fpath = _UPLOAD_DIR / filename
     if not fpath.exists():
         raise HTTPException(404, f"File not found: {filename}")
@@ -262,6 +270,12 @@ async def video_preview_frame(filename: str, time: float = 0):
 
     if not ret or frame is None:
         raise HTTPException(400, "Cannot read frame at given time")
+
+    # Draw ball marker if coordinates provided
+    if pixel_x is not None and pixel_y is not None:
+        cx, cy = int(round(pixel_x)), int(round(pixel_y))
+        cv2.circle(frame, (cx, cy), 14, (0, 255, 0), 2)
+        cv2.circle(frame, (cx, cy), 4, (0, 255, 0), -1)
 
     _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
     return StreamingResponse(
@@ -315,3 +329,11 @@ async def video_test_status():
     """Get video test pipeline status."""
     orch = _get_orch()
     return orch.get_video_test_status()
+
+
+@router.get("/api/video-test/detections")
+async def video_test_detections():
+    """Return all detection results from the current/last video test run."""
+    orch = _get_orch()
+    detections = orch.get_video_test_detections()
+    return {"detections": detections, "count": len(detections)}

@@ -197,6 +197,18 @@ body{font-family:'Lato',sans-serif;background:var(--bg);color:var(--text);height
 .btn-start-sm:hover{background:#1fa85a}
 .btn-stop-sm{background:var(--cam-red);color:#fff}
 .btn-stop-sm:hover{background:#d43d3d}
+
+/* Detection table */
+.det-split{display:flex;flex-direction:row;height:100%;overflow:hidden}
+.det-split .det-map{flex-shrink:0;width:280px;display:flex;flex-direction:column}
+.det-split .det-table-wrap{flex:1;display:flex;flex-direction:column;min-width:0;border-left:1px solid rgba(255,255,255,.06)}
+#vt-det-table-wrap{flex:1;overflow-y:auto;font-size:10px}
+#vt-det-table-wrap table{width:100%;border-collapse:collapse}
+#vt-det-table-wrap th{position:sticky;top:0;background:var(--card-bg);z-index:1;padding:3px 6px;font-weight:600;color:var(--text-muted);font-size:9px}
+#vt-det-table-wrap td{padding:3px 6px;white-space:nowrap}
+#vt-det-table-wrap tbody tr{cursor:pointer;transition:background .1s}
+#vt-det-table-wrap tbody tr:hover{background:rgba(95,177,223,.1)}
+#vt-det-table-wrap tbody tr.active{background:rgba(95,177,223,.2)}
 </style>
 </head>
 <body>
@@ -468,9 +480,36 @@ body{font-family:'Lato',sans-serif;background:var(--bg);color:var(--text);height
 
         <!-- Right bottom: Detection results -->
         <div class="map3d-panel">
-          <div class="panel-title">Detection Results</div>
-          <div class="map3d-canvas">
-            <canvas id="vt-minimap" width="440" height="220"></canvas>
+          <div class="det-split">
+            <!-- Mini map -->
+            <div class="det-map">
+              <div class="panel-title">Court Map</div>
+              <div class="map3d-canvas">
+                <canvas id="vt-minimap" width="440" height="220"></canvas>
+              </div>
+            </div>
+            <!-- Detection table -->
+            <div class="det-table-wrap">
+              <div class="panel-title" style="display:flex;justify-content:space-between;align-items:center">
+                <span>Detections</span>
+                <span id="vt-det-count" style="font-size:9px;color:var(--text-muted)">0 results</span>
+              </div>
+              <div id="vt-det-table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th style="text-align:left">Frame</th>
+                      <th style="text-align:right">World X</th>
+                      <th style="text-align:right">World Y</th>
+                      <th style="text-align:right">Px X</th>
+                      <th style="text-align:right">Px Y</th>
+                      <th style="text-align:right">Conf</th>
+                    </tr>
+                  </thead>
+                  <tbody id="vt-det-tbody"></tbody>
+                </table>
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -798,6 +837,8 @@ let _vtDuration=0;          // video duration in seconds
 let _vtDragging=null;       // 'start'|'end'|null
 let _vtRunning=false;       // is test running
 let _vtPollTimer=null;
+let _vtDetections=[];       // accumulated detection results
+let _vtDetPollTimer=null;   // detection polling timer
 
 // ---- Upload ----
 const uploadArea=document.getElementById('upload-area');
@@ -1006,6 +1047,11 @@ function vtStartUI(){
   stream.src='/api/camera/_video_test/stream';
   stream.style.display='block';
 
+  // Clear and start polling detections
+  _vtDetections=[];
+  vtRenderDetectionTable();
+  _vtDetPollTimer=setInterval(vtPollDetections,1000);
+
   // Start polling status
   _vtPollTimer=setInterval(vtPollStatus,500);
 }
@@ -1018,6 +1064,7 @@ function vtStopUI(){
   btn.querySelector('svg').innerHTML='<path d="M8 5v14l11-7z"/>';
 
   if(_vtPollTimer){clearInterval(_vtPollTimer);_vtPollTimer=null}
+  if(_vtDetPollTimer){clearInterval(_vtDetPollTimer);_vtDetPollTimer=null}
 
   // Switch back to video preview
   const video=document.getElementById('vt-video');
@@ -1055,6 +1102,8 @@ async function vtPollStatus(){
         document.getElementById('vt-progress').style.display='block';
         document.getElementById('vt-state-badge').className='state-badge completed';
         document.getElementById('vt-state-badge').textContent='completed';
+        // Final fetch to get all detections
+        vtPollDetections();
       }
     }
   }catch(e){console.error(e)}
@@ -1092,6 +1141,60 @@ function vtDrawMinimap(ballX,ballY){
     ctx.fillStyle='#fff';ctx.font='bold 10px Lato';
     ctx.fillText(`(${ballX.toFixed(1)}, ${ballY.toFixed(1)})`,bx+10,by-4);
   }
+}
+
+// ---- Detection Table ----
+async function vtPollDetections(){
+  try{
+    const r=await fetch('/api/video-test/detections');
+    const d=await r.json();
+    _vtDetections=d.detections||[];
+    vtRenderDetectionTable();
+  }catch(e){console.error(e)}
+}
+
+function vtRenderDetectionTable(){
+  const tbody=document.getElementById('vt-det-tbody');
+  const countEl=document.getElementById('vt-det-count');
+  countEl.textContent=_vtDetections.length+' results';
+  tbody.innerHTML=_vtDetections.map((det,i)=>{
+    return `<tr onclick="vtSeekToDetection(${i})" data-idx="${i}">
+      <td style="text-align:left">${det.frame_index}</td>
+      <td style="text-align:right">${det.x.toFixed(2)}</td>
+      <td style="text-align:right">${det.y.toFixed(2)}</td>
+      <td style="text-align:right">${det.pixel_x.toFixed(1)}</td>
+      <td style="text-align:right">${det.pixel_y.toFixed(1)}</td>
+      <td style="text-align:right">${det.confidence.toFixed(3)}</td>
+    </tr>`;
+  }).join('');
+}
+
+function vtSeekToDetection(index){
+  if(_vtRunning) return; // Don't seek while processing
+  const det=_vtDetections[index];
+  if(!det||!_vtSelected) return;
+
+  // Highlight active row
+  document.querySelectorAll('#vt-det-tbody tr').forEach(tr=>tr.classList.remove('active'));
+  const row=document.querySelector(`#vt-det-tbody tr[data-idx="${index}"]`);
+  if(row) row.classList.add('active');
+
+  // Compute time from frame_index
+  const info=_vtVideos.find(v=>v.filename===_vtSelected);
+  const fps=(info&&info.fps)?info.fps:30;
+  const t=det.frame_index/fps;
+
+  // Show frame with ball marker
+  const video=document.getElementById('vt-video');
+  const stream=document.getElementById('vt-stream');
+  stream.style.display='none';
+  stream.src='';
+  video.style.display='block';
+  video.src='/api/video-preview/frame?filename='+encodeURIComponent(_vtSelected)
+    +'&time='+t+'&pixel_x='+det.pixel_x+'&pixel_y='+det.pixel_y;
+
+  // Update minimap
+  vtDrawMinimap(det.x,det.y);
 }
 
 // Init video test minimap

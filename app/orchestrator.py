@@ -66,6 +66,7 @@ class Orchestrator:
 
         # Video test
         self._video_test_handle: Optional[_PipelineHandle] = None
+        self._video_test_detections: list[dict] = []
 
     def start_pipeline(self, name: str) -> None:
         if name not in self._handles:
@@ -165,6 +166,8 @@ class Orchestrator:
                         while not handle.result_queue.empty():
                             det = handle.result_queue.get_nowait()
                             self._latest_detections[name] = det
+                            if name == "_video_test":
+                                self._video_test_detections.append(det)
                             got_any = True
                     except Exception:
                         pass
@@ -339,6 +342,8 @@ class Orchestrator:
         if self._video_test_handle is not None and self._video_test_handle.is_alive():
             self.stop_video_test()
 
+        self._video_test_detections.clear()
+
         cam_cfg = self.config.cameras.get(camera_name)
         if cam_cfg is None:
             raise ValueError(f"Unknown camera: {camera_name}")
@@ -414,6 +419,10 @@ class Orchestrator:
         self._video_test_handle = None
         logger.info("[video-test] Stopped")
         return {"status": "stopped"}
+
+    def get_video_test_detections(self) -> list[dict]:
+        """Return all accumulated video test detections."""
+        return list(self._video_test_detections)
 
     def get_video_test_status(self) -> dict:
         """Get video test pipeline status."""
