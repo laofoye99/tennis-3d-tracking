@@ -227,6 +227,16 @@ body{font-family:'Lato',sans-serif;background:var(--bg);color:var(--text);height
 .pb-frame-info{font-size:10px;color:var(--text-muted);white-space:nowrap;min-width:80px;text-align:center}
 .pb-speed-select{background:var(--card-bg);color:var(--text);border:1px solid rgba(255,255,255,.15);border-radius:4px;padding:2px 6px;font-size:10px;font-family:'Lato',sans-serif;cursor:pointer;outline:none}
 .pb-speed-select option{background:var(--card-bg);color:var(--text)}
+
+/* ---- Dual Video Preview (clip selection mode) ---- */
+.dual-preview{display:flex;gap:4px;width:100%;height:100%}
+.dual-preview-col{flex:1;display:flex;flex-direction:column;min-width:0}
+.dual-preview-video{flex:1;position:relative;background:#000;min-height:0;overflow:hidden}
+.dual-preview-video img{width:100%;height:100%;object-fit:contain;display:block;background:#000}
+.dual-preview-label{position:absolute;top:6px;left:8px;font-size:9px;font-weight:700;background:rgba(0,0,0,.65);color:#fff;padding:2px 8px;border-radius:3px;pointer-events:none;z-index:1}
+.dual-preview-col .range-slider-section{padding:6px 10px 8px}
+.dual-preview-col .range-times{gap:8px}
+.dual-preview-col .range-time-item{font-size:9px}
 </style>
 </head>
 <body>
@@ -465,11 +475,65 @@ body{font-family:'Lato',sans-serif;background:var(--bg);color:var(--text);height
 
         <!-- Right top: Video player -->
         <div class="video-panel vt-panel">
-          <!-- Normal mode: single preview -->
-          <div class="vt-player-area" id="vt-player-area">
+          <!-- Dual video preview (clip selection mode) -->
+          <div id="vt-dual-preview" style="flex:1;min-height:0;overflow:hidden;display:flex;flex-direction:column">
+            <div class="dual-preview" style="flex:1;min-height:0">
+              <!-- View 1 (cam66) -->
+              <div class="dual-preview-col">
+                <div class="dual-preview-video">
+                  <div class="dual-preview-label" style="color:#4f88fa">cam66 (View 1)</div>
+                  <img id="vt-preview-cam1" alt="cam66 preview" style="display:none">
+                  <div class="vid-empty" id="vt-preview-ph1">Select video for View 1</div>
+                </div>
+                <div class="range-slider-section" id="vt-range-section-1" style="display:none">
+                  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:3px">
+                    <span style="font-size:10px;color:#4f88fa;font-weight:600">Anchor — set clip range</span>
+                  </div>
+                  <div class="range-slider" id="vt-range-slider-1">
+                    <div class="range-track" id="vt-range-track-1"></div>
+                    <div class="range-selected" id="vt-range-selected-1"></div>
+                    <div class="range-handle" id="vt-handle-start-1" style="left:0%"></div>
+                    <div class="range-handle" id="vt-handle-end-1" style="left:100%"></div>
+                  </div>
+                  <div class="range-times">
+                    <div class="range-time-item">Start: <span id="vt-start-time-1">00:00</span></div>
+                    <div class="range-time-item">End: <span id="vt-end-time-1">00:00</span></div>
+                    <div class="range-time-item">Clip: <span id="vt-clip-duration-1">00:00</span></div>
+                  </div>
+                </div>
+              </div>
+              <!-- View 2 (cam68) -->
+              <div class="dual-preview-col">
+                <div class="dual-preview-video">
+                  <div class="dual-preview-label" style="color:#fa4e4e">cam68 (View 2)</div>
+                  <img id="vt-preview-cam2" alt="cam68 preview" style="display:none">
+                  <div class="vid-empty" id="vt-preview-ph2">Select video for View 2</div>
+                </div>
+                <div class="range-slider-section" id="vt-range-section-2" style="display:none">
+                  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:3px">
+                    <span style="font-size:10px;color:#fa4e4e;font-weight:600">Set start position</span>
+                    <span id="vt-anchor-hint-2" style="font-size:9px;color:var(--text-muted)"></span>
+                  </div>
+                  <div class="range-slider" id="vt-range-slider-2">
+                    <div class="range-track" id="vt-range-track-2"></div>
+                    <div class="range-selected" id="vt-range-selected-2"></div>
+                    <div class="range-handle" id="vt-handle-start-2" style="left:0%"></div>
+                    <div class="range-handle" id="vt-handle-end-2" style="left:100%;display:none"></div>
+                  </div>
+                  <div class="range-times">
+                    <div class="range-time-item">Start: <span id="vt-start-time-2">00:00</span></div>
+                    <div class="range-time-item">End: <span id="vt-end-time-2">00:00</span></div>
+                    <div class="range-time-item">Clip: <span id="vt-clip-duration-2">00:00</span></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <!-- Processing mode: MJPEG stream player (hidden by default) -->
+          <div class="vt-player-area" id="vt-player-area" style="display:none">
             <img id="vt-video" style="display:none" alt="Video preview">
             <img id="vt-stream" style="display:none" alt="Processing stream">
-            <div class="vid-empty" id="vt-placeholder">Select videos for both views</div>
+            <div class="vid-empty" id="vt-placeholder">Processing...</div>
             <div class="video-bar" id="vt-video-bar" style="display:none">
               <div class="video-bar-left">
                 <div class="tag">
@@ -493,25 +557,6 @@ body{font-family:'Lato',sans-serif;background:var(--bg);color:var(--text);height
                 <div class="playback-cam-label">cam68 (View 2)</div>
                 <img id="vt-play-cam2" alt="cam68 frame">
               </div>
-            </div>
-          </div>
-          <!-- Range slider (normal mode) -->
-          <div class="range-slider-section" id="vt-range-section" style="display:none">
-            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
-              <span id="vt-active-view-label" style="font-size:11px;color:var(--accent);font-weight:600;display:none">View 1 (cam66)</span>
-              <span id="vt-anchor-hint" style="font-size:9px;color:var(--text-muted);display:none"></span>
-            </div>
-            <div class="range-slider" id="vt-range-slider">
-              <div class="range-track" id="vt-range-track"></div>
-              <div class="range-selected" id="vt-range-selected"></div>
-              <div class="range-handle" id="vt-handle-start" style="left:0%"></div>
-              <div class="range-handle" id="vt-handle-end" style="left:100%"></div>
-            </div>
-            <div class="range-times">
-              <div class="range-time-item">Start: <span id="vt-start-time">00:00</span></div>
-              <div class="range-time-item">End: <span id="vt-end-time">00:00</span></div>
-              <div class="range-time-item">Clip: <span id="vt-clip-duration">00:00</span></div>
-              <div class="range-time-item">Total: <span id="vt-total-duration">00:00</span></div>
             </div>
           </div>
           <!-- Playback controls (playback mode) -->
@@ -891,17 +936,14 @@ function switchPage(page){
 // Video Test JS
 // ============================================================
 let _vtVideos=[];
-let _vtClipStart=0;
-let _vtClipEnd=1;
-let _vtDuration=0;
-let _vtDragging=null;
 let _vtRunning=false;
 let _vtPhase='idle'; // 'idle'|'cam66'|'cam68'|'3d'|'done'
 let _vt3dPoints=[];  // computed 3D points
 // Per-view clip ranges: View1=anchor (start+end), View2=start only (duration from View1)
 let _vtViewRanges={1:{start:0,end:1,duration:0,configured:false,filename:''},
                    2:{start:0,end:1,duration:0,configured:false,filename:''}};
-let _vtActiveView=null;  // which view (1 or 2) is currently shown
+// Dual slider drag state: {view:1|2, handle:'start'|'end'} or null
+let _vtDraggingView=null;
 
 // Playback state
 let _vtPlaybackMode=false;
@@ -1166,7 +1208,7 @@ function vtRenderVideoList(){
   list.innerHTML=_vtVideos.map(v=>{
     const dur=v.duration?vtFormatTime(v.duration):'--:--';
     const res=v.width?v.width+'x'+v.height:'';
-    return `<div class="video-item" onclick="vtPreviewVideo('${v.filename}')">
+    return `<div class="video-item">
       <svg class="vi-icon" viewBox="0 0 24 24"><path d="M18 4l2 4h-3l-2-4h-2l2 4h-3l-2-4H8l2 4H7L5 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V4h-4z"/></svg>
       <div class="vi-info">
         <span class="vi-name">${v.filename}</span>
@@ -1195,16 +1237,25 @@ function vtPopulateDropdowns(){
 function vtOnViewSelect(viewNum){
   const sel=document.getElementById('vt-view'+viewNum+'-video');
   const filename=sel.value;
-  if(!filename) return;
-  // Save current view's slider state before switching
-  vtSaveActiveViewRange();
-  // Reset range for this view if user picked a different video
+
+  if(!filename){
+    // No video selected: show placeholder, hide slider
+    document.getElementById('vt-preview-cam'+viewNum).style.display='none';
+    document.getElementById('vt-preview-ph'+viewNum).style.display='flex';
+    document.getElementById('vt-range-section-'+viewNum).style.display='none';
+    _vtViewRanges[viewNum]={start:0,end:1,duration:0,configured:false,filename:''};
+    vtUpdateRunButton();
+    return;
+  }
+
+  // Reset range if different video
   const prevFilename=_vtViewRanges[viewNum].filename||'';
   if(prevFilename!==filename){
     _vtViewRanges[viewNum]={start:0,end:1,duration:0,configured:false,filename:filename};
   }
-  _vtActiveView=viewNum;
-  vtPreviewVideo(filename, viewNum);
+
+  // Load preview into the corresponding panel
+  vtLoadViewPreview(viewNum, filename);
   vtUpdateRunButton();
 }
 
@@ -1214,14 +1265,6 @@ function vtUpdateRunButton(){
   document.getElementById('vt-run-btn').disabled=!(v1&&v2);
 }
 
-function vtSaveActiveViewRange(){
-  if(_vtActiveView && _vtViewRanges[_vtActiveView]){
-    _vtViewRanges[_vtActiveView].start=_vtClipStart;
-    _vtViewRanges[_vtActiveView].end=_vtClipEnd;
-    _vtViewRanges[_vtActiveView].duration=_vtDuration;
-  }
-}
-
 // Get anchor clip duration (seconds) from View 1
 function vtGetAnchorClipSec(){
   const vr1=_vtViewRanges[1];
@@ -1229,82 +1272,90 @@ function vtGetAnchorClipSec(){
   return (vr1.end-vr1.start)*vr1.duration;
 }
 
-function vtPreviewVideo(filename, viewNum){
-  const video=document.getElementById('vt-video');
-  const placeholder=document.getElementById('vt-placeholder');
-  const stream=document.getElementById('vt-stream');
-  const bar=document.getElementById('vt-video-bar');
-  const rangeSection=document.getElementById('vt-range-section');
-
-  placeholder.style.display='none';
-  stream.style.display='none';
-  video.style.display='block';
-  bar.style.display='flex';
-  rangeSection.style.display='block';
-
+function vtLoadViewPreview(viewNum, filename){
   const info=_vtVideos.find(v=>v.filename===filename);
-  const vr=viewNum?_vtViewRanges[viewNum]:null;
+  const vr=_vtViewRanges[viewNum];
 
-  if(info){
-    document.getElementById('vt-resolution').textContent=
-      (info.width?info.width+'x'+info.height:'')+(info.fps?' @ '+info.fps+'fps':'');
-    const dur=info.duration||0;
+  if(!info) return;
+  const dur=info.duration||0;
 
-    if(vr && vr.configured){
-      // Restore previously saved range for this view
-      _vtDuration=vr.duration;
-      _vtClipStart=vr.start;
-      _vtClipEnd=vr.end;
-    } else {
-      // First time viewing this video in this slot
-      _vtDuration=dur;
-      _vtClipStart=0;
-      if(viewNum===2){
-        // View 2: auto-compute end from anchor duration
-        const anchorSec=vtGetAnchorClipSec();
-        _vtClipEnd=(anchorSec>0&&dur>0)?Math.min(anchorSec/dur,1):1;
-      } else {
-        _vtClipEnd=1;
-      }
-      if(vr){
-        vr.duration=dur;
-        vr.start=_vtClipStart;
-        vr.end=_vtClipEnd;
-        vr.configured=true;
-        vr.filename=filename;
-      }
-    }
-    vtUpdateSlider();
-  }
-
-  // Update active view label & slider mode
-  const viewLabel=document.getElementById('vt-active-view-label');
-  const anchorHint=document.getElementById('vt-anchor-hint');
-  const handleEndEl=document.getElementById('vt-handle-end');
-  if(viewNum){
-    const camName=viewNum===1?'cam66':'cam68';
-    const modeHint=viewNum===1?'Select clip range (anchor)':'Set start position';
-    viewLabel.textContent='View '+viewNum+' ('+camName+') — '+modeHint;
-    viewLabel.style.display='inline';
-    // View 2: hide end handle, show anchor duration hint
-    handleEndEl.style.display=(viewNum===2)?'none':'block';
+  if(!vr.configured){
+    vr.duration=dur;
+    vr.start=0;
     if(viewNum===2){
       const anchorSec=vtGetAnchorClipSec();
-      anchorHint.textContent=anchorSec>0?'Clip: '+vtFormatTime(anchorSec)+' (from View 1)':'Set View 1 range first';
-      anchorHint.style.display='inline';
+      vr.end=(anchorSec>0&&dur>0)?Math.min(anchorSec/dur,1):1;
     } else {
-      anchorHint.style.display='none';
+      vr.end=1;
     }
-  } else {
-    viewLabel.style.display='none';
-    anchorHint.style.display='none';
-    handleEndEl.style.display='block';
+    vr.configured=true;
+    vr.filename=filename;
   }
 
+  // Show preview image, hide placeholder
+  const imgEl=document.getElementById('vt-preview-cam'+viewNum);
+  const phEl=document.getElementById('vt-preview-ph'+viewNum);
+  imgEl.style.display='block';
+  phEl.style.display='none';
+
+  // Show range slider
+  document.getElementById('vt-range-section-'+viewNum).style.display='block';
+
+  // View 2: update anchor hint
+  if(viewNum===2){
+    const anchorSec=vtGetAnchorClipSec();
+    const hint=document.getElementById('vt-anchor-hint-2');
+    if(hint) hint.textContent=anchorSec>0?'Clip: '+vtFormatTime(anchorSec)+' (from View 1)':'Set View 1 range first';
+  }
+
+  // Update slider visuals
+  vtUpdateSliderForView(viewNum);
+
   // Show frame at clip start position
-  const t=_vtClipStart*_vtDuration;
-  video.src='/api/video-preview/frame?filename='+encodeURIComponent(filename)+'&time='+t;
-  document.getElementById('vt-video-name').textContent=filename;
+  const t=vr.start*vr.duration;
+  imgEl.src='/api/video-preview/frame?filename='+encodeURIComponent(filename)+'&time='+t;
+}
+
+// Sync View 2's end position when View 1 anchor changes
+function vtSyncView2End(){
+  const vr2=_vtViewRanges[2];
+  if(!vr2.configured) return;
+  const anchorSec=vtGetAnchorClipSec();
+  if(anchorSec>0&&vr2.duration>0){
+    vr2.end=Math.min(vr2.start+anchorSec/vr2.duration,1);
+  }
+  const hint=document.getElementById('vt-anchor-hint-2');
+  if(hint) hint.textContent=anchorSec>0?'Clip: '+vtFormatTime(anchorSec)+' (from View 1)':'';
+}
+
+function vtUpdateSliderForView(viewNum){
+  const vr=_vtViewRanges[viewNum];
+  if(!vr.configured) return;
+
+  const hs=document.getElementById('vt-handle-start-'+viewNum);
+  const he=document.getElementById('vt-handle-end-'+viewNum);
+  const sel=document.getElementById('vt-range-selected-'+viewNum);
+
+  hs.style.left=(vr.start*100)+'%';
+  he.style.left=(vr.end*100)+'%';
+  sel.style.left=(vr.start*100)+'%';
+  sel.style.width=((vr.end-vr.start)*100)+'%';
+
+  const st=vr.start*vr.duration;
+  const et=vr.end*vr.duration;
+  document.getElementById('vt-start-time-'+viewNum).textContent=vtFormatTime(st);
+  document.getElementById('vt-end-time-'+viewNum).textContent=vtFormatTime(et);
+  document.getElementById('vt-clip-duration-'+viewNum).textContent=vtFormatTime(et-st);
+}
+
+function vtUpdatePreviewForView(viewNum){
+  const vr=_vtViewRanges[viewNum];
+  if(!vr.configured) return;
+  const filename=document.getElementById('vt-view'+viewNum+'-video').value;
+  if(!filename) return;
+  const t=vr.start*vr.duration;
+  const imgEl=document.getElementById('vt-preview-cam'+viewNum);
+  imgEl.src='/api/video-preview/frame?filename='+encodeURIComponent(filename)+'&time='+t;
 }
 
 async function vtDeleteVideo(filename){
@@ -1312,74 +1363,77 @@ async function vtDeleteVideo(filename){
     await fetch('/api/uploaded-video/'+filename,{method:'DELETE'});
     const d1=document.getElementById('vt-view1-video');
     const d2=document.getElementById('vt-view2-video');
-    if(d1.value===filename){d1.value='';_vtViewRanges[1]={start:0,end:1,duration:0,configured:false,filename:''};}
-    if(d2.value===filename){d2.value='';_vtViewRanges[2]={start:0,end:1,duration:0,configured:false,filename:''};}
+    if(d1.value===filename){
+      d1.value='';
+      _vtViewRanges[1]={start:0,end:1,duration:0,configured:false,filename:''};
+      document.getElementById('vt-preview-cam1').style.display='none';
+      document.getElementById('vt-preview-ph1').style.display='flex';
+      document.getElementById('vt-range-section-1').style.display='none';
+    }
+    if(d2.value===filename){
+      d2.value='';
+      _vtViewRanges[2]={start:0,end:1,duration:0,configured:false,filename:''};
+      document.getElementById('vt-preview-cam2').style.display='none';
+      document.getElementById('vt-preview-ph2').style.display='flex';
+      document.getElementById('vt-range-section-2').style.display='none';
+    }
     vtUpdateRunButton();
     vtLoadVideoList();
   }catch(e){console.error(e)}
 }
 
-// ---- Range Slider ----
-const handleStart=document.getElementById('vt-handle-start');
-const handleEnd=document.getElementById('vt-handle-end');
-const rangeTrack=document.getElementById('vt-range-track');
+// ---- Dual Range Sliders ----
+function vtInitDualSliders(){
+  [1,2].forEach(v=>{
+    const hs=document.getElementById('vt-handle-start-'+v);
+    const he=document.getElementById('vt-handle-end-'+v);
+    hs.addEventListener('mousedown',e=>{_vtDraggingView={view:v,handle:'start'};e.preventDefault()});
+    he.addEventListener('mousedown',e=>{_vtDraggingView={view:v,handle:'end'};e.preventDefault()});
+    hs.addEventListener('touchstart',e=>{_vtDraggingView={view:v,handle:'start'};e.preventDefault()},{passive:false});
+    he.addEventListener('touchstart',e=>{_vtDraggingView={view:v,handle:'end'};e.preventDefault()},{passive:false});
+  });
+  document.addEventListener('mousemove',e=>{if(_vtDraggingView) vtOnDragView(e.clientX)});
+  document.addEventListener('touchmove',e=>{if(_vtDraggingView&&e.touches[0]) vtOnDragView(e.touches[0].clientX)},{passive:false});
+  document.addEventListener('mouseup',()=>{_vtDraggingView=null});
+  document.addEventListener('touchend',()=>{_vtDraggingView=null});
+}
 
-handleStart.addEventListener('mousedown',e=>{_vtDragging='start';e.preventDefault()});
-handleEnd.addEventListener('mousedown',e=>{_vtDragging='end';e.preventDefault()});
-handleStart.addEventListener('touchstart',e=>{_vtDragging='start';e.preventDefault()},{passive:false});
-handleEnd.addEventListener('touchstart',e=>{_vtDragging='end';e.preventDefault()},{passive:false});
-
-document.addEventListener('mousemove',e=>{if(_vtDragging) vtOnDrag(e.clientX)});
-document.addEventListener('touchmove',e=>{if(_vtDragging&&e.touches[0]) vtOnDrag(e.touches[0].clientX)},{passive:false});
-document.addEventListener('mouseup',()=>{_vtDragging=null});
-document.addEventListener('touchend',()=>{_vtDragging=null});
-
-function vtOnDrag(clientX){
-  const rect=rangeTrack.getBoundingClientRect();
+function vtOnDragView(clientX){
+  const v=_vtDraggingView.view;
+  const handle=_vtDraggingView.handle;
+  const track=document.getElementById('vt-range-track-'+v);
+  const rect=track.getBoundingClientRect();
   let pct=(clientX-rect.left)/rect.width;
   pct=Math.max(0,Math.min(1,pct));
 
-  if(_vtActiveView===2){
-    // View 2: only move start handle; end is auto-computed from anchor duration
-    _vtClipStart=pct;
+  const vr=_vtViewRanges[v];
+  if(v===2){
+    // View 2: only start handle moves; end is auto-computed from anchor
+    vr.start=pct;
     const anchorSec=vtGetAnchorClipSec();
-    if(anchorSec>0&&_vtDuration>0){
-      _vtClipEnd=Math.min(_vtClipStart+anchorSec/_vtDuration,1);
+    if(anchorSec>0&&vr.duration>0){
+      vr.end=Math.min(vr.start+anchorSec/vr.duration,1);
     } else {
-      _vtClipEnd=Math.min(_vtClipStart+0.1,1);
+      vr.end=Math.min(vr.start+0.1,1);
     }
   } else {
-    // View 1 (anchor): normal dual-handle behavior
-    if(_vtDragging==='start'){
-      _vtClipStart=Math.min(pct,_vtClipEnd-0.005);
+    // View 1 (anchor): dual-handle behavior
+    if(handle==='start'){
+      vr.start=Math.min(pct,vr.end-0.005);
     } else {
-      _vtClipEnd=Math.max(pct,_vtClipStart+0.005);
+      vr.end=Math.max(pct,vr.start+0.005);
     }
+    // Anchor changed → update View 2 end
+    vtSyncView2End();
   }
-  vtUpdateSlider();
-  // Fetch preview frame at dragged position
-  const activeFilename=_vtActiveView?
-    document.getElementById('vt-view'+_vtActiveView+'-video').value:null;
-  if(activeFilename){
-    const t=_vtClipStart*_vtDuration;
-    document.getElementById('vt-video').src=
-      '/api/video-preview/frame?filename='+encodeURIComponent(activeFilename)+'&time='+t;
+
+  vtUpdateSliderForView(v);
+  vtUpdatePreviewForView(v);
+
+  // If View 1 anchor changed, also update View 2 slider
+  if(v===1){
+    vtUpdateSliderForView(2);
   }
-}
-
-function vtUpdateSlider(){
-  handleStart.style.left=(_vtClipStart*100)+'%';
-  handleEnd.style.left=(_vtClipEnd*100)+'%';
-  const sel=document.getElementById('vt-range-selected');
-  sel.style.left=(_vtClipStart*100)+'%';
-  sel.style.width=((_vtClipEnd-_vtClipStart)*100)+'%';
-
-  const st=_vtClipStart*_vtDuration;
-  const et=_vtClipEnd*_vtDuration;
-  document.getElementById('vt-start-time').textContent=vtFormatTime(st);
-  document.getElementById('vt-end-time').textContent=vtFormatTime(et);
-  document.getElementById('vt-clip-duration').textContent=vtFormatTime(et-st);
-  document.getElementById('vt-total-duration').textContent=vtFormatTime(_vtDuration);
 }
 
 function vtFormatTime(s){
@@ -1394,6 +1448,9 @@ async function vtToggleRun(){
   if(_vtRunning){
     try{await fetch('/api/video-test/stop',{method:'POST'})}catch(e){}
     vtStopUI();
+    // Return to dual preview
+    document.getElementById('vt-dual-preview').style.display='flex';
+    document.getElementById('vt-player-area').style.display='none';
     return;
   }
 
@@ -1403,9 +1460,6 @@ async function vtToggleRun(){
 
   // Exit playback mode if active
   vtExitPlayback();
-
-  // Save current slider state so we have up-to-date ranges
-  vtSaveActiveViewRange();
 
   vtStartUI();
 
@@ -1469,9 +1523,12 @@ async function vtToggleRun(){
   }
   document.getElementById('vt-phase-label').textContent=statMsg;
 
-  // Auto-enter playback mode if we have 3D results
+  // Auto-enter playback mode if we have 3D results, otherwise return to dual preview
   if(_vt3dPoints.length>0){
     vtEnterPlayback();
+  } else {
+    document.getElementById('vt-dual-preview').style.display='flex';
+    document.getElementById('vt-player-area').style.display='none';
   }
 }
 
@@ -1493,7 +1550,9 @@ function vtRunSingleVideo(filename,camera,range){
     // Show MJPEG stream
     const video=document.getElementById('vt-video');
     const stream=document.getElementById('vt-stream');
+    const placeholder=document.getElementById('vt-placeholder');
     video.style.display='none';
+    placeholder.style.display='none';
     stream.src='/api/camera/_video_test/stream';
     stream.style.display='block';
 
@@ -1534,6 +1593,15 @@ function vtStartUI(){
   document.getElementById('vt-run-text').textContent='Stop';
   btn.querySelector('svg').innerHTML='<rect x="6" y="6" width="12" height="12"/>';
   document.getElementById('vt-progress').style.display='block';
+
+  // Hide dual preview, show MJPEG player area
+  document.getElementById('vt-dual-preview').style.display='none';
+  document.getElementById('vt-player-area').style.display='';
+  document.getElementById('vt-playback-area').style.display='none';
+  document.getElementById('vt-playback-controls').style.display='none';
+  document.getElementById('vt-placeholder').style.display='flex';
+  document.getElementById('vt-placeholder').textContent='Processing...';
+  document.getElementById('vt-video').style.display='none';
 }
 
 function vtStopUI(){
@@ -1546,7 +1614,6 @@ function vtStopUI(){
   const stream=document.getElementById('vt-stream');
   stream.src='';
   stream.style.display='none';
-  document.getElementById('vt-video').style.display='block';
 }
 
 // ---- Detection Table (3D results) ----
@@ -1617,12 +1684,10 @@ function vtEnterPlayback(){
   _vtPlaybackIdx=0;
   _vtPlaybackPlaying=false;
 
-  // Hide normal preview, show dual playback area
+  // Hide dual preview and MJPEG player, show playback area
+  document.getElementById('vt-dual-preview').style.display='none';
   document.getElementById('vt-player-area').style.display='none';
   document.getElementById('vt-playback-area').style.display='flex';
-
-  // Hide range slider, show playback controls
-  document.getElementById('vt-range-section').style.display='none';
   document.getElementById('vt-playback-controls').style.display='flex';
 
   // Configure slider
@@ -1642,14 +1707,11 @@ function vtExitPlayback(){
   _vtPlaybackMode=false;
   vtPlaybackPause();
 
-  // Restore normal preview
-  document.getElementById('vt-player-area').style.display='';
+  // Show dual preview, hide playback area
+  document.getElementById('vt-dual-preview').style.display='flex';
+  document.getElementById('vt-player-area').style.display='none';
   document.getElementById('vt-playback-area').style.display='none';
-
-  // Restore range slider, hide playback controls
   document.getElementById('vt-playback-controls').style.display='none';
-  // Range section visibility depends on whether a view is selected
-  // It will be re-shown by vtPreviewVideo if needed
 }
 
 function vtRenderPlaybackFrame(idx){
@@ -1782,6 +1844,9 @@ document.addEventListener('keydown',function(e){
 });
 
 // ---- Init ----
+// Initialize dual sliders immediately
+vtInitDualSliders();
+
 // Initialize 3D scene when Video Test page becomes visible
 const _origSwitchPage=switchPage;
 switchPage=function(page){
