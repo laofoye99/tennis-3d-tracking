@@ -8,7 +8,7 @@ from typing import Any, Optional
 import cv2
 
 from app.pipeline.homography import HomographyTransformer
-from app.pipeline.inference import BallDetector
+from app.pipeline.inference import BallDetector, PlayerDetector
 from app.pipeline.postprocess import BallTracker
 
 logger = logging.getLogger(__name__)
@@ -69,6 +69,7 @@ def run_video_pipeline(
 
         # Initialize pipeline components
         detector = BallDetector(model_path, input_size, frames_in, frames_out, device)
+        player_detector = PlayerDetector(device=device)
         tracker = BallTracker(original_size=(vid_w, vid_h), threshold=threshold)
         homography = HomographyTransformer(homography_path, homography_key)
 
@@ -133,6 +134,7 @@ def run_video_pipeline(
             # Inference
             try:
                 heatmaps = detector.infer(frame_buffer)
+                player_res = player_detector.detect(frame)
             except Exception as e:
                 log.error("Inference error: %s", e)
                 frame_buffer.clear()
@@ -148,6 +150,17 @@ def run_video_pipeline(
                 last_pixel_detection = (px, py, conf)
                 wx, wy = homography.pixel_to_world(px, py)
 
+                # Convert player positions to world coords
+                p_near = None
+                if player_res["near"]:
+                    nwx, nwy = homography.pixel_to_world(player_res["near"]["px"], player_res["near"]["py"])
+                    p_near = {"x": nwx, "y": nwy, "pixel_x": player_res["near"]["px"], "pixel_y": player_res["near"]["py"]}
+                
+                p_far = None
+                if player_res["far"]:
+                    fwx, fwy = homography.pixel_to_world(player_res["far"]["px"], player_res["far"]["py"])
+                    p_far = {"x": fwx, "y": fwy, "pixel_x": player_res["far"]["px"], "pixel_y": player_res["far"]["py"]}
+
                 # Unique frame index: each output corresponds to an input frame
                 # Batch N processes frames (N-1)*frames_in+1 .. N*frames_in
                 # Output i corresponds to frame processed_count - frames_out + i + 1
@@ -162,6 +175,8 @@ def run_video_pipeline(
                     "confidence": conf,
                     "timestamp": time.time(),
                     "frame_index": fi,  # relative to clip start for cross-camera matching
+                    "player_near": p_near,
+                    "player_far": p_far,
                 }
 
                 try:

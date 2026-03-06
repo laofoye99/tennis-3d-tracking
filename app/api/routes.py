@@ -248,16 +248,17 @@ async def video_preview_frame(
     time: float = 0,
     pixel_x: float | None = None,
     pixel_y: float | None = None,
+    p1_x: float | None = None,
+    p1_y: float | None = None,
+    p2_x: float | None = None,
+    p2_y: float | None = None,
 ):
-    """Return a JPEG frame at the given timestamp using OpenCV (supports H.265).
-
-    Optionally draws a ball marker at (pixel_x, pixel_y) if both are provided.
+    """Return a JPEG frame at the given timestamp using OpenCV.
+    Draws ball and players if coordinates provided.
     """
     fpath = _UPLOAD_DIR / filename
     if not fpath.exists():
         raise HTTPException(404, f"File not found: {filename}")
-    if not fpath.resolve().parent == _UPLOAD_DIR.resolve():
-        raise HTTPException(400, "Invalid filename")
 
     cap = cv2.VideoCapture(str(fpath))
     if not cap.isOpened():
@@ -271,7 +272,19 @@ async def video_preview_frame(
     if not ret or frame is None:
         raise HTTPException(400, "Cannot read frame at given time")
 
-    # Draw ball marker if coordinates provided
+    # Draw player 1 (blue)
+    if p1_x is not None and p1_y is not None:
+        cx, cy = int(round(p1_x)), int(round(p1_y))
+        cv2.drawMarker(frame, (cx, cy), (250, 136, 79), cv2.MARKER_TILTED_CROSS, 20, 2)
+        cv2.putText(frame, "P1", (cx + 10, cy - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (250, 136, 79), 2)
+
+    # Draw player 2 (red)
+    if p2_x is not None and p2_y is not None:
+        cx, cy = int(round(p2_x)), int(round(p2_y))
+        cv2.drawMarker(frame, (cx, cy), (78, 78, 250), cv2.MARKER_TILTED_CROSS, 20, 2)
+        cv2.putText(frame, "P2", (cx + 10, cy - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (78, 78, 250), 2)
+
+    # Draw ball marker (green)
     if pixel_x is not None and pixel_y is not None:
         cx, cy = int(round(pixel_x)), int(round(pixel_y))
         cv2.circle(frame, (cx, cy), 14, (0, 255, 0), 2)

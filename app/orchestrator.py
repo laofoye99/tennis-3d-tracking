@@ -65,7 +65,7 @@ class Orchestrator:
         self._recordings_dir = Path("recordings")
 
         # Video test
-        self._video_test_handle: Optional[_PipelineHandle] = None
+        self._video_test_handles: dict[str, _PipelineHandle] = {} # camera_name -> handle
         self._video_test_detections: dict[str, list[dict]] = {}  # camera_name -> detections
 
     def start_pipeline(self, name: str) -> None:
@@ -166,7 +166,7 @@ class Orchestrator:
                         while not handle.result_queue.empty():
                             det = handle.result_queue.get_nowait()
                             self._latest_detections[name] = det
-                            if name == "_video_test":
+                            if name.startswith("_video_test"):
                                 cam = det.get("camera_name", "unknown")
                                 self._video_test_detections.setdefault(cam, []).append(det)
                             got_any = True
@@ -370,8 +370,13 @@ class Orchestrator:
         self, video_path: str, start_time: float, end_time: float, camera_name: str
     ) -> dict:
         """Start processing a video file segment."""
-        if self._video_test_handle is not None and self._video_test_handle.is_alive():
-            self.stop_video_test()
+        # Stop existing test for THIS camera if running
+        if camera_name in self._video_test_handles:
+            h = self._video_test_handles[camera_name]
+            if h.is_alive():
+                if h.stop_event: h.stop_event.set()
+                h.process.join(timeout=2.0)
+            self._video_test_handles.pop(camera_name)
 
         self._video_test_detections.pop(camera_name, None)
 
@@ -379,7 +384,8 @@ class Orchestrator:
         if cam_cfg is None:
             raise ValueError(f"Unknown camera: {camera_name}")
 
-        handle = _PipelineHandle("_video_test")
+        test_name = f"_video_test_{camera_name}"
+        handle = _PipelineHandle(test_name)
         handle.result_queue = mp.Queue(maxsize=256)
         handle.frame_queue = mp.Queue(maxsize=32)
         handle.stop_event = mp.Event()
@@ -421,8 +427,8 @@ class Orchestrator:
             video_path, start_time, end_time, camera_name, handle.process.pid,
         )
 
-        self._video_test_handle = handle
-        self._handles["_video_test"] = handle
+        self._video_test_handles[camera_name] = handle
+        self._handles[test_name] = handle
 
         # Ensure consumer thread is running
         if self._consumer_thread is None or not self._consumer_thread.is_alive():
@@ -433,22 +439,20 @@ class Orchestrator:
         return {"status": "started"}
 
     def stop_video_test(self) -> dict:
-        """Stop video test pipeline."""
-        handle = self._video_test_handle
-        if handle is None:
-            return {"status": "not_running"}
-        if handle.stop_event is not None:
-            handle.stop_event.set()
-        if handle.process is not None:
-            handle.process.join(timeout=10.0)
-            if handle.process.is_alive():
-                handle.process.terminate()
+        """Stop all video test pipelines."""
+        for cam_name in list(self._video_test_handles.keys()):
+            handle = self._video_test_handles.pop(cam_name)
+            test_name = f"_video_test_{cam_name}"
+            if handle.stop_event is not None:
+                handle.stop_event.set()
+            if handle.process is not None:
                 handle.process.join(timeout=5.0)
-        self._handles.pop("_video_test", None)
-        self._latest_frames.pop("_video_test", None)
-        self._latest_detections.pop("_video_test", None)
-        self._video_test_handle = None
-        logger.info("[video-test] Stopped")
+                if handle.process.is_alive():
+                    handle.process.terminate()
+            self._handles.pop(test_name, None)
+            self._latest_frames.pop(test_name, None)
+            self._latest_detections.pop(test_name, None)
+        logger.info("[video-test] All stopped")
         return {"status": "stopped"}
 
     def get_video_test_detections(self, camera_name: str | None = None) -> list[dict]:
@@ -505,6 +509,7 @@ class Orchestrator:
             return {"points": [], "stats": stats, "cam_order": cam_names}
 
         results = []
+        prev_pt = None
         for frame_idx in common_frames:
             d1 = cam1_dets[frame_idx]
             d2 = cam2_dets[frame_idx]
@@ -515,32 +520,78 @@ class Orchestrator:
                     cam1_cfg.position_3d,
                     cam2_cfg.position_3d,
                 )
-                results.append({
+                
+                # Speed calculation
+                speed = 0
+                if prev_pt:
+                    dist = np.sqrt((x - prev_pt["x"])**2 + (y - prev_pt["y"])**2 + (z - prev_pt["z"])**2)
+                    dt = 1.0 / 25.0 # Assume 25fps for video test
+                    speed = (dist / dt) * 3.6 # km/h
+                
+                # Event detection (simple)
+                event_type = "running"
+                if prev_pt and len(results) > 1:
+                    v_prev = np.array([prev_pt["x"] - results[-2]["x"], prev_pt["y"] - results[-2]["y"], prev_pt["z"] - results[-2]["z"]])
+                    v_curr = np.array([x - prev_pt["x"], y - prev_pt["y"], z - prev_pt["z"]])
+                    dot = np.dot(v_curr, v_prev) / (np.linalg.norm(v_curr) * np.linalg.norm(v_prev) + 1e-6)
+                    
+                    if dot < 0.2: # direction change
+                        # Check if near ground (bounce) or near player (hit)
+                        if z < 0.3:
+                            event_type = "bounce"
+                        else:
+                            event_type = "hit"
+
+                res_obj = {
                     "frame_index": frame_idx,
                     "x": round(x, 4),
                     "y": round(y, 4),
                     "z": round(z, 4),
+                    "speed": round(speed, 2),
+                    "type": event_type,
                     "cam1_pixel": [round(d1["pixel_x"], 1), round(d1["pixel_y"], 1)],
                     "cam2_pixel": [round(d2["pixel_x"], 1), round(d2["pixel_y"], 1)],
                     # Per-camera homography world coords for debugging
                     "cam1_world": [round(d1["x"], 4), round(d1["y"], 4)],
                     "cam2_world": [round(d2["x"], 4), round(d2["y"], 4)],
-                })
+                    # Player data
+                    "player1": d1.get("player_near"),
+                    "player2": d1.get("player_far"),
+                }
+                results.append(res_obj)
+                prev_pt = res_obj
             except Exception as e:
                 logger.warning("3D computation failed for frame %d: %s", frame_idx, e)
 
         return {"points": results, "stats": stats, "cam_order": cam_names}
 
     def get_video_test_status(self) -> dict:
-        """Get video test pipeline status."""
-        handle = self._video_test_handle
-        if handle is None or handle.status_dict is None:
+        """Get aggregated video test pipeline status."""
+        if not self._video_test_handles:
             return {"state": "idle"}
-        sd = handle.status_dict
+        
+        total_frames = 0
+        processed_frames = 0
+        max_fps = 0.0
+        states = []
+        
+        for h in self._video_test_handles.values():
+            sd = h.status_dict
+            total_frames += sd.get("total_frames", 0)
+            processed_frames += sd.get("processed_frames", 0)
+            max_fps = max(max_fps, sd.get("fps", 0.0))
+            states.append(sd.get("state", "idle"))
+            
+        # Overall state
+        if "error" in states: final_state = "error"
+        elif "running" in states or "starting" in states: final_state = "running"
+        elif all(s == "completed" for s in states): final_state = "completed"
+        else: final_state = states[0] if states else "idle"
+
         return {
-            "state": sd.get("state", "idle"),
-            "total_frames": sd.get("total_frames", 0),
-            "processed_frames": sd.get("processed_frames", 0),
-            "fps": round(sd.get("fps", 0.0), 1),
-            "error_msg": sd.get("error_msg", ""),
+            "state": final_state,
+            "total_frames": total_frames,
+            "processed_frames": processed_frames,
+            "fps": round(max_fps, 1),
+            "error_msg": "",
         }

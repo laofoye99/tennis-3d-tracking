@@ -1448,7 +1448,6 @@ async function vtToggleRun(){
   if(_vtRunning){
     try{await fetch('/api/video-test/stop',{method:'POST'})}catch(e){}
     vtStopUI();
-    // Return to dual preview
     document.getElementById('vt-dual-preview').style.display='flex';
     document.getElementById('vt-player-area').style.display='none';
     return;
@@ -1458,81 +1457,70 @@ async function vtToggleRun(){
   const vid2=document.getElementById('vt-view2-video').value;
   if(!vid1||!vid2) return;
 
-  // Exit playback mode if active
   vtExitPlayback();
-
   vtStartUI();
 
-  // Clear all previous detections
   await fetch('/api/video-test/clear-detections',{
     method:'POST',headers:{'Content-Type':'application/json'},body:'{}'
   });
 
-  // Clear 3D results
   _vt3dPoints=[];
   vtUpdate3DBalls([]);
   vtRender3DTable();
 
-  // Phase 1: Process cam66 video (using View 1 range)
-  _vtPhase='cam66';
-  document.getElementById('vt-phase-label').textContent='Processing cam66 (View 1)...';
+  // Phase: Parallel Processing
+  _vtPhase='processing';
+  document.getElementById('vt-phase-label').textContent='Processing both views in parallel...';
   document.getElementById('vt-progress-fill').style.width='0%';
+  
+  // Show MJPEG stream for one of them (or we could show both, but UI only has one img)
+  // Let's show cam66's stream by default
+  const stream=document.getElementById('vt-stream');
+  stream.src='/api/camera/_video_test_cam66/stream';
+  stream.style.display='block';
+  document.getElementById('vt-placeholder').style.display='none';
+
   const range1=_vtViewRanges[1];
-  const ok1=await vtRunSingleVideo(vid1,'cam66',range1);
-  if(!_vtRunning) return;
-
-  // Phase 2: Process cam68 video (using View 2 range)
-  _vtPhase='cam68';
-  document.getElementById('vt-phase-label').textContent='Processing cam68 (View 2)...';
-  document.getElementById('vt-progress-fill').style.width='0%';
   const range2=_vtViewRanges[2];
-  const ok2=await vtRunSingleVideo(vid2,'cam68',range2);
-  if(!_vtRunning) return;
 
-  // Phase 3: Compute 3D
-  _vtPhase='3d';
-  document.getElementById('vt-phase-label').textContent='Computing 3D positions...';
-  let stats={};
-  try{
+  // Start both in parallel
+  try {
+    const [ok1, ok2] = await Promise.all([
+      vtRunSingleVideo(vid1,'cam66',range1, false), // don't manage stream src inside
+      vtRunSingleVideo(vid2,'cam68',range2, false)
+    ]);
+    
+    if(!_vtRunning) return;
+
+    // Phase 3: Compute 3D
+    _vtPhase='3d';
+    document.getElementById('vt-phase-label').textContent='Computing 3D positions...';
     const r=await fetch('/api/video-test/compute-3d',{method:'POST'});
     const data=await r.json();
     _vt3dPoints=data.points||[];
-    stats=data.stats||{};
-    console.log('3D compute stats:',JSON.stringify(stats,null,2));
-  }catch(e){console.error(e)}
+    
+    vtUpdate3DBalls(_vt3dPoints);
+    vtRender3DTable();
 
-  // Update 3D visualization and table
-  vtUpdate3DBalls(_vt3dPoints);
-  vtRender3DTable();
+    _vtPhase='done';
+    vtStopUI();
+    document.getElementById('vt-progress').style.display='block';
+    document.getElementById('vt-state-badge').className='state-badge completed';
+    document.getElementById('vt-state-badge').textContent='completed';
+    document.getElementById('vt-phase-label').textContent='Done: '+_vt3dPoints.length+' 3D points';
 
-  // Done
-  _vtPhase='done';
-  vtStopUI();
-  document.getElementById('vt-progress').style.display='block';
-  document.getElementById('vt-state-badge').className='state-badge completed';
-  document.getElementById('vt-state-badge').textContent='completed';
-  // Show stats summary
-  let statMsg='Done: '+_vt3dPoints.length+' 3D points';
-  if(stats.common_frames!==undefined){
-    const camKeys=Object.keys(stats).filter(k=>k!=='common_frames');
-    const parts=camKeys.map(c=>{
-      const s=stats[c];
-      return c+': '+s.total_detections+' dets';
-    });
-    statMsg+=' ('+parts.join(', ')+', matched: '+stats.common_frames+')';
-  }
-  document.getElementById('vt-phase-label').textContent=statMsg;
-
-  // Auto-enter playback mode if we have 3D results, otherwise return to dual preview
-  if(_vt3dPoints.length>0){
-    vtEnterPlayback();
-  } else {
-    document.getElementById('vt-dual-preview').style.display='flex';
-    document.getElementById('vt-player-area').style.display='none';
+    if(_vt3dPoints.length>0) vtEnterPlayback();
+    else {
+      document.getElementById('vt-dual-preview').style.display='flex';
+      document.getElementById('vt-player-area').style.display='none';
+    }
+  } catch(e) {
+    console.error("Parallel run failed", e);
+    vtStopUI();
   }
 }
 
-function vtRunSingleVideo(filename,camera,range){
+function vtRunSingleVideo(filename,camera,range, manageStream=true){
   return new Promise(async(resolve)=>{
     const startTime=range.start*range.duration;
     const endTime=range.end*range.duration;
@@ -1547,38 +1535,28 @@ function vtRunSingleVideo(filename,camera,range){
       if(d.status!=='started'){resolve(false);return}
     }catch(e){console.error(e);resolve(false);return}
 
-    // Show MJPEG stream
-    const video=document.getElementById('vt-video');
-    const stream=document.getElementById('vt-stream');
-    const placeholder=document.getElementById('vt-placeholder');
-    video.style.display='none';
-    placeholder.style.display='none';
-    stream.src='/api/camera/_video_test/stream';
-    stream.style.display='block';
+    if(manageStream){
+        const stream=document.getElementById('vt-stream');
+        stream.src='/api/camera/_video_test_'+camera+'/stream';
+        stream.style.display='block';
+    }
 
-    // Poll status until complete
     const poll=setInterval(async()=>{
       if(!_vtRunning){clearInterval(poll);resolve(false);return}
       try{
         const r=await fetch('/api/video-test/status');
         const d=await r.json();
+        
+        // Update aggregated progress
         const total=d.total_frames||1;
         const done=d.processed_frames||0;
         const pct=Math.round(done/total*100);
-
         document.getElementById('vt-progress-fill').style.width=pct+'%';
         document.getElementById('vt-progress-text').textContent=done+' / '+total+' frames';
         document.getElementById('vt-progress-fps').textContent=(d.fps||0)+' fps';
 
-        const badge=document.getElementById('vt-state-badge');
-        badge.className='state-badge '+d.state;
-        badge.textContent=d.state;
-
         if(d.state==='completed'||d.state==='error'){
           clearInterval(poll);
-          stream.src='';
-          stream.style.display='none';
-          video.style.display='block';
           resolve(d.state==='completed');
         }
       }catch(e){console.error(e)}
@@ -1622,27 +1600,18 @@ function vtRender3DTable(){
   const countEl=document.getElementById('vt-det-count');
   const thead=document.getElementById('vt-det-thead');
 
-  // Show per-camera world coords for debugging
-  const hasCamWorld=_vt3dPoints.length>0&&_vt3dPoints[0].cam1_world;
-  if(hasCamWorld){
-    thead.innerHTML='<tr><th style="text-align:left">Fr</th><th style="text-align:right">X</th><th style="text-align:right">Y</th><th style="text-align:right">Z</th><th style="text-align:right;color:#4f88fa;font-size:8px">c66Y</th><th style="text-align:right;color:#fa4e4e;font-size:8px">c68Y</th></tr>';
-  } else {
-    thead.innerHTML='<tr><th style="text-align:left">Frame</th><th style="text-align:right">X</th><th style="text-align:right">Y</th><th style="text-align:right">Z</th></tr>';
-  }
+  thead.innerHTML='<tr><th style="text-align:left">Frame</th><th style="text-align:right">X</th><th style="text-align:right">Y</th><th style="text-align:right">Z</th><th style="text-align:right">Speed</th><th style="text-align:left">Type</th></tr>';
   countEl.textContent=_vt3dPoints.length+' results';
 
   tbody.innerHTML=_vt3dPoints.map((p,i)=>{
-    let extra='';
-    if(hasCamWorld&&p.cam1_world&&p.cam2_world){
-      extra=`<td style="text-align:right;color:#4f88fa;font-size:9px">${p.cam1_world[1].toFixed(1)}</td>
-             <td style="text-align:right;color:#fa4e4e;font-size:9px">${p.cam2_world[1].toFixed(1)}</td>`;
-    }
+    const typeColor = p.type === 'hit' ? '#fa4e4e' : (p.type === 'bounce' ? '#eab308' : '#fff');
     return `<tr onclick="vtSeekTo3D(${i})" data-idx="${i}">
       <td style="text-align:left">${p.frame_index}</td>
       <td style="text-align:right">${p.x.toFixed(2)}</td>
       <td style="text-align:right">${p.y.toFixed(2)}</td>
       <td style="text-align:right">${p.z.toFixed(2)}</td>
-      ${extra}
+      <td style="text-align:right">${p.speed ? p.speed.toFixed(1) : 0}</td>
+      <td style="text-align:left;color:${typeColor}">${p.type || 'running'}</td>
     </tr>`;
   }).join('');
 }
@@ -1732,6 +1701,15 @@ function vtRenderPlaybackFrame(idx){
     row.scrollIntoView({block:'nearest',behavior:'smooth'});
   }
 
+  // Common params for players
+  let pArgs = "";
+  if(pt.player1){
+    pArgs += `&p1_x=${pt.player1.pixel_x}&p1_y=${pt.player1.pixel_y}`;
+  }
+  if(pt.player2){
+    pArgs += `&p2_x=${pt.player2.pixel_x}&p2_y=${pt.player2.pixel_y}`;
+  }
+
   // Fetch cam66 frame (View 1)
   const vid1=document.getElementById('vt-view1-video').value;
   if(vid1&&pt.cam1_pixel){
@@ -1741,7 +1719,7 @@ function vtRenderPlaybackFrame(idx){
     const t1=clipStart1+pt.frame_index/fps1;
     document.getElementById('vt-play-cam1').src=
       '/api/video-preview/frame?filename='+encodeURIComponent(vid1)
-      +'&time='+t1+'&pixel_x='+pt.cam1_pixel[0]+'&pixel_y='+pt.cam1_pixel[1];
+      +'&time='+t1+'&pixel_x='+pt.cam1_pixel[0]+'&pixel_y='+pt.cam1_pixel[1] + pArgs;
   }
 
   // Fetch cam68 frame (View 2)
@@ -1753,7 +1731,7 @@ function vtRenderPlaybackFrame(idx){
     const t2=clipStart2+pt.frame_index/fps2;
     document.getElementById('vt-play-cam2').src=
       '/api/video-preview/frame?filename='+encodeURIComponent(vid2)
-      +'&time='+t2+'&pixel_x='+pt.cam2_pixel[0]+'&pixel_y='+pt.cam2_pixel[1];
+      +'&time='+t2+'&pixel_x='+pt.cam2_pixel[0]+'&pixel_y='+pt.cam2_pixel[1] + pArgs;
   }
 
   // Update 3D map: show trajectory up to current point, highlight current
