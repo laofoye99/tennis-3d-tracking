@@ -42,6 +42,7 @@ D:/tennis/tennis_1.0/
 │   ├── schemas.py                   # 数据层: 所有数据模型定义
 │   ├── orchestrator.py              # 控制层: 子进程生命周期 + 三角测量消费
 │   ├── triangulation.py             # 算法层: 射线交叉法 3D 重建
+│   ├── trajectory.py                # 算法层: 轨迹拟合 (RANSAC/球速/落点/回合)
 │   │
 │   ├── pipeline/                    # ===== 管道层 (子进程内) =====
 │   │   ├── camera_stream.py         # 输入: RTSP 帧读取 (线程 + 自动重连)
@@ -66,7 +67,8 @@ D:/tennis/tennis_1.0/
 │
 └── docs/                            # ===== 文档 =====
     ├── architecture.md              # 本文件
-    └── algorithms.md                # 算法与计算逻辑
+    ├── algorithms.md                # 算法与计算逻辑
+    └── trajectory_features.md       # 轨迹分析功能 (球速/落点/回合分割)
 ```
 
 ---
@@ -193,9 +195,17 @@ Orchestrator
 └── shutdown()           → 停止所有子进程
 ```
 
-### 3.5 算法层 — `app/triangulation.py`
+### 3.5 算法层 — `app/triangulation.py` + `app/trajectory.py`
 
-详见 `docs/algorithms.md`
+基础三角测量详见 `docs/algorithms.md`
+
+轨迹分析功能详见 `docs/trajectory_features.md`，包括:
+- 检测清洗 (置信度/边界/速度/孤立点)
+- 自动时间偏移搜索 (修剪均值)
+- RANSAC 空间抛物线拟合
+- 过网球速计算
+- 落地点检测
+- 回合分割
 
 ### 3.6 接口层 — `app/api/`
 
@@ -208,7 +218,13 @@ FastAPI Routes
 ├── GET  /api/ball3d/stream          SSE 实时推送
 ├── POST /api/pipeline/{name}/start  启动管道
 ├── POST /api/pipeline/{name}/stop   停止管道
-└── GET  /api/pipeline/{name}/detection  单相机最新检测
+├── GET  /api/pipeline/{name}/detection  单相机最新检测
+│
+├── POST /api/video-test/start       启动视频文件处理
+├── POST /api/video-test/stop        停止视频处理
+├── GET  /api/video-test/status      视频处理进度
+├── POST /api/video-test/compute-3d  帧匹配三角测量
+└── POST /api/video-test/compute-trajectory  轨迹拟合 (球速/落点/回合)
 ```
 
 ---
@@ -369,6 +385,7 @@ main.py
   ├── app/orchestrator.py   (Orchestrator)
   │     ├── app/schemas.py
   │     ├── app/triangulation.py
+  │     ├── app/trajectory.py     (轨迹拟合/球速/落点/回合)
   │     └── app/pipeline/camera_pipeline.py  [子进程]
   │           ├── app/pipeline/camera_stream.py
   │           ├── app/pipeline/inference.py

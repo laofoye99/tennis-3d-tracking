@@ -39,7 +39,7 @@ body{font-family:'Lato',sans-serif;background:var(--bg);color:var(--text);height
 .main{flex:1;display:flex;flex-direction:column;padding:24px 28px;overflow-y:auto;min-width:0}
 .main-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px}
 .main-header h1{font-size:24px;font-weight:600}
-.layout{display:grid;grid-template-columns:320px 1fr;grid-template-rows:1fr 190px;gap:16px;flex:1;min-height:0}
+.layout{display:grid;grid-template-columns:320px 1fr;grid-template-rows:2fr 1fr;gap:16px;flex:1;min-height:0}
 
 /* ---- Page content ---- */
 .page-content{display:none;flex-direction:column;flex:1;min-height:0}
@@ -834,7 +834,7 @@ function draw3DMap(canvas,ball){
   });
 
   if(ball){
-    const bx=px(ball.x),by=py(ball.y);
+    const bx=px(COURT_W-ball.x),by=py(ball.y);
     const hz=ball.z*hScale;
     ctx.beginPath();ctx.moveTo(bx,by);ctx.lineTo(bx,by-hz);
     ctx.strokeStyle='rgba(250,166,78,.6)';ctx.lineWidth=2;ctx.setLineDash([3,2]);ctx.stroke();ctx.setLineDash([]);
@@ -842,7 +842,7 @@ function draw3DMap(canvas,ball){
     ctx.beginPath();ctx.arc(bx,by-hz,5,0,Math.PI*2);ctx.fillStyle='#fa4e4e';ctx.fill();
     ctx.strokeStyle='#fff';ctx.lineWidth=1;ctx.stroke();
     ctx.fillStyle='#fff';ctx.font='bold 10px Lato';
-    ctx.fillText(`(${ball.x.toFixed(1)}, ${ball.y.toFixed(1)}, ${ball.z.toFixed(1)})`,bx+10,by-hz);
+    ctx.fillText(`(${(COURT_W-ball.x).toFixed(1)}, ${ball.y.toFixed(1)}, ${ball.z.toFixed(1)})`,bx+10,by-hz);
   }
 }
 
@@ -958,6 +958,8 @@ let _vtRunning=false;
 let _vtPhase='idle'; // 'idle'|'cam66'|'cam68'|'3d'|'done'
 let _vt3dPoints=[];  // computed 3D points
 let _vtTrajectory=null;  // trajectory fit result (spatial parabola)
+let _vtRallies=[];  // all rally segments [{rally_index, points, trajectory}]
+let _vtCurrentRally=-1;  // -1 = show primary/all
 // Per-view clip ranges: View1=anchor (start+end), View2=start only (duration from View1)
 let _vtViewRanges={1:{start:0,end:1,duration:0,fps:25,configured:false,filename:''},
                    2:{start:0,end:1,duration:0,fps:25,configured:false,filename:''}};
@@ -970,6 +972,88 @@ let _vtPlaybackIdx=0;
 let _vtPlaybackTimer=null;
 let _vtPlaybackSpeed=1;
 let _vtPlaybackPlaying=false;
+
+// ---- Rally selector & stats helpers ----
+
+function vtBuildStatsSummary(stats){
+  let msg='Done: '+_vt3dPoints.length+' 3D points';
+  if(stats.matched_points!==undefined){
+    msg+=' (offset: '+stats.time_offset_frames+'f, ray: '+stats.mean_ray_dist+'m)';
+  }
+  if(stats.n_rallies>1) msg+='\n'+stats.n_rallies+' rallies detected: ['+stats.rally_sizes.join(', ')+'] points';
+  // Trajectory info
+  const t=_vtTrajectory;
+  if(t){
+    if(t.type==='piecewise'&&t.pre_bounce){
+      msg+='\nFit: '+t.pre_bounce.speed_kmh.toFixed(0)+'km/h → bounce → '+t.post_bounce.speed_kmh.toFixed(0)+'km/h';
+    }
+    if(t.net_crossing){
+      const nc=t.net_crossing;
+      msg+='\nNet: '+(nc.clears_net?'✓':'✗')+' h='+nc.z.toFixed(2)+'m';
+      if(nc.speed_kmh) msg+=' @ '+nc.speed_kmh.toFixed(0)+'km/h';
+    }
+    if(t.landing_point){
+      const lp=t.landing_point;
+      const inCourt=lp.x>=0&&lp.x<=COURT_W&&lp.y>=0&&lp.y<=COURT_L;
+      msg+='\nLanding: ('+(COURT_W-lp.x).toFixed(2)+', '+lp.y.toFixed(2)+') '+(inCourt?'IN':'OUT');
+    }
+  }
+  return msg;
+}
+
+function vtRenderRallySelector(){
+  let container=document.getElementById('vt-rally-selector');
+  if(!container){
+    // Create rally selector next to the phase label
+    const parent=document.getElementById('vt-phase-label');
+    if(!parent) return;
+    container=document.createElement('div');
+    container.id='vt-rally-selector';
+    container.style.cssText='display:flex;gap:4px;flex-wrap:wrap;margin-top:6px';
+    parent.parentNode.insertBefore(container,parent.nextSibling);
+  }
+  container.innerHTML='';
+  if(_vtRallies.length<=1){container.style.display='none';return;}
+  container.style.display='flex';
+  // "All" button
+  const allBtn=document.createElement('button');
+  allBtn.textContent='All ('+_vtRallies.reduce((s,r)=>s+r.points.length,0)+')';
+  allBtn.style.cssText='padding:2px 8px;font-size:10px;border:1px solid #555;background:'
+    +(_vtCurrentRally===-1?'var(--accent)':'var(--card-bg)')
+    +';color:#fff;border-radius:4px;cursor:pointer';
+  allBtn.onclick=()=>vtSwitchRally(-1);
+  container.appendChild(allBtn);
+  // Per-rally buttons
+  _vtRallies.forEach((r,i)=>{
+    const btn=document.createElement('button');
+    btn.textContent='R'+(i+1)+' ('+r.points.length+')';
+    btn.style.cssText='padding:2px 8px;font-size:10px;border:1px solid #555;background:'
+      +(i===_vtCurrentRally?'var(--accent)':'var(--card-bg)')
+      +';color:#fff;border-radius:4px;cursor:pointer';
+    btn.onclick=()=>vtSwitchRally(i);
+    container.appendChild(btn);
+  });
+}
+
+function vtSwitchRally(index){
+  _vtCurrentRally=index;
+  if(index===-1){
+    // Show primary rally (largest)
+    const primary=_vtRallies.reduce((a,b)=>a.points.length>b.points.length?a:b,_vtRallies[0]);
+    _vt3dPoints=primary.points;
+    _vtTrajectory=primary.trajectory;
+  } else {
+    _vt3dPoints=_vtRallies[index].points;
+    _vtTrajectory=_vtRallies[index].trajectory;
+  }
+  vtUpdate3DBalls(_vt3dPoints);
+  if(_vtTrajectory) vtDrawTrajectoryCurve(_vtTrajectory);
+  vtRender3DTable();
+  vtRenderRallySelector();
+  // Update stats label
+  const msg=vtBuildStatsSummary({n_rallies:_vtRallies.length,rally_sizes:_vtRallies.map(r=>r.points.length)});
+  document.getElementById('vt-phase-label').textContent=msg;
+}
 
 // ---- Three.js 3D Scene ----
 let _vtScene, _vtCamera3d, _vtRenderer, _vtControls;
@@ -1116,6 +1200,10 @@ function vtInit3D(){
   // Baseline labels to help orient the user
   _vtScene.add(makeCamLabel('y=0','#88ff88',new THREE.Vector3(CX,0.5,0)));
   _vtScene.add(makeCamLabel('y=23.77','#88ff88',new THREE.Vector3(CX,0.5,CL)));
+  // Side labels to disambiguate left/right (X axis)
+  // X axis is mirrored: world X=0 is physically the glass side, X=8.23 is curtain
+  _vtScene.add(makeCamLabel('玻璃','#ffaa44',new THREE.Vector3(-1,0.5,CL/2)));
+  _vtScene.add(makeCamLabel('窗帘','#ffaa44',new THREE.Vector3(CW+1,0.5,CL/2)));
 
   // Ball group
   _vt3dBallGroup=new THREE.Group();
@@ -1167,14 +1255,14 @@ function vtUpdate3DBalls(points, highlightIdx){
     const geom=isHighlight?bigGeom:smallGeom;
     const mat=new THREE.MeshBasicMaterial({color:isHighlight?0xffff00:color});
     const sphere=new THREE.Mesh(geom,mat);
-    // Court coords → Three.js: x=x, y=z(height), z=y(forward)
-    sphere.position.set(p.x,p.z,p.y);
+    // Court coords → Three.js: x=mirrorX, y=z(height), z=y(forward)
+    sphere.position.set(COURT_W-p.x,p.z,p.y);
     _vt3dBallGroup.add(sphere);
   });
 
   // Trajectory line
   if(points.length>1){
-    const lp=points.map(p=>new THREE.Vector3(p.x,p.z,p.y));
+    const lp=points.map(p=>new THREE.Vector3(COURT_W-p.x,p.z,p.y));
     const lg=new THREE.BufferGeometry().setFromPoints(lp);
     _vt3dBallGroup.add(new THREE.Line(lg,new THREE.LineBasicMaterial({color:0xff6600})));
   }
@@ -1185,7 +1273,7 @@ function vtDrawTrajectoryCurve(traj){
   const curve=traj.smooth_curve;
   if(!curve||!curve.length) return;
   // Draw smooth fitted trajectory as a thicker yellow line
-  const pts=curve.map(p=>new THREE.Vector3(p.x,p.z,p.y));
+  const pts=curve.map(p=>new THREE.Vector3(COURT_W-p.x,p.z,p.y));
   const geom=new THREE.BufferGeometry().setFromPoints(pts);
   const mat=new THREE.LineBasicMaterial({color:0xffff00,linewidth:2});
   _vt3dBallGroup.add(new THREE.Line(geom,mat));
@@ -1195,17 +1283,57 @@ function vtDrawTrajectoryCurve(traj){
     const bounceGeom=new THREE.SphereGeometry(0.14,12,12);
     const bounceMat=new THREE.MeshBasicMaterial({color:0xff0000});
     const bounceSphere=new THREE.Mesh(bounceGeom,bounceMat);
-    bounceSphere.position.set(bp.x,bp.z,bp.y);
+    bounceSphere.position.set(COURT_W-bp.x,bp.z,bp.y);
     _vt3dBallGroup.add(bounceSphere);
   }
-  // Mark net crossing
-  if(traj.net_crossing&&traj.net_crossing.clears_net){
+  // Mark net crossing (green sphere + speed label)
+  if(traj.net_crossing){
     const nc=traj.net_crossing;
     const netGeom=new THREE.SphereGeometry(0.1,8,8);
-    const netMat=new THREE.MeshBasicMaterial({color:0x00ff88,transparent:true,opacity:0.7});
+    const netColor=nc.clears_net?0x00ff88:0xff4444;
+    const netMat=new THREE.MeshBasicMaterial({color:netColor,transparent:true,opacity:0.7});
     const netSphere=new THREE.Mesh(netGeom,netMat);
-    netSphere.position.set(nc.x,nc.z,nc.y);
+    netSphere.position.set(COURT_W-nc.x,nc.z,nc.y);
     _vt3dBallGroup.add(netSphere);
+    // Speed label at net
+    if(nc.speed_kmh){
+      const c=document.createElement('canvas');c.width=128;c.height=32;
+      const ctx=c.getContext('2d');
+      ctx.fillStyle='#00ff88';ctx.font='bold 16px Lato';
+      ctx.fillText(nc.speed_kmh.toFixed(0)+' km/h',4,20);
+      const tex=new THREE.CanvasTexture(c);
+      const spr=new THREE.Sprite(new THREE.SpriteMaterial({map:tex,transparent:true}));
+      spr.position.set(COURT_W-nc.x,nc.z+0.5,nc.y);
+      spr.scale.set(2,0.5,1);
+      _vt3dBallGroup.add(spr);
+    }
+  }
+  // Mark landing point (orange diamond on ground)
+  if(traj.landing_point){
+    const lp=traj.landing_point;
+    const landGeom=new THREE.SphereGeometry(0.12,6,6);
+    const inCourt=lp.x>=0&&lp.x<=COURT_W&&lp.y>=0&&lp.y<=COURT_L;
+    const landMat=new THREE.MeshBasicMaterial({color:inCourt?0xffaa00:0xff4444});
+    const landSphere=new THREE.Mesh(landGeom,landMat);
+    landSphere.position.set(COURT_W-lp.x,0.02,lp.y);
+    _vt3dBallGroup.add(landSphere);
+    // Ring around landing point for visibility
+    const ringGeom=new THREE.RingGeometry(0.2,0.3,16);
+    const ringMat=new THREE.MeshBasicMaterial({color:inCourt?0xffaa00:0xff4444,side:THREE.DoubleSide});
+    const ring=new THREE.Mesh(ringGeom,ringMat);
+    ring.rotation.x=-Math.PI/2;
+    ring.position.set(COURT_W-lp.x,0.03,lp.y);
+    _vt3dBallGroup.add(ring);
+    // Label
+    const c=document.createElement('canvas');c.width=128;c.height=32;
+    const ctx=c.getContext('2d');
+    ctx.fillStyle=inCourt?'#ffaa00':'#ff4444';ctx.font='bold 14px Lato';
+    ctx.fillText(inCourt?'IN':'OUT',4,20);
+    const tex=new THREE.CanvasTexture(c);
+    const spr=new THREE.Sprite(new THREE.SpriteMaterial({map:tex,transparent:true}));
+    spr.position.set(COURT_W-lp.x,0.5,lp.y);
+    spr.scale.set(1.5,0.4,1);
+    _vt3dBallGroup.add(spr);
   }
 }
 
@@ -1585,15 +1713,18 @@ async function vtToggleRun(){
       _vt3dPoints=trajResult.points||[];
       stats=trajResult.stats||{};
       _vtTrajectory=trajResult.trajectory||null;
+      _vtRallies=trajResult.rallies||[];
+      _vtCurrentRally=-1;
       console.log('Trajectory stats:',JSON.stringify(stats,null,2));
+      console.log('Rallies:',_vtRallies.length);
     } else {
-      // Fallback to frame-index matching if trajectory fails
       console.warn('Trajectory failed, falling back to compute-3d');
       const r2=await fetch('/api/video-test/compute-3d',{method:'POST'});
       const data=await r2.json();
       _vt3dPoints=data.points||[];
       stats=data.stats||{};
       _vtTrajectory=null;
+      _vtRallies=[];
     }
   }catch(e){console.error(e)}
 
@@ -1601,6 +1732,7 @@ async function vtToggleRun(){
   vtUpdate3DBalls(_vt3dPoints);
   if(_vtTrajectory) vtDrawTrajectoryCurve(_vtTrajectory);
   vtRender3DTable();
+  vtRenderRallySelector();
 
   // Done
   _vtPhase='done';
@@ -1608,25 +1740,8 @@ async function vtToggleRun(){
   document.getElementById('vt-progress').style.display='block';
   document.getElementById('vt-state-badge').className='state-badge completed';
   document.getElementById('vt-state-badge').textContent='completed';
-  // Show stats summary
-  let statMsg='Done: '+_vt3dPoints.length+' 3D points';
-  if(stats.matched_points!==undefined){
-    statMsg+=' (offset: '+stats.time_offset_frames+'f';
-    statMsg+=', ray: '+stats.mean_ray_dist+'m)';
-  } else if(stats.common_frames!==undefined){
-    const camKeys=Object.keys(stats).filter(k=>k!=='common_frames');
-    const parts=camKeys.map(c=>{
-      const s=stats[c];
-      return c+': '+s.total_detections+' dets';
-    });
-    statMsg+=' ('+parts.join(', ')+', matched: '+stats.common_frames+')';
-  }
-  if(_vtTrajectory&&_vtTrajectory.type==='piecewise'){
-    const pre=_vtTrajectory.pre_bounce;
-    const post=_vtTrajectory.post_bounce;
-    if(pre) statMsg+='\nFit: '+pre.speed_kmh.toFixed(0)+'km/h -> bounce -> '+post.speed_kmh.toFixed(0)+'km/h';
-  }
-  document.getElementById('vt-phase-label').textContent=statMsg;
+  // Show stats summary with speed / landing / rally info
+  let statMsg=vtBuildStatsSummary(stats);
 
   // Auto-enter playback mode if we have 3D results, otherwise return to dual preview
   if(_vt3dPoints.length>0){
@@ -1731,8 +1846,10 @@ function vtRender3DTable(){
   const hasCamWorld=_vt3dPoints.length>0&&_vt3dPoints[0].cam1_world;
   const hasRayDist=_vt3dPoints.length>0&&_vt3dPoints[0].ray_dist!==undefined;
 
+  const hasCamAWorld=_vt3dPoints.length>0&&_vt3dPoints[0].cam_a_world;
   if(hasRayDist){
-    thead.innerHTML='<tr><th style="text-align:left">Fr</th><th style="text-align:right">X</th><th style="text-align:right">Y</th><th style="text-align:right">Z</th><th style="text-align:right;font-size:9px">RayD</th></tr>';
+    const extraHdr=hasCamAWorld?'<th style="text-align:right;color:#4f88fa;font-size:8px">Ax</th><th style="text-align:right;color:#fa4e4e;font-size:8px">Bx</th>':'';
+    thead.innerHTML='<tr><th style="text-align:left">Fr</th><th style="text-align:right">X</th><th style="text-align:right">Y</th><th style="text-align:right">Z</th><th style="text-align:right;font-size:9px">RayD</th>'+extraHdr+'</tr>';
   } else if(hasCamWorld){
     thead.innerHTML='<tr><th style="text-align:left">Fr</th><th style="text-align:right">X</th><th style="text-align:right">Y</th><th style="text-align:right">Z</th><th style="text-align:right;color:#4f88fa;font-size:8px">c66Y</th><th style="text-align:right;color:#fa4e4e;font-size:8px">c68Y</th></tr>';
   } else {
@@ -1746,13 +1863,17 @@ function vtRender3DTable(){
     if(hasRayDist){
       const rdColor=p.ray_dist>0.3?'#fa4e4e':'#88ff88';
       extra=`<td style="text-align:right;color:${rdColor};font-size:9px">${p.ray_dist.toFixed(3)}</td>`;
+      if(hasCamAWorld&&p.cam_a_world&&p.cam_b_world){
+        extra+=`<td style="text-align:right;color:#4f88fa;font-size:9px">${p.cam_a_world[0].toFixed(1)}</td>
+                <td style="text-align:right;color:#fa4e4e;font-size:9px">${p.cam_b_world[0].toFixed(1)}</td>`;
+      }
     } else if(hasCamWorld&&p.cam1_world&&p.cam2_world){
       extra=`<td style="text-align:right;color:#4f88fa;font-size:9px">${p.cam1_world[1].toFixed(1)}</td>
              <td style="text-align:right;color:#fa4e4e;font-size:9px">${p.cam2_world[1].toFixed(1)}</td>`;
     }
     return `<tr onclick="vtSeekTo3D(${i})" data-idx="${i}">
       <td style="text-align:left">${frameId}</td>
-      <td style="text-align:right">${p.x.toFixed(2)}</td>
+      <td style="text-align:right">${(COURT_W-p.x).toFixed(2)}</td>
       <td style="text-align:right">${p.y.toFixed(2)}</td>
       <td style="text-align:right">${p.z.toFixed(2)}</td>
       ${extra}
@@ -1776,15 +1897,17 @@ function vtSeekTo3D(index){
     const row=document.querySelector(`#vt-det-tbody tr[data-idx="${index}"]`);
     if(row) row.classList.add('active');
 
+    const frameId=pt.frame_index!==undefined?pt.frame_index:pt.frame_a;
+    const pxCam1=pt.cam1_pixel||pt.cam_a_pixel;
     const vid1=document.getElementById('vt-view1-video').value;
-    if(vid1&&pt.cam1_pixel){
+    if(vid1&&pxCam1&&frameId!==undefined){
       const info=_vtVideos.find(v=>v.filename===vid1);
       const fps=(info&&info.fps)?info.fps:30;
       const clipStartSec=_vtViewRanges[1].start*_vtViewRanges[1].duration;
-      const t=clipStartSec + pt.frame_index/fps;
+      const t=clipStartSec + frameId/fps;
       const video=document.getElementById('vt-video');
       video.src='/api/video-preview/frame?filename='+encodeURIComponent(vid1)
-        +'&time='+t+'&pixel_x='+pt.cam1_pixel[0]+'&pixel_y='+pt.cam1_pixel[1];
+        +'&time='+t+'&pixel_x='+pxCam1[0]+'&pixel_y='+pxCam1[1];
     }
   }
 }
@@ -1845,28 +1968,35 @@ function vtRenderPlaybackFrame(idx){
     row.scrollIntoView({block:'nearest',behavior:'smooth'});
   }
 
+  // Support both field naming conventions:
+  //   compute-3d:          frame_index, cam1_pixel, cam2_pixel
+  //   compute-trajectory:  frame_a,     cam_a_pixel, cam_b_pixel
+  const frameId=pt.frame_index!==undefined?pt.frame_index:pt.frame_a;
+  const pxCam1=pt.cam1_pixel||pt.cam_a_pixel;
+  const pxCam2=pt.cam2_pixel||pt.cam_b_pixel;
+
   // Fetch cam66 frame (View 1)
   const vid1=document.getElementById('vt-view1-video').value;
-  if(vid1&&pt.cam1_pixel){
+  if(vid1&&pxCam1&&frameId!==undefined){
     const info1=_vtVideos.find(v=>v.filename===vid1);
     const fps1=(info1&&info1.fps)?info1.fps:30;
     const clipStart1=_vtViewRanges[1].start*_vtViewRanges[1].duration;
-    const t1=clipStart1+pt.frame_index/fps1;
+    const t1=clipStart1+frameId/fps1;
     document.getElementById('vt-play-cam1').src=
       '/api/video-preview/frame?filename='+encodeURIComponent(vid1)
-      +'&time='+t1+'&pixel_x='+pt.cam1_pixel[0]+'&pixel_y='+pt.cam1_pixel[1];
+      +'&time='+t1+'&pixel_x='+pxCam1[0]+'&pixel_y='+pxCam1[1];
   }
 
   // Fetch cam68 frame (View 2)
   const vid2=document.getElementById('vt-view2-video').value;
-  if(vid2&&pt.cam2_pixel){
+  if(vid2&&pxCam2&&frameId!==undefined){
     const info2=_vtVideos.find(v=>v.filename===vid2);
     const fps2=(info2&&info2.fps)?info2.fps:30;
     const clipStart2=_vtViewRanges[2].start*_vtViewRanges[2].duration;
-    const t2=clipStart2+pt.frame_index/fps2;
+    const t2=clipStart2+frameId/fps2;
     document.getElementById('vt-play-cam2').src=
       '/api/video-preview/frame?filename='+encodeURIComponent(vid2)
-      +'&time='+t2+'&pixel_x='+pt.cam2_pixel[0]+'&pixel_y='+pt.cam2_pixel[1];
+      +'&time='+t2+'&pixel_x='+pxCam2[0]+'&pixel_y='+pxCam2[1];
   }
 
   // Update 3D map: show trajectory up to current point, highlight current

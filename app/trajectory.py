@@ -327,6 +327,11 @@ def find_offset_and_triangulate(
                 "z": float(pt[2]),
                 "ray_dist": rd,
                 "frame_a": int(fa),
+                # Per-camera debug: world-space ground projections
+                "cam_a_world": [round(w_a[0], 3), round(w_a[1], 3)],
+                "cam_b_world": [round(w_b[0], 3), round(w_b[1], 3)],
+                "cam_a_pixel": [round(px_a, 1), round(py_a, 1)],
+                "cam_b_pixel": [round(px_b, 1), round(py_b, 1)],
             })
 
     # Post-triangulation filtering
@@ -400,6 +405,7 @@ def fit_spatial_parabola(
     # Recover velocity from spatial coefficients: az = -g / (2*vy^2)
     g = 9.81
     vy = np.sqrt(g / (-2 * az)) if az < -1e-6 else 25.0
+    vy = float(np.clip(vy, 1.0, 80.0))  # Clamp to physical range
     vx = ax * vy
     y0 = ys[0]
     vz = vy * (2 * az * y0 + bz)
@@ -425,6 +431,8 @@ def fit_spatial_parabola(
         "v0": [float(vx), float(vy), float(vz)],
         "speed_ms": speed,
         "speed_kmh": speed * 3.6,
+        "y_min": float(np.min(ys)),
+        "y_max": float(np.max(ys)),
         "mean_error": float(np.mean(residuals)),
         "max_error": float(np.max(residuals)),
         "residuals": residuals,
@@ -715,8 +723,12 @@ def fit_trajectory(points: list[dict]) -> dict:
     result["n_outliers"] = len(outlier_indices)
     result["outlier_indices"] = outlier_indices
 
-    # Net crossing check
+    # Net crossing check (includes speed at net)
     result["net_crossing"] = _check_net_crossing(inlier_points, result)
+
+    # Landing point (where Z=0 after bounce/apex)
+    result["landing_point"] = _find_landing_point(result)
+
     return result
 
 
@@ -761,28 +773,270 @@ def _generate_smooth_curve(
 
 
 def _check_net_crossing(points: list[dict], traj_result: dict) -> Optional[dict]:
-    """Check ball height at net position (Y=11.885m)."""
-    net_y = 11.885
+    """Check ball height and speed at net position (Y=11.885m).
+
+    Computes:
+        - Position (x, z) at the net
+        - Whether the ball clears the net (center height 0.914m)
+        - Ball speed at net from the spatial fit velocity model
+
+    Key: For piecewise trajectories, uses the correct segment based on
+    whether the net is before or after the bounce point.
+    """
+    net_y = _NET_Y
     ys = [p["y"] for p in points]
 
     if min(ys) > net_y or max(ys) < net_y:
-        return None  # Ball doesn't cross net in this segment
+        return None
 
-    # Use spatial fit to compute Z at net
+    # Select the correct fit segment for the net position
     if traj_result["type"] == "piecewise":
-        fit = traj_result["pre_bounce"]
+        bounce_y = traj_result["bounce_pos"]["y"]
+        if net_y <= bounce_y:
+            fit = traj_result.get("pre_bounce")
+        else:
+            fit = traj_result.get("post_bounce")
     else:
         fit = traj_result.get("fit")
 
     if fit is None:
         return None
 
+    # Validate that net_y is within (or close to) the fit's valid Y range
+    y_margin = 3.0  # allow up to 3m extrapolation
+    fit_y_min = fit.get("y_min", min(ys))
+    fit_y_max = fit.get("y_max", max(ys))
+    if net_y < fit_y_min - y_margin or net_y > fit_y_max + y_margin:
+        logger.warning(
+            "Net Y=%.2f outside fit range [%.2f, %.2f] + margin, skipping",
+            net_y, fit_y_min, fit_y_max,
+        )
+        return None
+
     z_at_net = fit["az"] * net_y**2 + fit["bz"] * net_y + fit["cz"]
     x_at_net = fit["ax"] * net_y + fit["bx"]
+
+    # Sanity check: net height should be physically reasonable
+    if z_at_net < -1.0 or z_at_net > 10.0:
+        logger.warning(
+            "Net crossing z=%.2fm out of range [-1, 10], likely extrapolation error",
+            z_at_net,
+        )
+        return None
+
+    # Compute speed at net using the spatial-fit velocity model
+    speed_at_net = _compute_speed_at_y(fit, net_y)
+
+    # Sanity check: speed should be physically plausible (< 350 km/h)
+    speed_kmh = speed_at_net * 3.6
+    if speed_kmh > 350.0:
+        logger.warning(
+            "Net speed %.0f km/h exceeds physical limit, clamping", speed_kmh
+        )
+        speed_at_net = 350.0 / 3.6
+        speed_kmh = 350.0
 
     return {
         "y": net_y,
         "x": round(float(x_at_net), 4),
         "z": round(float(z_at_net), 4),
-        "clears_net": float(z_at_net) > 0.914,  # net center height
+        "clears_net": float(z_at_net) > 0.914,
+        "speed_ms": round(speed_at_net, 2),
+        "speed_kmh": round(speed_kmh, 1),
     }
+
+
+def _compute_speed_at_y(fit: dict, y: float) -> float:
+    """Compute ball speed at a given Y position from spatial fit coefficients.
+
+    From the spatial model:
+        X(Y) = ax*Y + bx  →  dX/dY = ax
+        Z(Y) = az*Y² + bz*Y + cz  →  dZ/dY = 2*az*Y + bz
+        az = -g / (2 * vy²)  →  vy = sqrt(g / (-2*az))
+
+    Speed = vy * sqrt(1 + (dX/dY)² + (dZ/dY)²)
+
+    Note: vy is clamped to [1, 80] m/s to prevent blow-up when |az| is very
+    small (nearly flat trajectory over a short Y range).
+    """
+    g = 9.81
+    az, bz = fit["az"], fit["bz"]
+    ax = fit["ax"]
+
+    vy = np.sqrt(g / (-2 * az)) if az < -1e-6 else 25.0
+    # Clamp vy to physically reasonable range:
+    # min ~3.6 km/h (very slow), max ~288 km/h (professional serve vy component)
+    vy = float(np.clip(vy, 1.0, 80.0))
+
+    dx_dy = ax
+    dz_dy = 2 * az * y + bz
+    speed = vy * np.sqrt(1.0 + dx_dy**2 + dz_dy**2)
+    return float(speed)
+
+
+def _find_landing_point(traj_result: dict) -> Optional[dict]:
+    """Find where the ball lands (Z=0) after the bounce or after the apex.
+
+    For piecewise trajectories, uses the post-bounce fit.
+    For single trajectories, finds where Z crosses zero on the descending side.
+
+    Returns landing position {x, y, z} or None.
+    """
+    if traj_result["type"] == "piecewise":
+        fit = traj_result.get("post_bounce")
+        if fit is None:
+            return None
+        # Find the second Z=0 root of post-bounce parabola:
+        # az*y² + bz*y + cz = 0
+        az, bz, cz = fit["az"], fit["bz"], fit["cz"]
+        disc = bz**2 - 4 * az * cz
+        if disc < 0:
+            return None
+        sqrt_disc = np.sqrt(disc)
+        y1 = (-bz + sqrt_disc) / (2 * az)
+        y2 = (-bz - sqrt_disc) / (2 * az)
+        # Pick the root that's farther along the trajectory (away from bounce)
+        bounce_y = traj_result["bounce_pos"]["y"]
+        candidates = [y for y in [y1, y2] if 0 <= y <= _COURT_Y]
+        if not candidates:
+            # Try with some margin
+            candidates = [y for y in [y1, y2] if -2 <= y <= _COURT_Y + 2]
+        if not candidates:
+            return None
+        # Pick the one farther from the bounce point
+        landing_y = max(candidates, key=lambda y: abs(y - bounce_y))
+        x_land = fit["ax"] * landing_y + fit["bx"]
+        return {
+            "x": round(float(x_land), 4),
+            "y": round(float(landing_y), 4),
+            "z": 0.0,
+        }
+    else:
+        fit = traj_result.get("fit")
+        if fit is None:
+            return None
+        az, bz, cz = fit["az"], fit["bz"], fit["cz"]
+        disc = bz**2 - 4 * az * cz
+        if disc < 0:
+            return None
+        sqrt_disc = np.sqrt(disc)
+        y1 = (-bz + sqrt_disc) / (2 * az)
+        y2 = (-bz - sqrt_disc) / (2 * az)
+        candidates = [y for y in [y1, y2] if 0 <= y <= _COURT_Y]
+        if not candidates:
+            return None
+        # Pick the root on the descending side (farther from start)
+        ys_data = traj_result.get("smooth_curve", [])
+        if ys_data:
+            start_y = ys_data[0]["y"]
+            landing_y = max(candidates, key=lambda y: abs(y - start_y))
+        else:
+            landing_y = max(candidates)
+        x_land = fit["ax"] * landing_y + fit["bx"]
+        return {
+            "x": round(float(x_land), 4),
+            "y": round(float(landing_y), 4),
+            "z": 0.0,
+        }
+
+
+# ========== Rally segmentation ==========
+
+
+def segment_rallies(
+    points_3d: list[dict],
+    fps: float = 25.0,
+    max_gap_seconds: float = 1.0,
+    min_rally_points: int = 15,
+    min_rally_duration: float = 0.5,
+    min_rally_displacement: float = 2.0,
+) -> list[list[dict]]:
+    """Split 3D points into separate rallies based on time gaps.
+
+    A new rally starts when:
+        - There is a time gap > max_gap_seconds between consecutive points
+        - The ball reappears far from where it disappeared (large spatial jump)
+
+    Segments are discarded if they fail any of these quality checks:
+        - Too few points (< min_rally_points)
+        - Too short in time (< min_rally_duration)
+        - Too little spatial displacement (< min_rally_displacement)
+          Noise clusters in a small area; a real shot travels across the court.
+
+    Args:
+        points_3d: Triangulated 3D points sorted by time, with keys x, y, z, t.
+        fps: Frame rate (used to interpret frame_a as time if t is missing).
+        max_gap_seconds: Maximum time gap within a rally.
+        min_rally_points: Minimum points to keep a rally segment.
+        min_rally_duration: Minimum time span (seconds) to keep a rally segment.
+        min_rally_displacement: Minimum 3D displacement first→last point (meters).
+
+    Returns:
+        List of rally segments, each a list of 3D point dicts.
+    """
+    if not points_3d:
+        return []
+
+    def _get_time(p: dict) -> float:
+        return p.get("t", p.get("frame_a", 0) / fps)
+
+    rallies: list[list[dict]] = []
+    current: list[dict] = [points_3d[0]]
+
+    for i in range(1, len(points_3d)):
+        prev = points_3d[i - 1]
+        curr = points_3d[i]
+
+        # Time gap
+        dt = _get_time(curr) - _get_time(prev)
+
+        # Spatial jump
+        dx = curr["x"] - prev["x"]
+        dy = curr["y"] - prev["y"]
+        dz = curr["z"] - prev["z"]
+        spatial_dist = np.sqrt(dx**2 + dy**2 + dz**2)
+
+        # Break rally on large time gap OR large spatial jump relative to time
+        is_gap = dt > max_gap_seconds
+        is_jump = dt > 0.2 and spatial_dist / dt > 80.0  # > 80 m/s = impossible
+
+        if is_gap or is_jump:
+            _maybe_keep(current, rallies, min_rally_points,
+                        min_rally_duration, min_rally_displacement, _get_time)
+            current = [curr]
+        else:
+            current.append(curr)
+
+    _maybe_keep(current, rallies, min_rally_points,
+                min_rally_duration, min_rally_displacement, _get_time)
+
+    return rallies
+
+
+def _maybe_keep(
+    segment: list[dict],
+    rallies: list[list[dict]],
+    min_points: int,
+    min_duration: float,
+    min_displacement: float,
+    get_time,
+) -> None:
+    """Append segment to rallies if it meets all quality requirements."""
+    if len(segment) < min_points:
+        return
+
+    duration = get_time(segment[-1]) - get_time(segment[0])
+    if duration < min_duration:
+        return
+
+    # 3D displacement from first to last point
+    p0, p1 = segment[0], segment[-1]
+    disp = np.sqrt(
+        (p1["x"] - p0["x"]) ** 2
+        + (p1["y"] - p0["y"]) ** 2
+        + (p1["z"] - p0["z"]) ** 2
+    )
+    if disp < min_displacement:
+        return
+
+    rallies.append(segment)

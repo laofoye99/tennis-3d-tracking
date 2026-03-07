@@ -15,7 +15,7 @@ from app.config import AppConfig
 from app.pipeline.camera_pipeline import run_pipeline
 from app.pipeline.video_pipeline import run_video_pipeline
 from app.schemas import BallPosition3D, PipelineStatus, SystemStatus, WorldPoint2D
-from app.trajectory import clean_detections, find_offset_and_triangulate, fit_trajectory
+from app.trajectory import clean_detections, find_offset_and_triangulate, fit_trajectory, segment_rallies
 from app.triangulation import triangulate
 
 logger = logging.getLogger(__name__)
@@ -588,6 +588,39 @@ class Orchestrator:
         if not raw_dets1 or not raw_dets2:
             return {"error": "No detections from one or both cameras"}
 
+        # Diagnostic: log per-camera pixel and world coord samples
+        def _pixel_to_world(H, px, py):
+            pt = np.array([px, py, 1.0])
+            r = H @ pt
+            return float(r[0] / r[2]), float(r[1] / r[2])
+
+        for cam_label, dets, H in [
+            (cam1_name, raw_dets1, H1),
+            (cam2_name, raw_dets2, H2),
+        ]:
+            sample = dets[:5]
+            world_xs = []
+            for d in dets:
+                wx, _ = _pixel_to_world(H, d[1], d[2])
+                world_xs.append(wx)
+            mean_x = np.mean(world_xs) if world_xs else 0
+            logger.info(
+                "[3d-diag] %s: %d dets, mean_world_x=%.2f, sample pixels: %s",
+                cam_label,
+                len(dets),
+                mean_x,
+                [(round(d[1], 0), round(d[2], 0)) for d in sample],
+            )
+            logger.info(
+                "[3d-diag] %s: sample world coords: %s",
+                cam_label,
+                [
+                    (round(_pixel_to_world(H, d[1], d[2])[0], 2),
+                     round(_pixel_to_world(H, d[1], d[2])[1], 2))
+                    for d in sample
+                ],
+            )
+
         # Use 25fps as nominal (actual timing reconstructed by offset search)
         fps = 25.0
 
@@ -612,8 +645,52 @@ class Orchestrator:
         if not points_3d:
             return {"error": "No matched points after offset search"}
 
-        # Stage 2: RANSAC spatial parabolic fit
-        traj_fit = fit_trajectory(points_3d)
+        # Diagnostic: log first 10 triangulated 3D points with per-camera world coords
+        for i, p in enumerate(points_3d[:10]):
+            caw = p.get("cam_a_world", [0, 0])
+            cbw = p.get("cam_b_world", [0, 0])
+            logger.info(
+                "[3d-diag] point[%d] 3D=(%.2f, %.2f, %.2f) ray=%.3f "
+                "camA_world=(%.2f, %.2f) camB_world=(%.2f, %.2f)",
+                i, p["x"], p["y"], p["z"], p["ray_dist"],
+                caw[0], caw[1], cbw[0], cbw[1],
+            )
+
+        # Stage 2: Rally segmentation — split by time gaps / spatial jumps
+        rallies = segment_rallies(points_3d, fps=fps, max_gap_seconds=1.0, min_rally_points=5)
+        logger.info(
+            "[3d-traj] Rally segmentation: %d points -> %d rallies (%s)",
+            len(points_3d),
+            len(rallies),
+            [len(r) for r in rallies],
+        )
+
+        # Stage 3: RANSAC spatial parabolic fit per rally
+        rally_results = []
+        for ri, rally_pts in enumerate(rallies):
+            traj_fit = fit_trajectory(rally_pts)
+            # Round point coordinates for JSON
+            for p in rally_pts:
+                p["x"] = round(p["x"], 4)
+                p["y"] = round(p["y"], 4)
+                p["z"] = round(p["z"], 4)
+                p["ray_dist"] = round(p["ray_dist"], 4)
+                p["t"] = round(p["t"], 4)
+            rally_results.append({
+                "rally_index": ri,
+                "points": rally_pts,
+                "trajectory": traj_fit,
+            })
+
+        # Use the largest rally as the primary result for backward compat
+        primary_rally = max(rally_results, key=lambda r: len(r["points"])) if rally_results else None
+        primary_points = primary_rally["points"] if primary_rally else []
+        primary_traj = primary_rally["trajectory"] if primary_rally else {"type": "insufficient_data"}
+
+        # Collect all points across all rallies for the full point cloud
+        all_points = []
+        for r in rally_results:
+            all_points.extend(r["points"])
 
         # Compute stats
         ray_dists = [p["ray_dist"] for p in points_3d]
@@ -629,25 +706,20 @@ class Orchestrator:
                 "cleaning": clean_stats2,
             },
             "matched_points": len(points_3d),
+            "n_rallies": len(rallies),
+            "rally_sizes": [len(r) for r in rallies],
             "time_offset_s": round(best_dt, 4),
             "time_offset_frames": round(best_dt * fps, 1),
             "mean_ray_dist": round(float(np.mean(ray_dists)), 4),
             "max_ray_dist": round(float(np.max(ray_dists)), 4),
-            "n_inliers": traj_fit.get("n_inliers", len(points_3d)),
-            "n_outliers": traj_fit.get("n_outliers", 0),
+            "n_inliers": primary_traj.get("n_inliers", len(primary_points)),
+            "n_outliers": primary_traj.get("n_outliers", 0),
         }
 
-        # Round point coordinates for JSON
-        for p in points_3d:
-            p["x"] = round(p["x"], 4)
-            p["y"] = round(p["y"], 4)
-            p["z"] = round(p["z"], 4)
-            p["ray_dist"] = round(p["ray_dist"], 4)
-            p["t"] = round(p["t"], 4)
-
         return {
-            "points": points_3d,
-            "trajectory": traj_fit,
+            "points": primary_points,
+            "trajectory": primary_traj,
+            "rallies": rally_results,
             "stats": stats,
             "cam_order": cam_names,
         }
