@@ -56,3 +56,4 @@ class SystemStatus(BaseModel):
     pipelines: dict[str, PipelineStatus] = {}
     triangulation_active: bool = False
     latest_ball_3d: Optional[BallPosition3D] = None
+    analytics: Optional[dict] = None

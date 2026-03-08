@@ -34,19 +34,22 @@ class BallTracker:
     def process_heatmap(self, heatmap: np.ndarray) -> Optional[tuple[float, float, float]]:
         """Extract ball (x, y, confidence) in original image coordinates from a single heatmap.
 
+        Blob detection runs at model resolution (e.g. 288×512) for speed,
+        then coordinates are scaled back to original image size.
+
         Args:
             heatmap: 2D array (H_model, W_model) with values in [0, 1].
 
         Returns:
             (pixel_x, pixel_y, confidence) or None if not detected.
         """
-        # Resize heatmap to original image size
-        heatmap_resized = cv2.resize(
-            heatmap, (self.orig_w, self.orig_h), interpolation=cv2.INTER_LINEAR
-        )
-        # Threshold
+        hm_h, hm_w = heatmap.shape[:2]
+        scale_x = self.orig_w / hm_w
+        scale_y = self.orig_h / hm_h
+
+        # Threshold at model resolution (no expensive resize)
         heatmap_filtered = np.where(
-            heatmap_resized > self.threshold, heatmap_resized, 0.0
+            heatmap > self.threshold, heatmap, 0.0
         ).astype(np.float32)
 
         binary = (heatmap_filtered > 0).astype(np.uint8)
@@ -60,8 +63,12 @@ class BallTracker:
             blob_sum = float(heatmap_filtered[mask].sum())
             if blob_sum <= 0:
                 continue
+            # Weighted centroid at model resolution
             cx = float(np.sum(np.where(mask)[1] * heatmap_filtered[mask]) / blob_sum)
             cy = float(np.sum(np.where(mask)[0] * heatmap_filtered[mask]) / blob_sum)
+            # Scale to original image coordinates
+            cx *= scale_x
+            cy *= scale_y
             blob_centers.append((cx, cy, blob_sum))
 
         if not blob_centers:

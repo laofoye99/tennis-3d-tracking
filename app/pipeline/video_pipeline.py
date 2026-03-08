@@ -1,18 +1,82 @@
-"""Video file processing pipeline: read video → inference → postprocess → homography → output queue."""
+"""Video file processing pipeline: read video → inference → postprocess → output.
+
+Uses a prefetch thread to overlap frame reading / preprocessing with GPU
+inference so the GPU never waits for the CPU.
+"""
 
 import logging
 import multiprocessing as mp
+import queue
+import threading
 import time
 from typing import Any, Optional
 
 import cv2
 
 from app.pipeline.homography import HomographyTransformer
-from app.pipeline.inference import BallDetector
+from app.pipeline.inference import create_detector
 from app.pipeline.postprocess import BallTracker
 
 logger = logging.getLogger(__name__)
 
+
+# ---------------------------------------------------------------------------
+# Frame prefetch thread
+# ---------------------------------------------------------------------------
+
+def _prefetch_thread(
+    cap: cv2.VideoCapture,
+    total_frames: int,
+    frames_in: int,
+    detector,
+    stop_event: mp.Event,
+    batch_queue: queue.Queue,
+    status_dict: dict[str, Any],
+) -> None:
+    """Read frames, preprocess, and push ready batches into batch_queue.
+
+    Each item placed on the queue is:
+        (batch_frame_count, preprocessed_list, preview_frame_or_None)
+    where batch_frame_count is the cumulative processed_count after this batch.
+    """
+    frame_buffer: list = []
+    raw_buffer: list = []  # original frames for preview
+    processed_count = 0
+
+    while processed_count < total_frames and not stop_event.is_set():
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        processed_count += 1
+        status_dict["processed_frames"] = processed_count
+
+        raw_buffer.append(frame)
+
+        # Mask timestamp overlay
+        masked = frame.copy()
+        masked[0:41, 0:603] = 0
+
+        frame_buffer.append(masked)
+        if len(frame_buffer) < frames_in:
+            continue
+
+        # Push complete batch
+        preview = raw_buffer[-1].copy()
+        try:
+            batch_queue.put((processed_count, frame_buffer.copy(), preview), timeout=5.0)
+        except queue.Full:
+            pass
+        frame_buffer.clear()
+        raw_buffer.clear()
+
+    # Sentinel
+    batch_queue.put(None)
+
+
+# ---------------------------------------------------------------------------
+# Main pipeline entry point
+# ---------------------------------------------------------------------------
 
 def run_video_pipeline(
     video_path: str,
@@ -67,8 +131,15 @@ def run_video_pipeline(
         # Seek to start frame
         cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
 
-        # Initialize pipeline components
-        detector = BallDetector(model_path, input_size, frames_in, frames_out, device)
+        # Initialize pipeline components (auto-selects ONNX or PyTorch backend)
+        detector = create_detector(model_path, input_size, frames_in, frames_out, device)
+
+        # Compute background median for TrackNet (author's approach)
+        if hasattr(detector, "compute_video_median"):
+            log.info("Computing video median for TrackNet background...")
+            detector.compute_video_median(cap, start_frame, end_frame)
+            cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)  # Reset to start
+
         tracker = BallTracker(original_size=(vid_w, vid_h), threshold=threshold)
         homography = HomographyTransformer(homography_path, homography_key)
 
@@ -77,39 +148,32 @@ def run_video_pipeline(
         status_dict["processed_frames"] = 0
         status_dict["fps"] = 0.0
 
-        frame_buffer: list = []
-        processed_count = 0
         fps_counter = 0
         fps_time = time.time()
-        # Track latest detection for drawing on preview frames
         last_pixel_detection: tuple[float, float, float] | None = None
         preview_scale = 960.0 / vid_w if vid_w > 960 else 1.0
 
-        while processed_count < total_frames and not stop_event.is_set():
-            ret, frame = cap.read()
-            if not ret:
-                break
+        # Start prefetch thread — reads frames while GPU runs inference
+        batch_q: queue.Queue = queue.Queue(maxsize=2)
+        reader = threading.Thread(
+            target=_prefetch_thread,
+            args=(cap, total_frames, frames_in, detector, stop_event, batch_q, status_dict),
+            daemon=True,
+        )
+        reader.start()
 
-            processed_count += 1
-            status_dict["processed_frames"] = processed_count
+        while not stop_event.is_set():
+            item = batch_q.get()
+            if item is None:
+                break  # sentinel — reader finished
 
-            # Save unmasked frame for preview if this completes a batch
-            if frame_queue is not None and len(frame_buffer) + 1 >= frames_in:
-                _preview_frame = frame.copy()
-
-            # Mask out timestamp overlay (top-left corner) to avoid interfering with detection
-            frame[0:41, 0:603] = 0
-
-            frame_buffer.append(frame)
-            if len(frame_buffer) < frames_in:
-                continue
+            processed_count, frame_buffer, preview_frame = item
 
             # Inference
             try:
                 heatmaps = detector.infer(frame_buffer)
             except Exception as e:
                 log.error("Inference error: %s", e)
-                frame_buffer.clear()
                 continue
 
             # Post-process each output frame
@@ -123,8 +187,6 @@ def run_video_pipeline(
                 wx, wy = homography.pixel_to_world(px, py)
 
                 # Unique frame index: each output corresponds to an input frame
-                # Batch N processes frames (N-1)*frames_in+1 .. N*frames_in
-                # Output i corresponds to frame processed_count - frames_out + i + 1
                 fi = processed_count - frames_out + i + 1
 
                 detection = {
@@ -135,7 +197,7 @@ def run_video_pipeline(
                     "pixel_y": py,
                     "confidence": conf,
                     "timestamp": time.time(),
-                    "frame_index": fi,  # relative to clip start for cross-camera matching
+                    "frame_index": fi,
                 }
 
                 try:
@@ -143,14 +205,14 @@ def run_video_pipeline(
                 except Exception:
                     pass
 
-            # Send preview AFTER inference so detection overlay matches the displayed frame
+            # Send preview AFTER inference so detection overlay matches
             if frame_queue is not None:
                 try:
-                    h, w = _preview_frame.shape[:2]
+                    h, w = preview_frame.shape[:2]
                     if w > 960:
-                        preview = cv2.resize(_preview_frame, (960, int(h * preview_scale)))
+                        preview = cv2.resize(preview_frame, (960, int(h * preview_scale)))
                     else:
-                        preview = _preview_frame
+                        preview = preview_frame
                     if last_pixel_detection is not None:
                         dpx, dpy, _dconf = last_pixel_detection
                         draw_x = int(dpx * preview_scale)
@@ -170,16 +232,15 @@ def run_video_pipeline(
             fps_counter += frames_out
             now = time.time()
             if now - fps_time >= 1.0:
-                status_dict["fps"] = fps_counter / (now - fps_time)
+                status_dict["fps"] = round(fps_counter / (now - fps_time), 1)
                 fps_counter = 0
                 fps_time = now
 
-            frame_buffer.clear()
-
+        reader.join(timeout=5.0)
         cap.release()
         status_dict["state"] = "completed"
-        status_dict["processed_frames"] = processed_count
-        log.info("Video pipeline completed: %d frames processed", processed_count)
+        status_dict["processed_frames"] = status_dict.get("processed_frames", 0)
+        log.info("Video pipeline completed: %d frames processed", status_dict["processed_frames"])
 
     except Exception as e:
         log.exception("Video pipeline crashed: %s", e)

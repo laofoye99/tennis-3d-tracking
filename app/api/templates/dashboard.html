@@ -238,6 +238,30 @@ body{font-family:'Lato',sans-serif;background:var(--bg);color:var(--text);height
 .pb-speed-select{background:var(--card-bg);color:var(--text);border:1px solid rgba(255,255,255,.15);border-radius:4px;padding:2px 6px;font-size:10px;font-family:'Lato',sans-serif;cursor:pointer;outline:none}
 .pb-speed-select option{background:var(--card-bg);color:var(--text)}
 
+/* ---- Presentation Grid (video test playback) ---- */
+.presentation-grid{display:grid;grid-template-columns:1fr 1fr 280px;grid-template-rows:1fr 1fr;gap:4px;width:100%;height:100%}
+.pg-cam{position:relative;background:#000;overflow:hidden;min-height:0}
+.pg-cam img{width:100%;height:100%;object-fit:contain;display:block;background:#000}
+.pg-cam-label{position:absolute;top:6px;left:8px;font-size:9px;font-weight:700;background:rgba(0,0,0,.65);color:#fff;padding:2px 8px;border-radius:3px;pointer-events:none;z-index:1}
+.pg-3d{grid-column:1/3;background:#1a1a2e;overflow:hidden;min-height:0;border-radius:4px}
+.pg-sidebar{grid-row:1/3;grid-column:3;display:flex;flex-direction:column;gap:4px;overflow-y:auto;background:rgba(10,20,10,.82);border-radius:8px;padding:6px;backdrop-filter:blur(8px);border:1px solid rgba(255,255,255,.12)}
+.pg-minimap-wrap{flex-shrink:0}
+.pg-minimap-wrap canvas{display:block;border-radius:4px;width:100%}
+.pg-stats{display:flex;flex-direction:column;gap:4px;flex:1}
+.pg-stat-card{background:rgba(255,255,255,.06);border-radius:6px;padding:8px 12px;display:flex;align-items:baseline;justify-content:space-between}
+.pg-stat-label{font-size:9px;color:rgba(255,255,255,.5);font-weight:600;text-transform:uppercase;letter-spacing:.5px}
+.pg-stat-value{font-size:22px;font-weight:800;color:#fff;letter-spacing:-1px;line-height:1}
+.pg-stat-unit{font-size:10px;font-weight:700;color:rgba(255,255,255,.4);margin-left:2px}
+.pg-stat-value.small{font-size:14px;font-weight:600;letter-spacing:0}
+/* Timeline event markers */
+.pb-timeline-wrap{position:relative;flex:1;display:flex;align-items:center}
+.pb-timeline-wrap .pb-slider{width:100%}
+.pb-timeline-markers{position:absolute;top:-8px;left:7px;right:7px;height:6px;pointer-events:none;z-index:1}
+.pb-marker{position:absolute;width:6px;height:6px;border-radius:50%;transform:translateX(-50%);cursor:pointer;pointer-events:auto;z-index:2;transition:transform .1s}
+.pb-marker:hover{transform:translateX(-50%) scale(1.6)}
+.pb-marker::after{content:attr(data-tip);position:absolute;bottom:10px;left:50%;transform:translateX(-50%);background:#222;color:#fff;font-size:8px;white-space:nowrap;padding:2px 6px;border-radius:3px;opacity:0;pointer-events:none;transition:opacity .15s}
+.pb-marker:hover::after{opacity:1}
+
 /* ---- Dual Video Preview (clip selection mode) ---- */
 .dual-preview{display:flex;gap:4px;width:100%;height:100%}
 .dual-preview-col{flex:1;display:flex;flex-direction:column;min-width:0}
@@ -360,9 +384,19 @@ body{font-family:'Lato',sans-serif;background:var(--bg);color:var(--text);height
         <div class="minimap-section">
           <div class="section-title">Mini Map</div>
           <canvas id="minimap" width="300" height="500"></canvas>
-          <div class="minimap-footer">
-            <span class="speed-label">球速:</span>
-            <span class="speed-value" id="ball-speed">- km/h</span>
+          <div class="minimap-footer" style="flex-direction:column;align-items:stretch;gap:6px">
+            <div style="display:flex;align-items:center;gap:8px">
+              <span class="speed-label">球速:</span>
+              <span class="speed-value" id="ball-speed">- km/h</span>
+            </div>
+            <div style="display:flex;align-items:center;gap:12px">
+              <span class="speed-label">Rally:</span>
+              <span id="rally-state" class="speed-value" style="min-width:50px;color:#94a3b8">idle</span>
+              <span class="speed-label">Strokes:</span>
+              <span id="stroke-count" class="speed-value">0</span>
+              <span class="speed-label">Bounces:</span>
+              <span id="bounce-count" class="speed-value">0</span>
+            </div>
           </div>
         </div>
       </div>
@@ -574,32 +608,49 @@ body{font-family:'Lato',sans-serif;background:var(--bg);color:var(--text);height
               </div>
             </div>
           </div>
-          <!-- Playback mode: dual camera view -->
+          <!-- Playback mode: presentation grid -->
           <div id="vt-playback-area" style="display:none;flex:1;min-height:0;overflow:hidden;position:relative">
-            <div class="playback-dual">
-              <div class="playback-cam">
-                <div class="playback-cam-label">cam66 (View 1)</div>
+            <div class="presentation-grid">
+              <!-- cam66 (top-left) -->
+              <div class="pg-cam">
+                <div class="pg-cam-label" style="color:#4f88fa">cam66</div>
                 <img id="vt-play-cam1" alt="cam66 frame">
               </div>
-              <div class="playback-cam">
-                <div class="playback-cam-label">cam68 (View 2)</div>
+              <!-- cam68 (top-right) -->
+              <div class="pg-cam">
+                <div class="pg-cam-label" style="color:#fa4e4e">cam68</div>
                 <img id="vt-play-cam2" alt="cam68 frame">
               </div>
-            </div>
-            <!-- SwingVision-style HUD overlay -->
-            <div id="vt-hud-overlay" class="hud-overlay" style="display:none">
-              <!-- Minimap court -->
-              <div class="hud-minimap-wrap">
-                <canvas id="vt-hud-minimap" width="160" height="280"></canvas>
-              </div>
-              <!-- Speed + stats panel below minimap -->
-              <div class="hud-stats-panel">
-                <div id="vt-hud-shot-type" class="hud-shot-type"></div>
-                <div class="hud-speed-row">
-                  <span id="vt-hud-speed-val" class="hud-speed-val">--</span>
-                  <span class="hud-speed-unit">KM/H</span>
+              <!-- Sidebar: minimap + stats (right, spans both rows) -->
+              <div class="pg-sidebar">
+                <div class="pg-minimap-wrap">
+                  <canvas id="vt-pg-minimap" width="268" height="460"></canvas>
+                </div>
+                <div class="pg-stats">
+                  <div class="pg-stat-card">
+                    <span class="pg-stat-label">Speed</span>
+                    <div><span id="pg-speed-val" class="pg-stat-value">--</span><span class="pg-stat-unit">KM/H</span></div>
+                  </div>
+                  <div class="pg-stat-card">
+                    <span class="pg-stat-label">Height</span>
+                    <div><span id="pg-height-val" class="pg-stat-value">--</span><span class="pg-stat-unit">M</span></div>
+                  </div>
+                  <div class="pg-stat-card">
+                    <span class="pg-stat-label">Position</span>
+                    <div><span id="pg-pos-val" class="pg-stat-value small">--</span></div>
+                  </div>
+                  <div class="pg-stat-card">
+                    <span class="pg-stat-label">Shot</span>
+                    <div><span id="pg-shot-val" class="pg-stat-value small">--</span></div>
+                  </div>
+                  <div class="pg-stat-card">
+                    <span class="pg-stat-label">Bounces</span>
+                    <div><span id="pg-bounce-val" class="pg-stat-value small">0</span></div>
+                  </div>
                 </div>
               </div>
+              <!-- 3D Map (bottom-left, spans 2 cols) -->
+              <div class="pg-3d" id="vt-pg-3d-slot"></div>
             </div>
           </div>
           <!-- Playback controls (playback mode) -->
@@ -613,7 +664,8 @@ body{font-family:'Lato',sans-serif;background:var(--bg);color:var(--text);height
             <button class="pb-btn" onclick="vtPlaybackStep(1)" title="Next">
               <svg viewBox="0 0 24 24"><path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z"/></svg>
             </button>
-            <div class="pb-slider-wrap">
+            <div class="pb-timeline-wrap">
+              <div class="pb-timeline-markers" id="vt-pb-markers"></div>
               <input type="range" class="pb-slider" id="vt-pb-slider" min="0" max="0" value="0"
                      oninput="vtPlaybackScrub(this.value)" onchange="vtPlaybackScrub(this.value)">
             </div>
@@ -767,7 +819,7 @@ function _renderGrid(cams){
 }
 
 // ---- Mini Map ----
-function drawCourt(canvas,ballX,ballY){
+function drawCourt(canvas,ballX,ballY,bounces){
   const ctx=canvas.getContext('2d'),W=canvas.width,H=canvas.height;
   const margin=12,cw=W-2*margin,ch=H-2*margin;
   const sx=cw/COURT_W,sy=ch/COURT_L;
@@ -802,6 +854,30 @@ function drawCourt(canvas,ballX,ballY){
     ctx.fillStyle=tb.color;ctx.font='bold 7px Lato';
     ctx.fillText(tb.label,bx+6,by+3);
   });
+
+  // Draw bounce markers
+  if(bounces&&bounces.length){
+    bounces.forEach((b,i)=>{
+      const bx=tx(b.x),by=ty(b.y);
+      const color=b.in_court?'#4caf50':'#f44336';
+      // Outer ring
+      ctx.beginPath();ctx.arc(bx,by,7,0,Math.PI*2);
+      ctx.strokeStyle=color;ctx.lineWidth=2;ctx.stroke();
+      // Inner fill
+      ctx.beginPath();ctx.arc(bx,by,3,0,Math.PI*2);
+      ctx.fillStyle=color;ctx.fill();
+      // Label
+      ctx.font='bold 8px Lato';ctx.fillStyle=color;
+      ctx.fillText(b.in_court?'IN':'OUT',bx+10,by+3);
+      // Fade older bounces: reduce opacity for all but the latest 3
+      if(i<bounces.length-3){
+        ctx.globalAlpha=0.4;
+        ctx.beginPath();ctx.arc(bx,by,7,0,Math.PI*2);
+        ctx.fillStyle='rgba(0,0,0,.4)';ctx.fill();
+        ctx.globalAlpha=1.0;
+      }
+    });
+  }
 
   if(ballX!=null&&ballY!=null){
     const bx=tx(ballX),by=ty(ballY);
@@ -945,19 +1021,37 @@ async function poll(){
       if(fpsEl)fpsEl.textContent=p.fps.toFixed(1);
     }
     renderVideoArea(d.pipelines);
+
+    // Extract analytics data from status
+    const analytics=d.analytics||{};
+    const recentBounces=analytics.recent_bounces||[];
+    const rallyState=analytics.rally_state||{};
+
     const b=d.latest_ball_3d;
     if(b){
-      drawCourt(document.getElementById('minimap'),b.x,b.y);
+      drawCourt(document.getElementById('minimap'),b.x,b.y,recentBounces);
       draw3DMap(document.getElementById('map3d'),b);
     }else{
-      drawCourt(document.getElementById('minimap'),null,null);
+      drawCourt(document.getElementById('minimap'),null,null,recentBounces);
       draw3DMap(document.getElementById('map3d'),null);
     }
+
+    // Update rally state display
+    const stateEl=document.getElementById('rally-state');
+    const strokeEl=document.getElementById('stroke-count');
+    const bounceEl=document.getElementById('bounce-count');
+    if(stateEl){
+      const st=rallyState.state||'idle';
+      stateEl.textContent=st;
+      stateEl.style.color=st==='rally'?'#4caf50':'#94a3b8';
+    }
+    if(strokeEl) strokeEl.textContent=rallyState.stroke_count||0;
+    if(bounceEl) bounceEl.textContent=recentBounces.length||0;
   }catch(e){console.error(e)}
 }
 
 // Init
-drawCourt(document.getElementById('minimap'),null,null);
+drawCourt(document.getElementById('minimap'),null,null,[]);
 draw3DMap(document.getElementById('map3d'),null);
 setInterval(poll,500);
 
@@ -985,6 +1079,7 @@ let _vt3dPoints=[];  // computed 3D points
 let _vtTrajectory=null;  // trajectory fit result (spatial parabola)
 let _vtRallies=[];  // all rally segments [{rally_index, points, trajectory}]
 let _vtCurrentRally=-1;  // -1 = show primary/all
+let _vtBatchBounces=[];  // batch analytics bounce events
 // Per-view clip ranges: View1=anchor (start+end), View2=start only (duration from View1)
 let _vtViewRanges={1:{start:0,end:1,duration:0,fps:25,configured:false,filename:''},
                    2:{start:0,end:1,duration:0,fps:25,configured:false,filename:''}};
@@ -997,6 +1092,7 @@ let _vtPlaybackIdx=0;
 let _vtPlaybackTimer=null;
 let _vtPlaybackSpeed=1;
 let _vtPlaybackPlaying=false;
+let _vt3dOriginalParent=null;
 
 // ---- Rally selector & stats helpers ----
 
@@ -1033,6 +1129,12 @@ function vtBuildStatsSummary(stats){
         }
       });
     }
+  }
+  // Batch analytics info (Z-velocity bounce detection)
+  if(_vtBatchBounces&&_vtBatchBounces.length){
+    const inCount=_vtBatchBounces.filter(b=>b.in_court).length;
+    const outCount=_vtBatchBounces.length-inCount;
+    msg+='\nBounce detect: '+_vtBatchBounces.length+' ('+inCount+' IN, '+outCount+' OUT)';
   }
   return msg;
 }
@@ -1106,6 +1208,28 @@ function vtUpdatePlaybackStats(){
     ctx.font='bold 9px Lato';ctx.fillStyle=color;
     ctx.fillText(inCourt?'IN':'OUT',lx+11,ly+3);
   });
+
+  // --- Batch analytics bounce markers (Z-velocity detection) ---
+  if(_vtBatchBounces&&_vtBatchBounces.length){
+    _vtBatchBounces.forEach(b=>{
+      const bx=mx(b.x),by=my(b.y);
+      const color=b.in_court?'#4caf50':'#f44336';
+      // Don't draw if already covered by a landing point marker
+      const overlap=uniqueLPs.some(lp=>Math.hypot(mx(lp.x)-bx,my(lp.y)-by)<10);
+      if(overlap) return;
+      // Diamond marker for analytics bounces
+      const r=5;
+      ctx.beginPath();
+      ctx.moveTo(bx,by-r);ctx.lineTo(bx+r,by);
+      ctx.lineTo(bx,by+r);ctx.lineTo(bx-r,by);
+      ctx.closePath();
+      ctx.fillStyle=color+'aa';ctx.fill();
+      ctx.strokeStyle=color;ctx.lineWidth=1.5;ctx.stroke();
+      // Small label
+      ctx.font='bold 7px Lato';ctx.fillStyle=color;
+      ctx.fillText(b.in_court?'IN':'OUT',bx+8,by+2);
+    });
+  }
 
   // --- Update stats panel ---
   const shotEl=document.getElementById('vt-hud-shot-type');
@@ -1188,7 +1312,7 @@ function vtSwitchRally(index){
   if(_vtTrajectory) vtDrawTrajectoryCurve(_vtTrajectory);
   vtRender3DTable();
   vtRenderRallySelector();
-  vtUpdatePlaybackStats();
+  if(_vtPlaybackMode&&_vtPlaybackIdx>=0) vtRenderPlaybackFrame(_vtPlaybackIdx);
   // Update stats label
   const msg=vtBuildStatsSummary({n_rallies:_vtRallies.length,rally_sizes:_vtRallies.map(r=>r.points.length)});
   document.getElementById('vt-phase-label').textContent=msg;
@@ -1893,8 +2017,12 @@ async function vtToggleRun(){
       _vtTrajectory=trajResult.trajectory||null;
       _vtRallies=trajResult.rallies||[];
       _vtCurrentRally=-1;
+      // Extract batch analytics (bounce detection & rally tracking)
+      const batchAnalytics=trajResult.analytics||{};
+      _vtBatchBounces=batchAnalytics.bounces||[];
       console.log('Trajectory stats:',JSON.stringify(stats,null,2));
       console.log('Rallies:',_vtRallies.length);
+      console.log('Batch analytics:',_vtBatchBounces.length,'bounces');
     } else {
       console.warn('Trajectory failed, falling back to compute-3d');
       const r2=await fetch('/api/video-test/compute-3d',{method:'POST'});
@@ -2104,6 +2232,27 @@ function vtEnterPlayback(){
   document.getElementById('vt-playback-area').style.display='flex';
   document.getElementById('vt-playback-controls').style.display='flex';
 
+  // Move 3D container into presentation grid slot
+  const container3d=document.getElementById('vt-3d-container');
+  const slot=document.getElementById('vt-pg-3d-slot');
+  if(container3d&&slot){
+    _vt3dOriginalParent=container3d.parentElement;
+    slot.appendChild(container3d);
+    container3d.style.width='100%';
+    container3d.style.height='100%';
+    // Trigger Three.js resize after DOM reflow
+    if(_vtRenderer&&_vtCamera3d){
+      setTimeout(()=>{
+        const w=container3d.clientWidth, h=container3d.clientHeight;
+        if(w>0&&h>0){
+          _vtCamera3d.aspect=w/h;
+          _vtCamera3d.updateProjectionMatrix();
+          _vtRenderer.setSize(w,h);
+        }
+      },50);
+    }
+  }
+
   // Configure slider
   const slider=document.getElementById('vt-pb-slider');
   slider.max=_vt3dPoints.length-1;
@@ -2113,14 +2262,36 @@ function vtEnterPlayback(){
   document.getElementById('vt-pb-speed').value='1';
   _vtPlaybackSpeed=1;
 
-  // Render first frame and stats overlay
+  // Build timeline event markers
+  vtBuildTimelineMarkers();
+
+  // Render first frame (calls minimap + stats internally)
   vtRenderPlaybackFrame(0);
-  vtUpdatePlaybackStats();
 }
 
 function vtExitPlayback(){
   _vtPlaybackMode=false;
   vtPlaybackPause();
+
+  // Restore 3D container to its original parent
+  const container3d=document.getElementById('vt-3d-container');
+  if(container3d&&_vt3dOriginalParent){
+    _vt3dOriginalParent.appendChild(container3d);
+    container3d.style.width='100%';
+    container3d.style.height='calc(100% - 30px)';
+    // Trigger Three.js resize
+    if(_vtRenderer&&_vtCamera3d){
+      setTimeout(()=>{
+        const w=container3d.clientWidth, h=container3d.clientHeight;
+        if(w>0&&h>0){
+          _vtCamera3d.aspect=w/h;
+          _vtCamera3d.updateProjectionMatrix();
+          _vtRenderer.setSize(w,h);
+        }
+      },50);
+    }
+    _vt3dOriginalParent=null;
+  }
 
   // Show dual preview, hide playback area
   document.getElementById('vt-dual-preview').style.display='flex';
@@ -2180,6 +2351,10 @@ function vtRenderPlaybackFrame(idx){
 
   // Update 3D map: show trajectory up to current point, highlight current
   vtUpdate3DBalls(_vt3dPoints.slice(0,idx+1),idx);
+
+  // Update presentation grid minimap and per-frame stats
+  vtDrawPlaybackMinimap(idx);
+  vtUpdatePerFrameStats(idx);
 }
 
 function vtPlaybackToggle(){
@@ -2246,6 +2421,255 @@ function vtPlaybackSetSpeed(val){
     vtPlaybackPause();
     vtPlaybackPlay();
   }
+}
+
+// ---- Presentation Grid: Timeline Markers ----
+function vtBuildTimelineMarkers(){
+  const container=document.getElementById('vt-pb-markers');
+  if(!container) return;
+  container.innerHTML='';
+  const total=_vt3dPoints.length;
+  if(total<2) return;
+
+  // Helper: find nearest point index by (x,y)
+  function nearestIdx(x,y){
+    let bestI=0,bestD=Infinity;
+    _vt3dPoints.forEach((p,i)=>{
+      const d=Math.hypot(p.x-x,p.y-y);
+      if(d<bestD){bestD=d;bestI=i}
+    });
+    return bestI;
+  }
+
+  // Bounce markers (green=IN, red=OUT)
+  if(_vtBatchBounces&&_vtBatchBounces.length){
+    _vtBatchBounces.forEach(b=>{
+      const idx=nearestIdx(b.x,b.y);
+      const pct=(idx/(total-1))*100;
+      const m=document.createElement('div');
+      m.className='pb-marker';
+      m.style.left=pct+'%';
+      m.style.background=b.in_court?'#4caf50':'#f44336';
+      m.dataset.tip=(b.in_court?'IN':'OUT')+' bounce';
+      m.onclick=()=>{vtPlaybackPause();vtRenderPlaybackFrame(idx)};
+      container.appendChild(m);
+    });
+  }
+
+  // Net crossing marker (blue)
+  if(_vtTrajectory&&_vtTrajectory.net_crossing){
+    const nc=_vtTrajectory.net_crossing;
+    const idx=nearestIdx(nc.x,nc.y);
+    const pct=(idx/(total-1))*100;
+    const m=document.createElement('div');
+    m.className='pb-marker';
+    m.style.left=pct+'%';
+    m.style.background='#4f88fa';
+    const speedStr=nc.speed_kmh?(' '+nc.speed_kmh.toFixed(0)+'km/h'):'';
+    m.dataset.tip=(nc.clears_net?'Net clear':'Net fault')+speedStr;
+    m.onclick=()=>{vtPlaybackPause();vtRenderPlaybackFrame(idx)};
+    container.appendChild(m);
+  }
+
+  // Landing point marker (orange)
+  if(_vtTrajectory&&_vtTrajectory.landing_point){
+    const lp=_vtTrajectory.landing_point;
+    const idx=nearestIdx(lp.x,lp.y);
+    const pct=(idx/(total-1))*100;
+    const m=document.createElement('div');
+    m.className='pb-marker';
+    m.style.left=pct+'%';
+    m.style.background='#ff9800';
+    const inC=lp.x>=0&&lp.x<=COURT_W&&lp.y>=0&&lp.y<=COURT_L;
+    m.dataset.tip='Landing '+(inC?'IN':'OUT');
+    m.onclick=()=>{vtPlaybackPause();vtRenderPlaybackFrame(idx)};
+    container.appendChild(m);
+  }
+}
+
+// ---- Presentation Grid: Animated Minimap ----
+function vtDrawPlaybackMinimap(idx){
+  const canvas=document.getElementById('vt-pg-minimap');
+  if(!canvas) return;
+  const ctx=canvas.getContext('2d');
+  const W=canvas.width, H=canvas.height;
+  const pad=10, cw=W-2*pad, ch=H-2*pad;
+  const sx=cw/COURT_W, sy=ch/COURT_L;
+  function mx(x){return pad+(COURT_W-x)*sx}
+  function my(y){return H-pad-y*sy}
+
+  ctx.clearRect(0,0,W,H);
+
+  // Court surface
+  ctx.fillStyle='#1a3a22';ctx.fillRect(0,0,W,H);
+  ctx.fillStyle='#295e38';
+  ctx.fillRect(mx(COURT_W),my(COURT_L),COURT_W*sx,COURT_L*sy);
+  ctx.fillStyle='#2f6b40';
+  ctx.fillRect(mx(COURT_W),my(SRV_F),COURT_W*sx,(SRV_F-SRV_N)*sy);
+
+  // Court lines
+  ctx.strokeStyle='rgba(255,255,255,.7)';ctx.lineWidth=1;
+  ctx.strokeRect(mx(COURT_W),my(COURT_L),COURT_W*sx,COURT_L*sy);
+  // Net
+  ctx.beginPath();ctx.moveTo(mx(COURT_W),my(NET_Y));ctx.lineTo(mx(0),my(NET_Y));
+  ctx.strokeStyle='rgba(255,255,255,.85)';ctx.lineWidth=2;ctx.stroke();
+  // Service lines
+  ctx.strokeStyle='rgba(255,255,255,.6)';ctx.lineWidth=1;
+  [SRV_N,SRV_F].forEach(y=>{ctx.beginPath();ctx.moveTo(mx(COURT_W),my(y));ctx.lineTo(mx(0),my(y));ctx.stroke()});
+  // Center service line
+  ctx.beginPath();ctx.moveTo(mx(CX),my(SRV_N));ctx.lineTo(mx(CX),my(SRV_F));ctx.stroke();
+  // Center marks
+  ctx.beginPath();ctx.moveTo(mx(CX),my(0));ctx.lineTo(mx(CX),my(0.4));ctx.stroke();
+  ctx.beginPath();ctx.moveTo(mx(CX),my(COURT_L));ctx.lineTo(mx(CX),my(COURT_L-0.4));ctx.stroke();
+
+  // Trajectory trail (orange line from start to current idx)
+  if(_vt3dPoints.length>1&&idx>0){
+    ctx.beginPath();
+    ctx.moveTo(mx(_vt3dPoints[0].x),my(_vt3dPoints[0].y));
+    for(let i=1;i<=idx&&i<_vt3dPoints.length;i++){
+      ctx.lineTo(mx(_vt3dPoints[i].x),my(_vt3dPoints[i].y));
+    }
+    ctx.strokeStyle='rgba(255,165,0,.6)';ctx.lineWidth=2;ctx.stroke();
+
+    // Fading dots for recent 10 points
+    const start=Math.max(0,idx-10);
+    for(let i=start;i<=idx;i++){
+      const alpha=0.2+0.8*((i-start)/Math.max(1,idx-start));
+      ctx.beginPath();
+      ctx.arc(mx(_vt3dPoints[i].x),my(_vt3dPoints[i].y),3,0,Math.PI*2);
+      ctx.fillStyle='rgba(255,165,0,'+alpha.toFixed(2)+')';
+      ctx.fill();
+    }
+  }
+
+  // Bounce markers (only those reached so far)
+  if(_vtBatchBounces&&_vtBatchBounces.length){
+    _vtBatchBounces.forEach(b=>{
+      let bestI=0,bestD=Infinity;
+      _vt3dPoints.forEach((p,i)=>{
+        const d=Math.hypot(p.x-b.x,p.y-b.y);
+        if(d<bestD){bestD=d;bestI=i}
+      });
+      if(bestI>idx) return; // not reached yet
+      const bx=mx(b.x),by=my(b.y);
+      const color=b.in_court?'#4caf50':'#f44336';
+      const r=6;
+      ctx.beginPath();
+      ctx.moveTo(bx,by-r);ctx.lineTo(bx+r,by);
+      ctx.lineTo(bx,by+r);ctx.lineTo(bx-r,by);
+      ctx.closePath();
+      ctx.fillStyle=color;ctx.fill();
+      ctx.strokeStyle='rgba(255,255,255,.5)';ctx.lineWidth=1;ctx.stroke();
+      ctx.font='bold 8px Lato';ctx.fillStyle=color;
+      ctx.fillText(b.in_court?'IN':'OUT',bx+9,by+3);
+    });
+  }
+
+  // Landing point marker (only if reached)
+  if(_vtTrajectory&&_vtTrajectory.landing_point){
+    const lp=_vtTrajectory.landing_point;
+    let lpIdx=0,lpD=Infinity;
+    _vt3dPoints.forEach((p,i)=>{const d=Math.hypot(p.x-lp.x,p.y-lp.y);if(d<lpD){lpD=d;lpIdx=i}});
+    if(lpIdx<=idx){
+      const lx=mx(lp.x),ly=my(lp.y);
+      const inCourt=lp.x>=0&&lp.x<=COURT_W&&lp.y>=0&&lp.y<=COURT_L;
+      const color=inCourt?'#4caf50':'#f44336';
+      ctx.beginPath();ctx.arc(lx,ly,8,0,Math.PI*2);
+      ctx.strokeStyle=color;ctx.lineWidth=2;ctx.stroke();
+      ctx.beginPath();ctx.arc(lx,ly,4,0,Math.PI*2);
+      ctx.fillStyle=color;ctx.fill();
+      ctx.font='bold 9px Lato';ctx.fillStyle=color;
+      ctx.fillText(inCourt?'IN':'OUT',lx+11,ly+3);
+    }
+  }
+
+  // Current ball position: red dot with glow
+  if(_vt3dPoints[idx]){
+    const pt=_vt3dPoints[idx];
+    const bx=mx(pt.x),by=my(pt.y);
+    // Glow
+    const grd=ctx.createRadialGradient(bx,by,0,bx,by,14);
+    grd.addColorStop(0,'rgba(250,78,78,.7)');grd.addColorStop(1,'rgba(250,78,78,0)');
+    ctx.fillStyle=grd;ctx.fillRect(bx-14,by-14,28,28);
+    // Dot
+    ctx.beginPath();ctx.arc(bx,by,5,0,Math.PI*2);
+    ctx.fillStyle='#fa4e4e';ctx.fill();
+    ctx.strokeStyle='#fff';ctx.lineWidth=1.5;ctx.stroke();
+  }
+}
+
+// ---- Presentation Grid: Per-Frame Stats ----
+function vtUpdatePerFrameStats(idx){
+  const pt=_vt3dPoints[idx];
+  if(!pt) return;
+
+  // Speed: instantaneous from consecutive 3D points
+  let speedKmh=0;
+  if(idx>0){
+    const prev=_vt3dPoints[idx-1];
+    const dx=pt.x-prev.x,dy=pt.y-prev.y,dz=pt.z-prev.z;
+    const dist=Math.sqrt(dx*dx+dy*dy+dz*dz);
+    const dt=(pt.t!==undefined&&prev.t!==undefined)?(pt.t-prev.t):0.04;
+    if(dt>0) speedKmh=(dist/dt)*3.6;
+    // Clamp unreasonable values
+    if(speedKmh>300){
+      if(_vtTrajectory&&_vtTrajectory.net_crossing&&_vtTrajectory.net_crossing.speed_kmh){
+        speedKmh=_vtTrajectory.net_crossing.speed_kmh;
+      } else if(_vtTrajectory&&_vtTrajectory.fit&&_vtTrajectory.fit.speed_kmh){
+        speedKmh=_vtTrajectory.fit.speed_kmh;
+      } else { speedKmh=0; }
+    }
+  }
+
+  // Height
+  const height=pt.z;
+
+  // Position (mirrored X for display consistency)
+  const posX=COURT_W-pt.x;
+  const posY=pt.y;
+
+  // Shot label
+  let shotLabel='';
+  if(_vtTrajectory){
+    if(_vtTrajectory.net_crossing){
+      shotLabel=_vtTrajectory.net_crossing.clears_net?'Net Clear':'Net Fault';
+    }
+    if(_vtTrajectory.landing_point){
+      const lp=_vtTrajectory.landing_point;
+      const inC=lp.x>=0&&lp.x<=COURT_W&&lp.y>=0&&lp.y<=COURT_L;
+      shotLabel+=(shotLabel?' / ':'')+(inC?'IN':'OUT');
+    }
+    if(_vtTrajectory.strokes&&_vtTrajectory.strokes.length>1){
+      shotLabel+=(shotLabel?' \u00b7 ':'')+_vtTrajectory.strokes.length+' strokes';
+    }
+  }
+
+  // Progressive bounce count (only bounces reached up to current idx)
+  let bounceCount=0;
+  const totalBounces=_vtBatchBounces?_vtBatchBounces.length:0;
+  if(_vtBatchBounces&&_vtBatchBounces.length){
+    _vtBatchBounces.forEach(b=>{
+      let bestI=0,bestD=Infinity;
+      _vt3dPoints.forEach((p,i)=>{
+        const d=Math.hypot(p.x-b.x,p.y-b.y);
+        if(d<bestD){bestD=d;bestI=i}
+      });
+      if(bestI<=idx) bounceCount++;
+    });
+  }
+
+  // Update DOM elements
+  const speedEl=document.getElementById('pg-speed-val');
+  const heightEl=document.getElementById('pg-height-val');
+  const posEl=document.getElementById('pg-pos-val');
+  const shotEl=document.getElementById('pg-shot-val');
+  const bounceEl=document.getElementById('pg-bounce-val');
+
+  if(speedEl) speedEl.textContent=speedKmh>0?speedKmh.toFixed(0):'--';
+  if(heightEl) heightEl.textContent=height.toFixed(2);
+  if(posEl) posEl.textContent='('+posX.toFixed(1)+', '+posY.toFixed(1)+')';
+  if(shotEl) shotEl.textContent=shotLabel||'--';
+  if(bounceEl) bounceEl.textContent=bounceCount+(totalBounces>0?(' / '+totalBounces):'');
 }
 
 // Keyboard shortcuts for playback

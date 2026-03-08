@@ -8,7 +8,7 @@ from typing import Any, Optional
 import cv2
 from app.pipeline.camera_stream import CameraStream
 from app.pipeline.homography import HomographyTransformer
-from app.pipeline.inference import BallDetector
+from app.pipeline.inference import create_detector
 from app.pipeline.postprocess import BallTracker
 
 logger = logging.getLogger(__name__)
@@ -50,7 +50,7 @@ def run_pipeline(
         stream = CameraStream(rtsp_url, name)
         stream.start()
 
-        detector = BallDetector(model_path, input_size, frames_in, frames_out, device)
+        detector = create_detector(model_path, input_size, frames_in, frames_out, device)
         tracker = BallTracker(original_size=(1920, 1080), threshold=threshold)
         homography = HomographyTransformer(homography_path, homography_key)
 

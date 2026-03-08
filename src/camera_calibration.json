@@ -1,0 +1,886 @@
+{
+  "calibration_method": "PnP",
+  "court_dimensions": {
+    "length_m": 23.77,
+    "width_m": 8.23,
+    "net_y_m": 11.885
+  },
+  "cam66": {
+    "camera_name": "cam66",
+    "image_size": [
+      1920,
+      1080
+    ],
+    "n_keypoints": 12,
+    "labels_used": [
+      "center_bottom",
+      "center_bottom_serve",
+      "center_top",
+      "center_top_serve",
+      "left_bottom",
+      "left_bottom_serve",
+      "left_top",
+      "left_top_serve",
+      "right_bottom",
+      "right_bottom_serve",
+      "right_top",
+      "right_top_serve"
+    ],
+    "K": [
+      [
+        1029.6125810897706,
+        0.0,
+        917.0098620441499
+      ],
+      [
+        0.0,
+        1029.6125810897706,
+        735.0449238863324
+      ],
+      [
+        0.0,
+        0.0,
+        1.0
+      ]
+    ],
+    "dist_coeffs": [
+      [
+        -0.05518296259746969,
+        -0.27775675745968703,
+        -0.03484047938957823,
+        -0.006002234901362397,
+        0.14682324553324919
+      ]
+    ],
+    "rvec": [
+      2.339524090524121,
+      0.01465092411863418,
+      -0.03537571307286626
+    ],
+    "tvec": [
+      -4.113398325538674,
+      0.9551377432766864,
+      6.944723583554694
+    ],
+    "R": [
+      [
+        0.9995459814924865,
+        0.021478730439994195,
+        -0.021130428791392784
+      ],
+      [
+        -0.0002494502978771674,
+        -0.6953800226391698,
+        -0.718642165398675
+      ],
+      [
+        -0.030129199404745947,
+        0.7183211595470607,
+        -0.69505894936343
+      ]
+    ],
+    "camera_position_3d": [
+      4.321,
+      -4.236,
+      5.4265
+    ],
+    "mean_reprojection_error_px": 0.926,
+    "max_reprojection_error_px": 2.498,
+    "mean_reprojection_error_m": 0.0251,
+    "per_point_errors_px": {
+      "center_bottom": {
+        "pixel_original": [
+          917.14,
+          876.13
+        ],
+        "pixel_reprojected": [
+          916.85,
+          876.79
+        ],
+        "error_px": 0.723
+      },
+      "center_bottom_serve": {
+        "pixel_original": [
+          928.85,
+          454.62
+        ],
+        "pixel_reprojected": [
+          927.97,
+          455.25
+        ],
+        "error_px": 1.086
+      },
+      "center_top": {
+        "pixel_original": [
+          935.9,
+          60.51
+        ],
+        "pixel_reprojected": [
+          935.99,
+          60.26
+        ],
+        "error_px": 0.269
+      },
+      "center_top_serve": {
+        "pixel_original": [
+          934.46,
+          118.74
+        ],
+        "pixel_reprojected": [
+          934.99,
+          119.26
+        ],
+        "error_px": 0.745
+      },
+      "left_bottom": {
+        "pixel_original": [
+          337.31,
+          855.13
+        ],
+        "pixel_reprojected": [
+          337.46,
+          855.82
+        ],
+        "error_px": 0.713
+      },
+      "left_bottom_serve": {
+        "pixel_original": [
+          536.01,
+          459.08
+        ],
+        "pixel_reprojected": [
+          537.35,
+          456.98
+        ],
+        "error_px": 2.498
+      },
+      "left_top": {
+        "pixel_original": [
+          763.99,
+          64.44
+        ],
+        "pixel_reprojected": [
+          762.8,
+          64.37
+        ],
+        "error_px": 1.193
+      },
+      "left_top_serve": {
+        "pixel_original": [
+          726.69,
+          123.72
+        ],
+        "pixel_reprojected": [
+          725.69,
+          124.19
+        ],
+        "error_px": 1.095
+      },
+      "right_bottom": {
+        "pixel_original": [
+          1500.34,
+          856.81
+        ],
+        "pixel_reprojected": [
+          1500.18,
+          856.5
+        ],
+        "error_px": 0.347
+      },
+      "right_bottom_serve": {
+        "pixel_original": [
+          1320.38,
+          453.85
+        ],
+        "pixel_reprojected": [
+          1320.31,
+          453.07
+        ],
+        "error_px": 0.775
+      },
+      "right_top": {
+        "pixel_original": [
+          1108.35,
+          62.15
+        ],
+        "pixel_reprojected": [
+          1108.75,
+          62.6
+        ],
+        "error_px": 0.595
+      },
+      "right_top_serve": {
+        "pixel_original": [
+          1142.88,
+          121.56
+        ],
+        "pixel_reprojected": [
+          1143.95,
+          121.65
+        ],
+        "error_px": 1.074
+      }
+    },
+    "per_point_errors_world": {
+      "center_bottom": {
+        "world_projected": [
+          4.1168,
+          0.0057
+        ],
+        "world_true": [
+          4.115,
+          0.0
+        ],
+        "error_m": 0.006
+      },
+      "center_bottom_serve": {
+        "world_projected": [
+          4.1239,
+          5.4977
+        ],
+        "world_true": [
+          4.115,
+          5.485
+        ],
+        "error_m": 0.0155
+      },
+      "center_top": {
+        "world_projected": [
+          4.1129,
+          23.7411
+        ],
+        "world_true": [
+          4.115,
+          23.77
+        ],
+        "error_m": 0.0289
+      },
+      "center_top_serve": {
+        "world_projected": [
+          4.1043,
+          18.3245
+        ],
+        "world_true": [
+          4.115,
+          18.285
+        ],
+        "error_m": 0.0409
+      },
+      "left_bottom": {
+        "world_projected": [
+          -0.0037,
+          0.0064
+        ],
+        "world_true": [
+          0.0,
+          0.0
+        ],
+        "error_m": 0.0073
+      },
+      "left_bottom_serve": {
+        "world_projected": [
+          -0.0024,
+          5.442
+        ],
+        "world_true": [
+          0.0,
+          5.485
+        ],
+        "error_m": 0.0431
+      },
+      "left_top": {
+        "world_projected": [
+          0.0305,
+          23.756
+        ],
+        "world_true": [
+          0.0,
+          23.77
+        ],
+        "error_m": 0.0335
+      },
+      "left_top_serve": {
+        "world_projected": [
+          0.0145,
+          18.3177
+        ],
+        "world_true": [
+          0.0,
+          18.285
+        ],
+        "error_m": 0.0358
+      },
+      "right_bottom": {
+        "world_projected": [
+          8.2302,
+          -0.0029
+        ],
+        "world_true": [
+          8.23,
+          0.0
+        ],
+        "error_m": 0.0029
+      },
+      "right_bottom_serve": {
+        "world_projected": [
+          8.2267,
+          5.4693
+        ],
+        "world_true": [
+          8.23,
+          5.485
+        ],
+        "error_m": 0.0161
+      },
+      "right_top": {
+        "world_projected": [
+          8.2269,
+          23.8203
+        ],
+        "world_true": [
+          8.23,
+          23.77
+        ],
+        "error_m": 0.0503
+      },
+      "right_top_serve": {
+        "world_projected": [
+          8.2092,
+          18.2892
+        ],
+        "world_true": [
+          8.23,
+          18.285
+        ],
+        "error_m": 0.0213
+      }
+    },
+    "rms_error": 1.0772,
+    "H_image_to_world": [
+      [
+        0.03282334200107304,
+        0.018472287136801536,
+        -26.275936247394867
+      ],
+      [
+        0.00016095408905140413,
+        -0.04057384330297541,
+        35.519700520622344
+      ],
+      [
+        0.0001257536427320613,
+        0.004276859263573096,
+        1.0
+      ]
+    ],
+    "H_world_to_image": [
+      [
+        144.21255689778056,
+        98.03447902789168,
+        307.1646153539422
+      ],
+      [
+        -3.2259242543965088,
+        -27.067124506970238,
+        876.6519763945328
+      ],
+      [
+        -0.004338430326599718,
+        0.10343408933482473,
+        1.0
+      ]
+    ]
+  },
+  "cam68": {
+    "camera_name": "cam68",
+    "image_size": [
+      1920,
+      1080
+    ],
+    "n_keypoints": 12,
+    "labels_used": [
+      "center_bottom",
+      "center_bottom_serve",
+      "center_top",
+      "center_top_serve",
+      "left_bottom",
+      "left_bottom_serve",
+      "left_top",
+      "left_top_serve",
+      "right_bottom",
+      "right_bottom_serve",
+      "right_top",
+      "right_top_serve"
+    ],
+    "K": [
+      [
+        1261.5962438822849,
+        0.0,
+        904.5563641156295
+      ],
+      [
+        0.0,
+        1261.5962438822849,
+        575.6215447527662
+      ],
+      [
+        0.0,
+        0.0,
+        1.0
+      ]
+    ],
+    "dist_coeffs": [
+      [
+        0.26154337560285273,
+        -1.3086705194971078,
+        0.005049004087577178,
+        -0.018084717564532914,
+        1.6221766544944496
+      ]
+    ],
+    "rvec": [
+      -0.008902142197985562,
+      2.7262186696766126,
+      -1.5666745622273424
+    ],
+    "tvec": [
+      4.396420748411842,
+      -9.859558536552319,
+      27.680981069051718
+    ],
+    "R": [
+      [
+        -0.9999802200252451,
+        -0.00627372284522903,
+        0.00044716878646904913
+      ],
+      [
+        -0.0035450657845215055,
+        0.5034713571051824,
+        -0.8640046441329179
+      ],
+      [
+        0.005195388998502013,
+        -0.8639891393856336,
+        -0.5034836392146488
+      ]
+    ],
+    "camera_position_3d": [
+      4.2176,
+      28.9077,
+      5.4163
+    ],
+    "mean_reprojection_error_px": 0.827,
+    "max_reprojection_error_px": 1.812,
+    "mean_reprojection_error_m": 0.0217,
+    "per_point_errors_px": {
+      "center_bottom": {
+        "pixel_original": [
+          926.14,
+          949.94
+        ],
+        "pixel_reprojected": [
+          926.28,
+          950.68
+        ],
+        "error_px": 0.753
+      },
+      "center_bottom_serve": {
+        "pixel_original": [
+          922.51,
+          504.4
+        ],
+        "pixel_reprojected": [
+          922.15,
+          504.85
+        ],
+        "error_px": 0.576
+      },
+      "center_top": {
+        "pixel_original": [
+          914.6,
+          121.8
+        ],
+        "pixel_reprojected": [
+          914.62,
+          121.6
+        ],
+        "error_px": 0.205
+      },
+      "center_top_serve": {
+        "pixel_original": [
+          916.1,
+          181.1
+        ],
+        "pixel_reprojected": [
+          916.09,
+          181.18
+        ],
+        "error_px": 0.085
+      },
+      "left_bottom": {
+        "pixel_original": [
+          181.01,
+          950.92
+        ],
+        "pixel_reprojected": [
+          181.05,
+          951.11
+        ],
+        "error_px": 0.187
+      },
+      "left_bottom_serve": {
+        "pixel_original": [
+          472.26,
+          503.73
+        ],
+        "pixel_reprojected": [
+          473.22,
+          502.19
+        ],
+        "error_px": 1.812
+      },
+      "left_top": {
+        "pixel_original": [
+          724.4,
+          119.0
+        ],
+        "pixel_reprojected": [
+          723.86,
+          119.03
+        ],
+        "error_px": 0.545
+      },
+      "left_top_serve": {
+        "pixel_original": [
+          687.0,
+          177.2
+        ],
+        "pixel_reprojected": [
+          685.52,
+          178.03
+        ],
+        "error_px": 1.698
+      },
+      "right_bottom": {
+        "pixel_original": [
+          1630.68,
+          943.69
+        ],
+        "pixel_reprojected": [
+          1630.62,
+          943.76
+        ],
+        "error_px": 0.096
+      },
+      "right_bottom_serve": {
+        "pixel_original": [
+          1357.92,
+          508.18
+        ],
+        "pixel_reprojected": [
+          1356.96,
+          506.95
+        ],
+        "error_px": 1.564
+      },
+      "right_top": {
+        "pixel_original": [
+          1102.05,
+          124.16
+        ],
+        "pixel_reprojected": [
+          1102.64,
+          124.59
+        ],
+        "error_px": 0.721
+      },
+      "right_top_serve": {
+        "pixel_original": [
+          1141.06,
+          183.84
+        ],
+        "pixel_reprojected": [
+          1142.73,
+          184.01
+        ],
+        "error_px": 1.678
+      }
+    },
+    "per_point_errors_world": {
+      "center_bottom": {
+        "world_projected": [
+          4.1158,
+          23.7646
+        ],
+        "world_true": [
+          4.115,
+          23.77
+        ],
+        "error_m": 0.0054
+      },
+      "center_bottom_serve": {
+        "world_projected": [
+          4.1115,
+          18.2757
+        ],
+        "world_true": [
+          4.115,
+          18.285
+        ],
+        "error_m": 0.01
+      },
+      "center_top": {
+        "world_projected": [
+          4.1156,
+          0.0228
+        ],
+        "world_true": [
+          4.115,
+          0.0
+        ],
+        "error_m": 0.0228
+      },
+      "center_top_serve": {
+        "world_projected": [
+          4.1148,
+          5.4786
+        ],
+        "world_true": [
+          4.115,
+          5.485
+        ],
+        "error_m": 0.0064
+      },
+      "left_bottom": {
+        "world_projected": [
+          8.2309,
+          23.7687
+        ],
+        "world_true": [
+          8.23,
+          23.77
+        ],
+        "error_m": 0.0016
+      },
+      "left_bottom_serve": {
+        "world_projected": [
+          8.2295,
+          18.3161
+        ],
+        "world_true": [
+          8.23,
+          18.285
+        ],
+        "error_m": 0.0311
+      },
+      "left_top": {
+        "world_projected": [
+          8.2188,
+          -0.0038
+        ],
+        "world_true": [
+          8.23,
+          0.0
+        ],
+        "error_m": 0.0118
+      },
+      "left_top_serve": {
+        "world_projected": [
+          8.2134,
+          5.4202
+        ],
+        "world_true": [
+          8.23,
+          5.485
+        ],
+        "error_m": 0.0669
+      },
+      "right_bottom": {
+        "world_projected": [
+          -0.0007,
+          23.7695
+        ],
+        "world_true": [
+          0.0,
+          23.77
+        ],
+        "error_m": 0.0008
+      },
+      "right_bottom_serve": {
+        "world_projected": [
+          -0.0015,
+          18.3103
+        ],
+        "world_true": [
+          0.0,
+          18.285
+        ],
+        "error_m": 0.0253
+      },
+      "right_top": {
+        "world_projected": [
+          0.0066,
+          -0.0469
+        ],
+        "world_true": [
+          0.0,
+          0.0
+        ],
+        "error_m": 0.0474
+      },
+      "right_top_serve": {
+        "world_projected": [
+          0.0288,
+          5.474
+        ],
+        "world_true": [
+          0.0,
+          5.485
+        ],
+        "error_m": 0.0308
+      }
+    },
+    "rms_error": 1.0503,
+    "H_image_to_world": [
+      [
+        -0.039187856926142815,
+        0.02621765392281004,
+        39.9895668808042
+      ],
+      [
+        -0.00033926934559228976,
+        0.20037394435323036,
+        -24.92424725007821
+      ],
+      [
+        -3.234309829768012e-06,
+        0.006249225791339383,
+        1.0
+      ]
+    ],
+    "H_world_to_image": [
+      [
+        -45.40560770669375,
+        -28.519284694623156,
+        1104.9288830262294
+      ],
+      [
+        -0.053533645843768705,
+        4.979838309183363,
+        126.25950859434022
+      ],
+      [
+        0.00018768803697895788,
+        -0.031212374201274345,
+        1.0
+      ]
+    ]
+  },
+  "stereo": {
+    "baseline_m": 33.144,
+    "camera_heights_m": {
+      "cam66": 5.426,
+      "cam68": 5.416
+    },
+    "camera_positions": {
+      "cam66": [
+        4.321,
+        -4.236,
+        5.4265
+      ],
+      "cam68": [
+        4.2176,
+        28.9077,
+        5.4163
+      ]
+    },
+    "relative_rotation": [
+      [
+        -0.9996704109682544,
+        0.004290712552896997,
+        0.02531124691416924
+      ],
+      [
+        0.025527257912758575,
+        0.2708071289899323,
+        0.9622950992246018
+      ],
+      [
+        -0.002725534446147204,
+        0.9626240640426658,
+        -0.2708274040564663
+      ]
+    ],
+    "essential_matrix": [
+      [
+        -0.685369062011932,
+        -23.825574757216124,
+        -23.029860250357967
+      ],
+      [
+        -28.621431410965368,
+        0.022253524746545378,
+        0.7529917266516192
+      ],
+      [
+        -16.68791588304545,
+        0.09993753858618556,
+        0.5231589085732302
+      ]
+    ],
+    "fundamental_matrix": [
+      [
+        -5.27630956768654e-07,
+        -1.834210427854734e-05,
+        -0.004288427479355383
+      ],
+      [
+        -2.2034191615134725e-05,
+        1.7131862531154403e-08,
+        0.020789834672561736
+      ],
+      [
+        -0.00304732910339781,
+        0.016678668932619902,
+        7.226716597585593
+      ]
+    ],
+    "config_comparison": {
+      "cam66": {
+        "config_position": [
+          3.915,
+          -5.21,
+          6.2
+        ],
+        "calibrated_position": [
+          4.321,
+          -4.236,
+          5.4265
+        ],
+        "delta_m": 1.308
+      },
+      "cam68": {
+        "config_position": [
+          4.115,
+          28.97,
+          5.2
+        ],
+        "calibrated_position": [
+          4.2176,
+          28.9077,
+          5.4163
+        ],
+        "delta_m": 0.247
+      }
+    },
+    "mean_reprojection_errors_px": {
+      "cam66": 0.926,
+      "cam68": 0.827
+    },
+    "mean_reprojection_errors_m": {
+      "cam66": 0.0251,
+      "cam68": 0.0217
+    }
+  }
+}

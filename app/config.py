@@ -31,11 +31,17 @@ class HomographyConfig(BaseModel):
     path: str
 
 
+class CalibrationConfig(BaseModel):
+    path: str = "src/camera_calibration.json"
+    use_calibrated_positions: bool = False
+
+
 class AppConfig(BaseModel):
     cameras: dict[str, CameraConfig]
     model: ModelConfig
     homography: HomographyConfig
     server: ServerConfig
+    calibration: CalibrationConfig = CalibrationConfig()
 
 
 def load_config(config_path: str = "config.yaml") -> AppConfig:

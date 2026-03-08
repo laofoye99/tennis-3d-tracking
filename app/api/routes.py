@@ -81,6 +81,81 @@ async def ball_3d_stream():
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
+# ---- Live Analytics ----
+
+@router.get("/api/analytics/live")
+async def live_analytics():
+    """Get current live bounce detection and rally tracking state."""
+    orch = _get_orch()
+    return orch.get_live_analytics()
+
+
+@router.post("/api/analytics/reset")
+async def reset_analytics():
+    """Reset live analytics state."""
+    orch = _get_orch()
+    orch.reset_live_analytics()
+    return {"status": "ok"}
+
+
+# ---- Camera Calibration ----
+
+@router.post("/api/calibration/run")
+async def run_calibration_api():
+    """Run camera calibration from court keypoints.
+
+    Estimates intrinsic/extrinsic parameters using PnP, saves results
+    to ``src/camera_calibration.json``, and updates the homography
+    matrices with calibration-derived values.
+    """
+    try:
+        from app.calibration import run_calibration
+
+        result = run_calibration()
+        return {
+            "status": "ok",
+            "cam66": {
+                "reproj_error_px": result["cam66"]["mean_reprojection_error_px"],
+                "reproj_error_m": result["cam66"]["mean_reprojection_error_m"],
+                "camera_position": result["cam66"]["camera_position_3d"],
+            },
+            "cam68": {
+                "reproj_error_px": result["cam68"]["mean_reprojection_error_px"],
+                "reproj_error_m": result["cam68"]["mean_reprojection_error_m"],
+                "camera_position": result["cam68"]["camera_position_3d"],
+            },
+            "baseline_m": result["stereo"]["baseline_m"],
+        }
+    except Exception as e:
+        logger.exception("Calibration failed")
+        raise HTTPException(500, str(e))
+
+
+@router.get("/api/calibration/status")
+async def calibration_status():
+    """Get current calibration data if available."""
+    cal_path = Path("src/camera_calibration.json")
+    if not cal_path.exists():
+        return {"calibrated": False}
+    try:
+        with open(cal_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return {
+            "calibrated": True,
+            "cam66": {
+                "reproj_error_m": data.get("cam66", {}).get("mean_reprojection_error_m"),
+                "camera_position": data.get("cam66", {}).get("camera_position_3d"),
+            },
+            "cam68": {
+                "reproj_error_m": data.get("cam68", {}).get("mean_reprojection_error_m"),
+                "camera_position": data.get("cam68", {}).get("camera_position_3d"),
+            },
+            "baseline_m": data.get("stereo", {}).get("baseline_m"),
+        }
+    except Exception as e:
+        return {"calibrated": False, "error": str(e)}
+
+
 # ---- Pipeline control ----
 
 @router.post("/api/pipeline/{name}/start")

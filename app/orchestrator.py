@@ -1,6 +1,7 @@
 """Main process orchestrator: manages camera pipeline subprocesses and triangulation."""
 
 import datetime
+import json
 import logging
 import multiprocessing as mp
 import threading
@@ -15,6 +16,7 @@ from app.config import AppConfig
 from app.pipeline.camera_pipeline import run_pipeline
 from app.pipeline.video_pipeline import run_video_pipeline
 from app.schemas import BallPosition3D, PipelineStatus, SystemStatus, WorldPoint2D
+from app.analytics import BounceDetector, RallyTracker, run_batch_analytics
 from app.trajectory import clean_detections, find_offset_and_triangulate, fit_trajectory, segment_rallies
 from app.triangulation import triangulate
 
@@ -69,6 +71,39 @@ class Orchestrator:
         self._video_test_handle: Optional[_PipelineHandle] = None
         self._video_test_handles: dict[str, _PipelineHandle] = {}  # parallel handles
         self._video_test_detections: dict[str, list[dict]] = {}  # camera_name -> detections
+
+        # Live analytics (bounce detection + rally tracking)
+        self._bounce_detector = BounceDetector()
+        self._rally_tracker = RallyTracker()
+        self._live_bounces: list[dict] = []
+        self._analytics_lock = threading.Lock()
+
+    def _get_camera_positions(self) -> dict[str, list[float]]:
+        """Get camera 3D positions, optionally overriding with calibrated values.
+
+        When ``config.calibration.use_calibrated_positions`` is True,
+        loads camera positions from the calibration JSON file.  Falls
+        back to ``config.cameras[name].position_3d`` otherwise.
+        """
+        positions = {
+            n: self.config.cameras[n].position_3d
+            for n in self.config.cameras
+        }
+        if self.config.calibration.use_calibrated_positions:
+            cal_path = Path(self.config.calibration.path)
+            if cal_path.exists():
+                try:
+                    with open(cal_path, "r", encoding="utf-8") as f:
+                        cal_data = json.load(f)
+                    for n in positions:
+                        if n in cal_data and "camera_position_3d" in cal_data[n]:
+                            positions[n] = cal_data[n]["camera_position_3d"]
+                            logger.debug("[%s] Using calibrated position: %s", n, positions[n])
+                except Exception as e:
+                    logger.warning("Failed to load calibration positions from %s: %s", cal_path, e)
+            else:
+                logger.warning("Calibration file not found: %s, using config positions", cal_path)
+        return positions
 
     def start_pipeline(self, name: str) -> None:
         if name not in self._handles:
@@ -155,9 +190,7 @@ class Orchestrator:
         self._triangulation_active = True
 
         cam_names = list(self.config.cameras.keys())
-        cam_positions = {
-            n: self.config.cameras[n].position_3d for n in cam_names
-        }
+        cam_positions = self._get_camera_positions()
 
         while not self._stopped.is_set():
             got_any = False
@@ -204,6 +237,15 @@ class Orchestrator:
                             cam66_world=WorldPoint2D(**d1),
                             cam68_world=WorldPoint2D(**d2),
                         )
+                        # Feed live analytics
+                        pt = {"x": x, "y": y, "z": z, "timestamp": time.time()}
+                        with self._analytics_lock:
+                            bounce = self._bounce_detector.update(pt)
+                            self._rally_tracker.update(pt, bounce)
+                            if bounce is not None:
+                                self._live_bounces.append(bounce.to_dict())
+                                if len(self._live_bounces) > 50:
+                                    self._live_bounces = self._live_bounces[-50:]
                     except Exception as e:
                         logger.error("Triangulation error: %s", e)
 
@@ -341,6 +383,7 @@ class Orchestrator:
             pipelines=pipelines,
             triangulation_active=self._triangulation_active,
             latest_ball_3d=self._latest_3d,
+            analytics=self.get_live_analytics(),
         )
 
     def get_latest_3d(self) -> Optional[BallPosition3D]:
@@ -348,6 +391,22 @@ class Orchestrator:
 
     def get_latest_detection(self, name: str) -> Optional[dict]:
         return self._latest_detections.get(name)
+
+    def get_live_analytics(self) -> dict:
+        """Return current live bounce/rally state for the dashboard."""
+        with self._analytics_lock:
+            return {
+                "rally_state": self._rally_tracker.get_state().to_dict(),
+                "recent_bounces": list(self._live_bounces[-10:]),
+                "completed_rallies": self._rally_tracker.get_completed_rallies(),
+            }
+
+    def reset_live_analytics(self) -> None:
+        """Reset analytics state (e.g. when starting a new session)."""
+        with self._analytics_lock:
+            self._bounce_detector.reset()
+            self._rally_tracker.reset()
+            self._live_bounces.clear()
 
     def get_latest_frame(self, name: str) -> Optional[bytes]:
         """返回指定摄像头的最新 JPEG 帧字节（用于 MJPEG 流）。"""
@@ -612,11 +671,12 @@ class Orchestrator:
             d1 = cam1_dets[frame_idx]
             d2 = cam2_dets[frame_idx]
             try:
+                cam_pos = self._get_camera_positions()
                 x, y, z = triangulate(
                     (d1["x"], d1["y"]),
                     (d2["x"], d2["y"]),
-                    cam1_cfg.position_3d,
-                    cam2_cfg.position_3d,
+                    cam_pos.get(cam1_name, cam1_cfg.position_3d),
+                    cam_pos.get(cam2_name, cam2_cfg.position_3d),
                 )
                 results.append({
                     "frame_index": frame_idx,
@@ -739,9 +799,11 @@ class Orchestrator:
             return {"error": "No detections remaining after cleaning"}
 
         # Stage 1: Auto offset + interpolated triangulation
+        cam_pos = self._get_camera_positions()
         best_dt, points_3d = find_offset_and_triangulate(
             dets1, dets2, fps, fps, H1, H2,
-            cam1_cfg.position_3d, cam2_cfg.position_3d,
+            cam_pos.get(cam1_name, cam1_cfg.position_3d),
+            cam_pos.get(cam2_name, cam2_cfg.position_3d),
         )
 
         if not points_3d:
@@ -794,6 +856,9 @@ class Orchestrator:
         for r in rally_results:
             all_points.extend(r["points"])
 
+        # Run batch bounce detection & rally tracking on all 3D points
+        batch_analytics = run_batch_analytics(all_points)
+
         # Compute stats
         ray_dists = [p["ray_dist"] for p in points_3d]
         stats = {
@@ -824,6 +889,7 @@ class Orchestrator:
             "rallies": rally_results,
             "stats": stats,
             "cam_order": cam_names,
+            "analytics": batch_analytics,
         }
 
     def get_video_test_status(self) -> dict:
