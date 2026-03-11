@@ -27,6 +27,12 @@ model:
   - 512
   path: model_weight/TrackNet_best.pt
   threshold: 0.5
+ensemble:
+  enabled: false
+  hrnet_path: model_weight/hrnet_tennis.onnx
+  hrnet_frames_in: 3
+  hrnet_frames_out: 3
+  agree_distance: 3.0
 server:
   host: 0.0.0.0
   port: 8000

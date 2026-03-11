@@ -36,12 +36,24 @@ class CalibrationConfig(BaseModel):
     use_calibrated_positions: bool = False
 
 
+class EnsembleConfig(BaseModel):
+    enabled: bool = False
+    hrnet_path: str = "model_weight/hrnet_tennis.onnx"
+    hrnet_frames_in: int = 3
+    hrnet_frames_out: int = 3
+    agree_distance: float = 3.0
+    boost_factor: float = 1.2
+    penalty_factor: float = 0.6
+    single_factor: float = 0.8
+
+
 class AppConfig(BaseModel):
     cameras: dict[str, CameraConfig]
     model: ModelConfig
     homography: HomographyConfig
     server: ServerConfig
     calibration: CalibrationConfig = CalibrationConfig()
+    ensemble: EnsembleConfig = EnsembleConfig()
 
 
 def load_config(config_path: str = "config.yaml") -> AppConfig:

@@ -88,3 +88,45 @@ class BallTracker:
         cx, cy, conf = best
         self.prev_positions.append(np.array([cx, cy]))
         return cx, cy, conf
+
+    def process_heatmap_multi(
+        self, heatmap: np.ndarray, max_blobs: int = 3
+    ) -> list[dict]:
+        """Extract all blob candidates from a single heatmap.
+
+        Returns up to max_blobs candidates sorted by blob_sum descending.
+        Each candidate is a dict with pixel_x, pixel_y, blob_sum, blob_max, blob_area.
+        """
+        hm_h, hm_w = heatmap.shape[:2]
+        scale_x = self.orig_w / hm_w
+        scale_y = self.orig_h / hm_h
+
+        heatmap_filtered = np.where(
+            heatmap > self.threshold, heatmap, 0.0
+        ).astype(np.float32)
+
+        binary = (heatmap_filtered > 0).astype(np.uint8)
+        num_labels, labels_im, stats, centroids = cv2.connectedComponentsWithStats(
+            binary, connectivity=8
+        )
+
+        blobs: list[dict] = []
+        for j in range(1, num_labels):
+            mask = labels_im == j
+            blob_sum = float(heatmap_filtered[mask].sum())
+            if blob_sum <= 0:
+                continue
+            cx = float(np.sum(np.where(mask)[1] * heatmap_filtered[mask]) / blob_sum)
+            cy = float(np.sum(np.where(mask)[0] * heatmap_filtered[mask]) / blob_sum)
+            blob_max = float(heatmap[mask].max())
+            blob_area = int(stats[j, cv2.CC_STAT_AREA])
+            blobs.append({
+                "pixel_x": cx * scale_x,
+                "pixel_y": cy * scale_y,
+                "blob_sum": blob_sum,
+                "blob_max": blob_max,
+                "blob_area": blob_area,
+            })
+
+        blobs.sort(key=lambda b: b["blob_sum"], reverse=True)
+        return blobs[:max_blobs]

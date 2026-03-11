@@ -95,8 +95,15 @@ def run_video_pipeline(
     frame_queue: Optional[mp.Queue],
     stop_event: mp.Event,
     status_dict: dict[str, Any],
+    ensemble_config: Optional[dict] = None,
 ) -> None:
-    """Process a video file segment through the ball detection pipeline."""
+    """Process a video file segment through the ball detection pipeline.
+
+    Args:
+        ensemble_config: If provided and enabled, runs both TrackNet + HRNet
+            with cross-validation. Dict with keys: enabled, hrnet_path,
+            agree_distance, boost_factor, penalty_factor, single_factor.
+    """
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [video-test] %(levelname)s %(message)s",
@@ -106,6 +113,12 @@ def run_video_pipeline(
 
     status_dict["state"] = "starting"
     status_dict["error_msg"] = ""
+
+    # Determine if ensemble mode is active
+    use_ensemble = (
+        ensemble_config is not None
+        and ensemble_config.get("enabled", False)
+    )
 
     try:
         cap = cv2.VideoCapture(video_path)
@@ -131,14 +144,42 @@ def run_video_pipeline(
         # Seek to start frame
         cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
 
-        # Initialize pipeline components (auto-selects ONNX or PyTorch backend)
-        detector = create_detector(model_path, input_size, frames_in, frames_out, device)
+        # Initialize pipeline components
+        ensemble_detector = None
+        if use_ensemble:
+            from app.pipeline.ensemble import EnsembleDetector
+            log.info("Ensemble mode: TrackNet + HRNet cross-validation")
+            ensemble_detector = EnsembleDetector(
+                tracknet_path=model_path,
+                hrnet_path=ensemble_config["hrnet_path"],
+                input_size=input_size,
+                device=device,
+                threshold=threshold,
+                original_size=(vid_w, vid_h),
+                agree_distance=ensemble_config.get("agree_distance", 3.0),
+                boost_factor=ensemble_config.get("boost_factor", 1.2),
+                penalty_factor=ensemble_config.get("penalty_factor", 0.6),
+                single_factor=ensemble_config.get("single_factor", 0.8),
+            )
+            detector = ensemble_detector.tracknet  # for prefetch compatibility
+            actual_frames_in = 8  # Always 8 in ensemble mode (TrackNet batch size)
+            actual_frames_out = 8
 
-        # Compute background median for TrackNet (author's approach)
-        if hasattr(detector, "compute_video_median"):
+            # Compute background median for TrackNet
             log.info("Computing video median for TrackNet background...")
-            detector.compute_video_median(cap, start_frame, end_frame)
-            cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)  # Reset to start
+            ensemble_detector.compute_video_median(cap, start_frame, end_frame)
+            cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+        else:
+            # Single model mode (auto-selects ONNX or PyTorch backend)
+            detector = create_detector(model_path, input_size, frames_in, frames_out, device)
+            actual_frames_in = frames_in
+            actual_frames_out = frames_out
+
+            # Compute background median for TrackNet (author's approach)
+            if hasattr(detector, "compute_video_median"):
+                log.info("Computing video median for TrackNet background...")
+                detector.compute_video_median(cap, start_frame, end_frame)
+                cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
 
         tracker = BallTracker(original_size=(vid_w, vid_h), threshold=threshold)
         homography = HomographyTransformer(homography_path, homography_key)
@@ -157,7 +198,7 @@ def run_video_pipeline(
         batch_q: queue.Queue = queue.Queue(maxsize=2)
         reader = threading.Thread(
             target=_prefetch_thread,
-            args=(cap, total_frames, frames_in, detector, stop_event, batch_q, status_dict),
+            args=(cap, total_frames, actual_frames_in, detector, stop_event, batch_q, status_dict),
             daemon=True,
         )
         reader.start()
@@ -169,41 +210,88 @@ def run_video_pipeline(
 
             processed_count, frame_buffer, preview_frame = item
 
-            # Inference
-            try:
-                heatmaps = detector.infer(frame_buffer)
-            except Exception as e:
-                log.error("Inference error: %s", e)
-                continue
-
-            # Post-process each output frame
-            for i in range(min(frames_out, len(heatmaps))):
-                result = tracker.process_heatmap(heatmaps[i])
-                if result is None:
+            if ensemble_detector is not None:
+                # ---- Ensemble mode: both models + cross-validation ----
+                try:
+                    ensemble_results = ensemble_detector.infer_ensemble(frame_buffer)
+                except Exception as e:
+                    log.error("Ensemble inference error: %s", e)
                     continue
 
-                px, py, conf = result
-                last_pixel_detection = (px, py, conf)
-                wx, wy = homography.pixel_to_world(px, py)
+                for i, ens_result in enumerate(ensemble_results):
+                    if ens_result is None:
+                        continue
+                    px, py, conf, source = ens_result
+                    last_pixel_detection = (px, py, conf)
+                    wx, wy = homography.pixel_to_world(px, py)
+                    fi = start_frame + processed_count - actual_frames_out + i
 
-                # Unique frame index: each output corresponds to an input frame
-                fi = processed_count - frames_out + i + 1
-
-                detection = {
-                    "camera_name": camera_name,
-                    "x": wx,
-                    "y": wy,
-                    "pixel_x": px,
-                    "pixel_y": py,
-                    "confidence": conf,
-                    "timestamp": time.time(),
-                    "frame_index": fi,
-                }
-
+                    detection = {
+                        "camera_name": camera_name,
+                        "x": wx,
+                        "y": wy,
+                        "pixel_x": px,
+                        "pixel_y": py,
+                        "confidence": conf,
+                        "timestamp": time.time(),
+                        "frame_index": fi,
+                        "source": source,
+                    }
+                    try:
+                        result_queue.put_nowait(detection)
+                    except Exception:
+                        pass
+            else:
+                # ---- Single model mode: multi-blob output ----
                 try:
-                    result_queue.put_nowait(detection)
-                except Exception:
-                    pass
+                    heatmaps = detector.infer(frame_buffer)
+                except Exception as e:
+                    log.error("Inference error: %s", e)
+                    continue
+
+                for i in range(min(actual_frames_out, len(heatmaps))):
+                    blobs = tracker.process_heatmap_multi(heatmaps[i])
+                    if not blobs:
+                        continue
+
+                    fi = start_frame + processed_count - actual_frames_out + i
+                    # Build candidates with world coordinates
+                    candidates = []
+                    for blob in blobs:
+                        wx, wy = homography.pixel_to_world(
+                            blob["pixel_x"], blob["pixel_y"]
+                        )
+                        candidates.append({
+                            "pixel_x": blob["pixel_x"],
+                            "pixel_y": blob["pixel_y"],
+                            "world_x": wx,
+                            "world_y": wy,
+                            "blob_sum": blob["blob_sum"],
+                            "blob_max": blob["blob_max"],
+                            "blob_area": blob["blob_area"],
+                        })
+
+                    # Top-1 for backward compatibility and preview overlay
+                    top = candidates[0]
+                    last_pixel_detection = (
+                        top["pixel_x"], top["pixel_y"], top["blob_sum"]
+                    )
+
+                    detection = {
+                        "camera_name": camera_name,
+                        "x": top["world_x"],
+                        "y": top["world_y"],
+                        "pixel_x": top["pixel_x"],
+                        "pixel_y": top["pixel_y"],
+                        "confidence": top["blob_sum"],
+                        "timestamp": time.time(),
+                        "frame_index": fi,
+                        "candidates": candidates,
+                    }
+                    try:
+                        result_queue.put_nowait(detection)
+                    except Exception:
+                        pass
 
             # Send preview AFTER inference so detection overlay matches
             if frame_queue is not None:
@@ -229,7 +317,7 @@ def run_video_pipeline(
                 except Exception:
                     pass
 
-            fps_counter += frames_out
+            fps_counter += actual_frames_out
             now = time.time()
             if now - fps_time >= 1.0:
                 status_dict["fps"] = round(fps_counter / (now - fps_time), 1)
@@ -238,6 +326,18 @@ def run_video_pipeline(
 
         reader.join(timeout=5.0)
         cap.release()
+
+        # Log ensemble statistics
+        if ensemble_detector is not None:
+            stats = ensemble_detector.stats.to_dict()
+            log.info(
+                "Ensemble stats: agree=%d (%.1f%%), disagree=%d, tn_only=%d, hr_only=%d, neither=%d",
+                stats["agree"], stats["agree_rate"] * 100,
+                stats["disagree"], stats["tracknet_only"],
+                stats["hrnet_only"], stats["neither"],
+            )
+            status_dict["ensemble_stats"] = stats
+
         status_dict["state"] = "completed"
         status_dict["processed_frames"] = status_dict.get("processed_frames", 0)
         log.info("Video pipeline completed: %d frames processed", status_dict["processed_frames"])
