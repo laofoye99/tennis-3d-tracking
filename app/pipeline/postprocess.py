@@ -1,7 +1,6 @@
-"""Heatmap post-processing and ball tracking."""
+"""Heatmap post-processing: extract ball blob candidates from TrackNet heatmaps."""
 
 import logging
-from collections import deque
 from typing import Optional
 
 import cv2
@@ -11,18 +10,21 @@ logger = logging.getLogger(__name__)
 
 
 class BallTracker:
-    """Post-processes heatmaps to extract ball pixel coordinates with tracking."""
+    """Post-processes heatmaps to extract ball pixel coordinates.
+
+    Pure blob detection — no cross-frame prediction or history.
+    Blob selection is left to downstream filters (e.g. court-X).
+    """
 
     def __init__(
         self,
         original_size: tuple[int, int] = (1920, 1080),
         threshold: float = 0.5,
-        history_len: int = 3,
         heatmap_mask: Optional[list[tuple[int, int, int, int]]] = None,
+        **_kwargs,
     ):
         self.orig_w, self.orig_h = original_size
         self.threshold = threshold
-        self.prev_positions: deque[np.ndarray] = deque(maxlen=history_len)
         self.heatmap_mask = heatmap_mask or []
 
     def _apply_mask(self, heatmap: np.ndarray) -> np.ndarray:
@@ -45,88 +47,20 @@ class BallTracker:
             hm[my0:my1, mx0:mx1] = 0.0
         return hm
 
-    def predict_position(self) -> Optional[np.ndarray]:
-        """Linear extrapolation from recent positions."""
-        if len(self.prev_positions) < 2:
-            return None
-        positions = list(self.prev_positions)
-        velocity = positions[-1] - positions[-2]
-        return positions[-1] + velocity
-
-    def process_heatmap(self, heatmap: np.ndarray) -> Optional[tuple[float, float, float]]:
-        """Extract ball (x, y, confidence) in original image coordinates from a single heatmap.
-
-        Blob detection runs at model resolution (e.g. 288×512) for speed,
-        then coordinates are scaled back to original image size.
-
-        Args:
-            heatmap: 2D array (H_model, W_model) with values in [0, 1].
-
-        Returns:
-            (pixel_x, pixel_y, confidence) or None if not detected.
-        """
-        heatmap = self._apply_mask(heatmap)
-        hm_h, hm_w = heatmap.shape[:2]
-        scale_x = self.orig_w / hm_w
-        scale_y = self.orig_h / hm_h
-
-        # Threshold at model resolution (no expensive resize)
-        heatmap_filtered = np.where(
-            heatmap > self.threshold, heatmap, 0.0
-        ).astype(np.float32)
-
-        binary = (heatmap_filtered > 0).astype(np.uint8)
-        num_labels, labels_im, stats, centroids = cv2.connectedComponentsWithStats(
-            binary, connectivity=8
-        )
-
-        blob_centers: list[tuple[float, float, float]] = []
-        for j in range(1, num_labels):
-            mask = labels_im == j
-            blob_sum = float(heatmap_filtered[mask].sum())
-            if blob_sum <= 0:
-                continue
-            # Weighted centroid at model resolution
-            cx = float(np.sum(np.where(mask)[1] * heatmap_filtered[mask]) / blob_sum)
-            cy = float(np.sum(np.where(mask)[0] * heatmap_filtered[mask]) / blob_sum)
-            # Scale to original image coordinates
-            cx *= scale_x
-            cy *= scale_y
-            blob_centers.append((cx, cy, blob_sum))
-
-        if not blob_centers:
-            return None
-
-        predicted = self.predict_position()
-        if predicted is not None:
-            distances = [
-                np.sqrt((c[0] - predicted[0]) ** 2 + (c[1] - predicted[1]) ** 2)
-                for c in blob_centers
-            ]
-            best = blob_centers[int(np.argmin(distances))]
-        else:
-            blob_centers.sort(key=lambda c: c[2], reverse=True)
-            best = blob_centers[0]
-
-        cx, cy, conf = best
-        self.prev_positions.append(np.array([cx, cy]))
-        return cx, cy, conf
-
-    def process_heatmap_multi(
-        self, heatmap: np.ndarray, max_blobs: int = 3
+    def _find_blobs(
+        self,
+        heatmap: np.ndarray,
+        threshold: float,
+        scale_x: float,
+        scale_y: float,
+        max_blobs: int,
     ) -> list[dict]:
-        """Extract all blob candidates from a single heatmap.
+        """Core blob detection at a given threshold.
 
-        Returns up to max_blobs candidates sorted by blob_sum descending.
-        Each candidate is a dict with pixel_x, pixel_y, blob_sum, blob_max, blob_area.
+        Returns list of blob dicts sorted by blob_sum descending.
         """
-        heatmap = self._apply_mask(heatmap)
-        hm_h, hm_w = heatmap.shape[:2]
-        scale_x = self.orig_w / hm_w
-        scale_y = self.orig_h / hm_h
-
         heatmap_filtered = np.where(
-            heatmap > self.threshold, heatmap, 0.0
+            heatmap > threshold, heatmap, 0.0
         ).astype(np.float32)
 
         binary = (heatmap_filtered > 0).astype(np.uint8)
@@ -154,3 +88,35 @@ class BallTracker:
 
         blobs.sort(key=lambda b: b["blob_sum"], reverse=True)
         return blobs[:max_blobs]
+
+    def process_heatmap(self, heatmap: np.ndarray) -> Optional[tuple[float, float, float]]:
+        """Extract ball (x, y, confidence) from a single heatmap.
+
+        Returns the top-1 blob by blob_sum, or None if nothing detected.
+        """
+        heatmap = self._apply_mask(heatmap)
+        hm_h, hm_w = heatmap.shape[:2]
+        scale_x = self.orig_w / hm_w
+        scale_y = self.orig_h / hm_h
+
+        blobs = self._find_blobs(heatmap, self.threshold, scale_x, scale_y, max_blobs=5)
+        if not blobs:
+            return None
+
+        best = blobs[0]
+        return best["pixel_x"], best["pixel_y"], best["blob_sum"]
+
+    def process_heatmap_multi(
+        self, heatmap: np.ndarray, max_blobs: int = 3
+    ) -> list[dict]:
+        """Extract up to max_blobs candidates from a heatmap.
+
+        Returns blob dicts sorted by blob_sum descending.
+        Each dict has: pixel_x, pixel_y, blob_sum, blob_max, blob_area.
+        """
+        heatmap = self._apply_mask(heatmap)
+        hm_h, hm_w = heatmap.shape[:2]
+        scale_x = self.orig_w / hm_w
+        scale_y = self.orig_h / hm_h
+
+        return self._find_blobs(heatmap, self.threshold, scale_x, scale_y, max_blobs)

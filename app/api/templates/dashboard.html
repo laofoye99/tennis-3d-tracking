@@ -1295,6 +1295,7 @@ let _vtVideos=[];
 let _vtRunning=false;
 let _vtPhase='idle'; // 'idle'|'cam66'|'cam68'|'3d'|'done'
 let _vt3dPoints=[];  // computed 3D points
+let _vtFullTrajectory3D=[];  // cached full smoothed+physicsZ trajectory (stable across scrub)
 let _vtTrajectory=null;  // trajectory fit result (spatial parabola)
 let _vtRallies=[];  // all rally segments [{rally_index, points, trajectory}]
 let _vtCurrentRally=-1;  // -1 = show primary/all
@@ -1755,7 +1756,7 @@ function vtUpdate3DBalls(points, highlightIdx){
   // Step 3: Render only valid points as spheres
   const smallGeom=new THREE.SphereGeometry(0.08,8,8);
   const bigGeom=new THREE.SphereGeometry(0.16,12,12);
-  const allZ=(_vt3dPoints.length?_vt3dPoints:points).map(p=>p.z);
+  const allZ=(_vtFullTrajectory3D.length?_vtFullTrajectory3D:points).map(p=>p.z);
   const minZ=Math.min(...allZ), maxZ=Math.max(...allZ);
   const zRange=maxZ-minZ||1;
 
@@ -1975,6 +1976,7 @@ async function vtImportAnnotations(){
 
     // Populate _vt3dPoints for 3D rendering
     _vt3dPoints=pts;
+    _vtFullTrajectory3D=pts;  // cache for stable scrubbing
     vtUpdate3DBalls(_vt3dPoints);
 
     // Build _vtLiveMatches for minimap + timeline + table
@@ -2369,6 +2371,7 @@ async function vtToggleRun(){
 
   // Clear 3D results
   _vt3dPoints=[];
+  _vtFullTrajectory3D=[];
   _vtTrajectory=null;
   vtUpdate3DBalls([]);
   vtRender3DTable();
@@ -2584,6 +2587,7 @@ function vtStartUI(){
   }
 
   // Clear 3D balls for fresh start
+  _vtFullTrajectory3D=[];
   vtUpdate3DBalls([]);
 
   // Reset live analytics state
@@ -2924,6 +2928,7 @@ function vtSmoothMatches(matches, fps){
 function vtStartLiveSSE(){
   _vtLiveDetections={};
   _vtLiveMatches=[];
+  _vtFullTrajectory3D=[];
   _vtLiveLastUpdate=0;
   _vtLiveBounces=[];
   _vtLiveRallies=[];
@@ -3092,6 +3097,7 @@ function vtLiveUpdateUI(){
     const mapFps=(_vtViewRanges&&_vtViewRanges[1])?_vtViewRanges[1].fps||25:25;
     const smoothed=vtSmoothMatches(_vtLiveMatches,mapFps);
     const pts3d=vtComputePhysicsZ(smoothed, mapFps);
+    _vtFullTrajectory3D=pts3d;  // cache for stable scrubbing
     vtUpdate3DBalls(pts3d, pts3d.length-1);
   }
 
@@ -3287,10 +3293,8 @@ function vtLiveScrubTo(frame){
   const fi=document.getElementById('vt-live-frame-info');
   if(fi) fi.textContent=(idx+1)+' pts | f'+frame;
 
-  // Update 3D map: smoothed trajectory up to scrub point with physics-based Z
-  const subset=M.slice(0,idx+1);
-  const smoothSub=vtSmoothMatches(subset,fps);
-  const pts3d=vtComputePhysicsZ(smoothSub, fps);
+  // Update 3D map: slice cached trajectory up to scrub point (no re-smoothing)
+  const pts3d=_vtFullTrajectory3D.slice(0,idx+1);
   vtUpdate3DBalls(pts3d,pts3d.length-1);
 
   // Update minimap: show ball position + bounces up to this frame

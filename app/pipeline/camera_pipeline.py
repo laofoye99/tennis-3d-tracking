@@ -133,6 +133,10 @@ def run_pipeline(
                 px, py, conf = result
                 wx, wy = homography.pixel_to_world(px, py)
 
+                # Filter: skip detections outside court X range
+                if not (homography.court_x_min <= wx <= homography.court_x_max):
+                    continue
+
                 detection = {
                     "camera_name": name,
                     "x": wx,

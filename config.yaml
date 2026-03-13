@@ -26,7 +26,7 @@ model:
   - 288
   - 512
   path: model_weight/TrackNet_best.pt
-  threshold: 0.5
+  threshold: 0.1
   heatmap_mask:
   - [0, 0, 620, 40]
 ensemble:

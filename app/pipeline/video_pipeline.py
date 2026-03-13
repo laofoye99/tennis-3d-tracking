@@ -266,6 +266,9 @@ def run_video_pipeline(
                         wx, wy = homography.pixel_to_world(
                             blob["pixel_x"], blob["pixel_y"]
                         )
+                        # Filter: only keep blobs whose world X is within court
+                        if not (homography.court_x_min <= wx <= homography.court_x_max):
+                            continue
                         candidates.append({
                             "pixel_x": blob["pixel_x"],
                             "pixel_y": blob["pixel_y"],
@@ -275,6 +278,9 @@ def run_video_pipeline(
                             "blob_max": blob["blob_max"],
                             "blob_area": blob["blob_area"],
                         })
+
+                    if not candidates:
+                        continue
 
                     # Top-1 for backward compatibility and preview overlay
                     top = candidates[0]
