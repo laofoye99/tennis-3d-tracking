@@ -16,8 +16,15 @@ from app.config import AppConfig
 from app.pipeline.camera_pipeline import run_pipeline
 from app.pipeline.video_pipeline import run_video_pipeline
 from app.schemas import BallPosition3D, PipelineStatus, SystemStatus, WorldPoint2D
-from app.analytics import BounceDetector, RallyTracker, run_batch_analytics
+from app.analytics import (
+    BounceDetector,
+    EnhancedBounceDetector,
+    RallyStateMachine,
+    RallyTracker,
+    run_batch_analytics,
+)
 from app.trajectory import clean_detections, find_offset_and_triangulate, fit_trajectory, segment_rallies
+from app.pipeline.multi_blob_matcher import MultiBlobMatcher
 from app.triangulation import triangulate
 
 logger = logging.getLogger(__name__)
@@ -76,6 +83,10 @@ class Orchestrator:
         self._bounce_detector = BounceDetector()
         self._rally_tracker = RallyTracker()
         self._live_bounces: list[dict] = []
+        # Enhanced analytics (event-driven state machine)
+        self._enhanced_bounce = EnhancedBounceDetector()
+        self._rally_sm = RallyStateMachine()
+        self._live_rallies: list[dict] = []
         self._analytics_lock = threading.Lock()
 
     def _get_camera_positions(self) -> dict[str, list[float]]:
@@ -192,6 +203,14 @@ class Orchestrator:
         cam_names = list(self.config.cameras.keys())
         cam_positions = self._get_camera_positions()
 
+        # Initialize multi-blob matcher for live mode
+        live_matcher = None
+        if len(cam_names) == 2:
+            pos1 = cam_positions.get(cam_names[0])
+            pos2 = cam_positions.get(cam_names[1])
+            if pos1 and pos2:
+                live_matcher = MultiBlobMatcher(pos1, pos2)
+
         while not self._stopped.is_set():
             got_any = False
             for name, handle in list(self._handles.items()):
@@ -226,26 +245,60 @@ class Orchestrator:
                 dt = abs(d1["timestamp"] - d2["timestamp"])
                 if dt < _MATCH_WINDOW:
                     try:
-                        x, y, z = triangulate(
-                            (d1["x"], d1["y"]),
-                            (d2["x"], d2["y"]),
-                            cam_positions[cam_names[0]],
-                            cam_positions[cam_names[1]],
-                        )
+                        x, y, z = None, None, None
+
+                        # Try multi-blob matching first
+                        if (live_matcher
+                                and "candidates" in d1
+                                and "candidates" in d2):
+                            match = live_matcher.match(d1, d2)
+                            if match is not None:
+                                x, y, z = match["x"], match["y"], match["z"]
+
+                        # Fallback to single-blob triangulation
+                        if x is None:
+                            x, y, z = triangulate(
+                                (d1["x"], d1["y"]),
+                                (d2["x"], d2["y"]),
+                                cam_positions[cam_names[0]],
+                                cam_positions[cam_names[1]],
+                            )
+
                         self._latest_3d = BallPosition3D(
                             x=x, y=y, z=z,
                             cam66_world=WorldPoint2D(**d1),
                             cam68_world=WorldPoint2D(**d2),
                         )
                         # Feed live analytics
-                        pt = {"x": x, "y": y, "z": z, "timestamp": time.time()}
+                        now = time.time()
+                        pt = {"x": x, "y": y, "z": z, "timestamp": now}
+                        # Build per-camera detection info for enhanced analytics
+                        cam_dets = {}
+                        for cname, det in [(cam_names[0], d1), (cam_names[1], d2)]:
+                            cam_dets[cname] = {
+                                "world_x": det.get("x"),
+                                "world_y": det.get("y"),
+                                "pixel_x": det.get("pixel_x"),
+                                "pixel_y": det.get("pixel_y"),
+                                "yolo_conf": det.get("yolo_conf", 0.5),
+                            }
                         with self._analytics_lock:
+                            # Legacy analytics
                             bounce = self._bounce_detector.update(pt)
                             self._rally_tracker.update(pt, bounce)
                             if bounce is not None:
                                 self._live_bounces.append(bounce.to_dict())
                                 if len(self._live_bounces) > 50:
                                     self._live_bounces = self._live_bounces[-50:]
+                            # Enhanced analytics
+                            ebounce = self._enhanced_bounce.update(pt, cam_dets)
+                            rally_result = self._rally_sm.update(pt, ebounce)
+                            if ebounce is not None:
+                                self._live_bounces.append(ebounce.to_dict())
+                            if rally_result is not None:
+                                self._live_rallies.append(rally_result.to_dict())
+                                if len(self._live_rallies) > 20:
+                                    self._live_rallies = self._live_rallies[-20:]
                     except Exception as e:
                         logger.error("Triangulation error: %s", e)
 
@@ -399,6 +452,11 @@ class Orchestrator:
                 "rally_state": self._rally_tracker.get_state().to_dict(),
                 "recent_bounces": list(self._live_bounces[-10:]),
                 "completed_rallies": self._rally_tracker.get_completed_rallies(),
+                # Enhanced analytics
+                "enhanced_state": self._rally_sm.get_state_dict(),
+                "enhanced_rallies": [
+                    r.to_dict() for r in self._rally_sm.get_completed_rallies()
+                ],
             }
 
     def reset_live_analytics(self) -> None:
@@ -407,6 +465,9 @@ class Orchestrator:
             self._bounce_detector.reset()
             self._rally_tracker.reset()
             self._live_bounces.clear()
+            self._enhanced_bounce.reset()
+            self._rally_sm.reset()
+            self._live_rallies.clear()
 
     def get_latest_frame(self, name: str) -> Optional[bytes]:
         """返回指定摄像头的最新 JPEG 帧字节（用于 MJPEG 流）。"""
@@ -423,6 +484,46 @@ class Orchestrator:
     @property
     def inference_enabled(self) -> bool:
         return self._inference_enabled
+
+    def switch_model(self, model_name: str) -> dict:
+        """Switch between HRNet and TrackNet models at runtime.
+
+        Args:
+            model_name: "hrnet" or "tracknet"
+
+        Returns:
+            Dict with new model config info.
+        """
+        if model_name == "hrnet":
+            self.config.model.path = "model_weight/hrnet_tennis.onnx"
+            self.config.model.frames_in = 3
+            self.config.model.frames_out = 3
+        elif model_name == "tracknet":
+            self.config.model.path = "model_weight/TrackNet_best.pt"
+            self.config.model.frames_in = 8
+            self.config.model.frames_out = 8
+        else:
+            raise ValueError(f"Unknown model: {model_name}. Use 'hrnet' or 'tracknet'")
+
+        logger.info("Model switched to %s: %s (frames=%d)",
+                     model_name, self.config.model.path, self.config.model.frames_in)
+        return {
+            "model": model_name,
+            "path": self.config.model.path,
+            "frames_in": self.config.model.frames_in,
+            "frames_out": self.config.model.frames_out,
+        }
+
+    def get_current_model(self) -> dict:
+        """Return current model info."""
+        path = self.config.model.path
+        name = "hrnet" if path.endswith(".onnx") else "tracknet"
+        return {
+            "model": name,
+            "path": path,
+            "frames_in": self.config.model.frames_in,
+            "frames_out": self.config.model.frames_out,
+        }
 
     # ------------------------------------------------------------------
     # Video test (called from FastAPI)
@@ -454,6 +555,19 @@ class Orchestrator:
             }
         )
 
+        # Build ensemble config dict if enabled
+        ens_cfg = self.config.ensemble
+        ensemble_dict = None
+        if ens_cfg.enabled:
+            ensemble_dict = {
+                "enabled": True,
+                "hrnet_path": ens_cfg.hrnet_path,
+                "agree_distance": ens_cfg.agree_distance,
+                "boost_factor": ens_cfg.boost_factor,
+                "penalty_factor": ens_cfg.penalty_factor,
+                "single_factor": ens_cfg.single_factor,
+            }
+
         handle.process = mp.Process(
             target=run_video_pipeline,
             kwargs={
@@ -473,13 +587,18 @@ class Orchestrator:
                 "frame_queue": handle.frame_queue,
                 "stop_event": handle.stop_event,
                 "status_dict": handle.status_dict,
+                "ensemble_config": ensemble_dict,
+                "heatmap_mask": [tuple(r) for r in self.config.model.heatmap_mask],
+                "blob_verifier_config": self.config.blob_verifier.model_dump()
+                    if self.config.blob_verifier.enabled else None,
             },
             daemon=True,
         )
         handle.process.start()
         logger.info(
-            "[video-test] Started: %s [%.1f-%.1f] cam=%s pid=%d",
+            "[video-test] Started: %s [%.1f-%.1f] cam=%s pid=%d ensemble=%s",
             video_path, start_time, end_time, camera_name, handle.process.pid,
+            "ON" if ensemble_dict else "OFF",
         )
 
         self._video_test_handle = handle
@@ -504,6 +623,19 @@ class Orchestrator:
         """
         # Stop any existing video tests (both single and parallel)
         self.stop_video_test()
+
+        # Build ensemble config dict if enabled
+        ens_cfg = self.config.ensemble
+        ensemble_dict = None
+        if ens_cfg.enabled:
+            ensemble_dict = {
+                "enabled": True,
+                "hrnet_path": ens_cfg.hrnet_path,
+                "agree_distance": ens_cfg.agree_distance,
+                "boost_factor": ens_cfg.boost_factor,
+                "penalty_factor": ens_cfg.penalty_factor,
+                "single_factor": ens_cfg.single_factor,
+            }
 
         started = []
         for cam_info in cameras:
@@ -552,13 +684,18 @@ class Orchestrator:
                     "frame_queue": handle.frame_queue,
                     "stop_event": handle.stop_event,
                     "status_dict": handle.status_dict,
+                    "ensemble_config": ensemble_dict,
+                    "heatmap_mask": [tuple(r) for r in self.config.model.heatmap_mask],
+                    "blob_verifier_config": self.config.blob_verifier.model_dump()
+                        if self.config.blob_verifier.enabled else None,
                 },
                 daemon=True,
             )
             handle.process.start()
             logger.info(
-                "[video-test-parallel] Started: %s [%.1f-%.1f] cam=%s pid=%d",
+                "[video-test-parallel] Started: %s [%.1f-%.1f] cam=%s pid=%d ensemble=%s",
                 video_path, start_time, end_time, camera_name, handle.process.pid,
+                "ON" if ensemble_dict else "OFF",
             )
 
             self._video_test_handles[camera_name] = handle
@@ -645,10 +782,173 @@ class Orchestrator:
                 result[cam] = dets[start:]
         return result
 
+    def export_cvat_xml(self, camera_name: str, video_path: str) -> str:
+        """Export detections for a single camera as CVAT for Video 1.1 XML.
+
+        Automatically splits detections into multiple tracks when there are
+        frame gaps >= ``_TRACK_SPLIT_GAP``, so the user can directly review
+        and adjust in CVAT without having to manually split one giant track.
+
+        Label attributes:
+            state  – visible / occluded
+            main   – yes / no  (whether this is the active game ball)
+
+        Args:
+            camera_name: Camera to export detections for.
+            video_path: Original video file path (used for metadata).
+
+        Returns:
+            XML string in CVAT annotation format.
+        """
+        _TRACK_SPLIT_GAP = 5  # frame gap threshold to start a new track
+
+        dets = self._video_test_detections.get(camera_name, [])
+        if not dets:
+            raise ValueError(f"No detections for camera: {camera_name}")
+
+        # Sort by frame_index
+        dets = sorted(dets, key=lambda d: d.get("frame_index", 0))
+
+        # --- Split detections into track segments ----
+        segments: list[list[dict]] = []
+        current_seg: list[dict] = [dets[0]]
+        for i in range(1, len(dets)):
+            gap = dets[i].get("frame_index", 0) - dets[i - 1].get("frame_index", 0)
+            if gap >= _TRACK_SPLIT_GAP:
+                segments.append(current_seg)
+                current_seg = []
+            current_seg.append(dets[i])
+        segments.append(current_seg)
+
+        logger.info(
+            "CVAT export %s: %d detections → %d tracks (gap threshold=%d)",
+            camera_name, len(dets), len(segments), _TRACK_SPLIT_GAP,
+        )
+
+        # Get video metadata
+        cap = cv2.VideoCapture(video_path)
+        vid_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        vid_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        cap.release()
+
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f+00:00")
+
+        lines = [
+            '<?xml version="1.0" encoding="utf-8"?>',
+            "<annotations>",
+            "  <version>1.1</version>",
+            "  <meta>",
+            "    <job>",
+            f"      <id>0</id>",
+            f"      <size>{total_frames}</size>",
+            "      <mode>interpolation</mode>",
+            "      <overlap>0</overlap>",
+            "      <bugtracker></bugtracker>",
+            f"      <created>{now}</created>",
+            f"      <updated>{now}</updated>",
+            "      <subset>default</subset>",
+            "      <start_frame>0</start_frame>",
+            f"      <stop_frame>{total_frames - 1}</stop_frame>",
+            "      <frame_filter></frame_filter>",
+            "      <segments>",
+            "        <segment>",
+            "          <id>0</id>",
+            "          <start>0</start>",
+            f"          <stop>{total_frames - 1}</stop>",
+            "          <url></url>",
+            "        </segment>",
+            "      </segments>",
+            "      <owner>",
+            "        <username>auto-detect</username>",
+            "        <email></email>",
+            "      </owner>",
+            "      <labels>",
+            "        <label>",
+            '          <name>ball</name>',
+            '          <color>#804080</color>',
+            '          <type>any</type>',
+            "          <attributes>",
+            "            <attribute>",
+            '              <name>state</name>',
+            '              <mutable>True</mutable>',
+            '              <input_type>select</input_type>',
+            '              <default_value>visible</default_value>',
+            "              <values>visible\noccluded</values>",
+            "            </attribute>",
+            "            <attribute>",
+            '              <name>main</name>',
+            '              <mutable>True</mutable>',
+            '              <input_type>select</input_type>',
+            '              <default_value>yes</default_value>',
+            "              <values>yes\nno</values>",
+            "            </attribute>",
+            "          </attributes>",
+            "        </label>",
+            "      </labels>",
+            "    </job>",
+            f"    <dumped>{now}</dumped>",
+            "    <original_size>",
+            f"      <width>{vid_w}</width>",
+            f"      <height>{vid_h}</height>",
+            "    </original_size>",
+            "  </meta>",
+        ]
+
+        # Build one <track> per segment
+        for track_id, seg in enumerate(segments):
+            lines.append(f'  <track id="{track_id}" label="ball" source="auto">')
+
+            for i, det in enumerate(seg):
+                frame = det.get("frame_index", 0)
+                px = round(det.get("pixel_x", 0), 2)
+                py = round(det.get("pixel_y", 0), 2)
+
+                # Keyframe at segment boundaries and around internal gaps
+                is_first = i == 0
+                is_last = i == len(seg) - 1
+                prev_gap = (frame - seg[i - 1].get("frame_index", 0)) > 1 if i > 0 else True
+                next_gap = (seg[i + 1].get("frame_index", 0) - frame) > 1 if i < len(seg) - 1 else True
+                keyframe = 1 if (is_first or is_last or prev_gap or next_gap) else 0
+
+                lines.append(
+                    f'    <points frame="{frame}" keyframe="{keyframe}" '
+                    f'outside="0" occluded="0" points="{px},{py}" z_order="0">'
+                )
+                lines.append(f'      <attribute name="state">visible</attribute>')
+                lines.append(f'      <attribute name="main">yes</attribute>')
+                lines.append("    </points>")
+
+            # Close track with outside=1 on the frame after the last detection
+            last_frame = seg[-1].get("frame_index", 0)
+            close_frame = last_frame + 1
+            if close_frame < total_frames:
+                last_px = round(seg[-1].get("pixel_x", 0), 2)
+                last_py = round(seg[-1].get("pixel_y", 0), 2)
+                lines.append(
+                    f'    <points frame="{close_frame}" keyframe="1" '
+                    f'outside="1" occluded="0" points="{last_px},{last_py}" z_order="0">'
+                )
+                lines.append(f'      <attribute name="state">visible</attribute>')
+                lines.append(f'      <attribute name="main">yes</attribute>')
+                lines.append("    </points>")
+
+            lines.append("  </track>")
+
+        lines.append("</annotations>")
+
+        return "\n".join(lines)
+
     def compute_3d_from_detections(self) -> dict:
         """Match detections from two cameras by frame_index and compute 3D positions.
 
-        Returns dict with 'points', 'stats' (per-camera detection counts), and 'cam_order'.
+        When detections contain 'candidates' (multi-blob), uses MultiBlobMatcher
+        to pick the best blob pair per frame via ray_distance minimization.
+        Falls back to single-blob triangulation for legacy detections.
+
+        Returns dict with 'points', 'stats', 'cam_order', and 'matcher_stats'.
         """
         cam_names = list(self._video_test_detections.keys())
         if len(cam_names) < 2:
@@ -682,33 +982,206 @@ class Orchestrator:
             logger.error("Camera config not found for %s or %s", cam1_name, cam2_name)
             return {"points": [], "stats": stats, "cam_order": cam_names}
 
+        cam_pos = self._get_camera_positions()
+        pos1 = cam_pos.get(cam1_name, cam1_cfg.position_3d)
+        pos2 = cam_pos.get(cam2_name, cam2_cfg.position_3d)
+
+        # Check if detections have candidates (multi-blob mode)
+        has_candidates = any(
+            "candidates" in d for d in self._video_test_detections[cam1_name][:10]
+        )
+
+        matcher = MultiBlobMatcher(pos1, pos2) if has_candidates else None
         results = []
+
         for frame_idx in common_frames:
             d1 = cam1_dets[frame_idx]
             d2 = cam2_dets[frame_idx]
             try:
-                cam_pos = self._get_camera_positions()
-                x, y, z = triangulate(
-                    (d1["x"], d1["y"]),
-                    (d2["x"], d2["y"]),
-                    cam_pos.get(cam1_name, cam1_cfg.position_3d),
-                    cam_pos.get(cam2_name, cam2_cfg.position_3d),
-                )
-                results.append({
-                    "frame_index": frame_idx,
-                    "x": round(x, 4),
-                    "y": round(y, 4),
-                    "z": round(z, 4),
-                    "cam1_pixel": [round(d1["pixel_x"], 1), round(d1["pixel_y"], 1)],
-                    "cam2_pixel": [round(d2["pixel_x"], 1), round(d2["pixel_y"], 1)],
-                    # Per-camera homography world coords for debugging
-                    "cam1_world": [round(d1["x"], 4), round(d1["y"], 4)],
-                    "cam2_world": [round(d2["x"], 4), round(d2["y"], 4)],
-                })
+                if matcher and "candidates" in d1 and "candidates" in d2:
+                    # Multi-blob matching: try all pairs, pick lowest ray_distance
+                    match = matcher.match(d1, d2)
+                    if match is not None:
+                        results.append({
+                            "frame_index": frame_idx,
+                            "x": round(match["x"], 4),
+                            "y": round(match["y"], 4),
+                            "z": round(match["z"], 4),
+                            "ray_distance": round(match["ray_distance"], 4),
+                            "cam1_pixel": [round(match["cam1_pixel"][0], 1),
+                                           round(match["cam1_pixel"][1], 1)],
+                            "cam2_pixel": [round(match["cam2_pixel"][0], 1),
+                                           round(match["cam2_pixel"][1], 1)],
+                            "cam1_world": [round(match["cam1_world"][0], 4),
+                                           round(match["cam1_world"][1], 4)],
+                            "cam2_world": [round(match["cam2_world"][0], 4),
+                                           round(match["cam2_world"][1], 4)],
+                            "cam1_blob_idx": match["cam1_idx"],
+                            "cam2_blob_idx": match["cam2_idx"],
+                        })
+                else:
+                    # Legacy single-blob fallback
+                    x, y, z = triangulate(
+                        (d1["x"], d1["y"]),
+                        (d2["x"], d2["y"]),
+                        pos1, pos2,
+                    )
+                    results.append({
+                        "frame_index": frame_idx,
+                        "x": round(x, 4),
+                        "y": round(y, 4),
+                        "z": round(z, 4),
+                        "cam1_pixel": [round(d1["pixel_x"], 1), round(d1["pixel_y"], 1)],
+                        "cam2_pixel": [round(d2["pixel_x"], 1), round(d2["pixel_y"], 1)],
+                        "cam1_world": [round(d1["x"], 4), round(d1["y"], 4)],
+                        "cam2_world": [round(d2["x"], 4), round(d2["y"], 4)],
+                    })
             except Exception as e:
                 logger.warning("3D computation failed for frame %d: %s", frame_idx, e)
 
-        return {"points": results, "stats": stats, "cam_order": cam_names}
+        result = {"points": results, "stats": stats, "cam_order": cam_names}
+
+        if matcher:
+            m_stats = matcher.get_stats()
+            result["matcher_stats"] = m_stats
+            logger.info(
+                "MultiBlobMatcher: %d/%d frames matched, %d non-top1 picks (%.1f%%)",
+                m_stats["matched_frames"], m_stats["total_frames"],
+                m_stats["non_top1_picks"], m_stats["non_top1_rate"] * 100,
+            )
+
+        return result
+
+    # ------------------------------------------------------------------
+    # Import LabelImg annotations → 3D
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _parse_labelimg_folder(folder: Path) -> dict[int, dict]:
+        """Parse a folder of LabelImg JSON annotation files.
+
+        Returns {frame_number: {"pixel_x": float, "pixel_y": float}}.
+        """
+        result = {}
+        for jf in sorted(folder.glob("*.json")):
+            try:
+                with open(jf, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                shapes = data.get("shapes", [])
+                if not shapes:
+                    continue
+                pts = shapes[0].get("points", [])
+                if not pts or len(pts[0]) < 2:
+                    continue
+                frame_num = int(jf.stem)
+                result[frame_num] = {"pixel_x": float(pts[0][0]), "pixel_y": float(pts[0][1])}
+            except Exception:
+                continue
+        return result
+
+    def import_labelimg_annotations(self, cam1_folder: str, cam2_folder: str) -> dict:
+        """Import LabelImg annotations from two camera folders and triangulate to 3D.
+
+        Args:
+            cam1_folder: Subfolder name under uploads/ for camera 1 (e.g. "cam66_clip").
+            cam2_folder: Subfolder name under uploads/ for camera 2 (e.g. "cam68_clip").
+
+        Returns:
+            dict with 'points' (list of 3D point dicts), 'stats', and 'bounces'.
+        """
+        from app.pipeline.homography import HomographyTransformer
+
+        uploads_dir = Path("uploads")
+        folder1 = uploads_dir / cam1_folder
+        folder2 = uploads_dir / cam2_folder
+
+        if not folder1.is_dir():
+            return {"error": f"Folder not found: {cam1_folder}", "points": []}
+        if not folder2.is_dir():
+            return {"error": f"Folder not found: {cam2_folder}", "points": []}
+
+        # Parse annotation files
+        ann1 = self._parse_labelimg_folder(folder1)
+        ann2 = self._parse_labelimg_folder(folder2)
+
+        if not ann1 or not ann2:
+            return {"error": "No valid annotations found", "points": []}
+
+        common_frames = sorted(set(ann1.keys()) & set(ann2.keys()))
+        if not common_frames:
+            return {"error": "No common frames between cameras", "points": []}
+
+        # Determine camera names from folder names
+        cam_names = list(self.config.cameras.keys())
+        if len(cam_names) < 2:
+            return {"error": "Need at least 2 cameras in config", "points": []}
+
+        cam1_name = cam_names[0]  # cam66
+        cam2_name = cam_names[1]  # cam68
+
+        # Load homography transformers
+        h_path = self.config.homography.path
+        cam1_cfg = self.config.cameras[cam1_name]
+        cam2_cfg = self.config.cameras[cam2_name]
+        h1 = HomographyTransformer(h_path, cam1_cfg.homography_key)
+        h2 = HomographyTransformer(h_path, cam2_cfg.homography_key)
+
+        # Get camera 3D positions
+        cam_pos = self._get_camera_positions()
+        pos1 = cam_pos.get(cam1_name, cam1_cfg.position_3d)
+        pos2 = cam_pos.get(cam2_name, cam2_cfg.position_3d)
+
+        # Triangulate each common frame
+        points = []
+        for fi in common_frames:
+            a1 = ann1[fi]
+            a2 = ann2[fi]
+            try:
+                wx1, wy1 = h1.pixel_to_world(a1["pixel_x"], a1["pixel_y"])
+                wx2, wy2 = h2.pixel_to_world(a2["pixel_x"], a2["pixel_y"])
+                x, y, z = triangulate((wx1, wy1), (wx2, wy2), pos1, pos2)
+                points.append({
+                    "frame_index": fi,
+                    "x": round(x, 4),
+                    "y": round(y, 4),
+                    "z": round(z, 4),
+                    "cam1_pixel": [round(a1["pixel_x"], 1), round(a1["pixel_y"], 1)],
+                    "cam2_pixel": [round(a2["pixel_x"], 1), round(a2["pixel_y"], 1)],
+                    "cam1_world": [round(wx1, 4), round(wy1, 4)],
+                    "cam2_world": [round(wx2, 4), round(wy2, 4)],
+                })
+            except Exception as e:
+                logger.warning("Triangulation failed for frame %d: %s", fi, e)
+
+        # Detect bounces (Z-axis V-shape)
+        bounces = []
+        for i in range(1, len(points) - 1):
+            prev_z = points[i - 1]["z"]
+            curr_z = points[i]["z"]
+            next_z = points[i + 1]["z"]
+            if curr_z < prev_z and curr_z < next_z and curr_z < 0.3:
+                bx, by = points[i]["x"], points[i]["y"]
+                in_court = 0 <= bx <= 8.23 and 0 <= by <= 23.77
+                bounces.append({
+                    "frame": points[i]["frame_index"],
+                    "x": bx, "y": by, "z": curr_z,
+                    "type": "IN" if in_court else "OUT",
+                })
+
+        stats = {
+            "cam1_annotations": len(ann1),
+            "cam2_annotations": len(ann2),
+            "common_frames": len(common_frames),
+            "triangulated_points": len(points),
+            "bounces_detected": len(bounces),
+        }
+
+        logger.info(
+            "Imported annotations: %d cam1, %d cam2, %d common → %d 3D points, %d bounces",
+            len(ann1), len(ann2), len(common_frames), len(points), len(bounces),
+        )
+
+        return {"points": points, "bounces": bounces, "stats": stats, "cam_order": [cam1_name, cam2_name]}
 
     def compute_3d_trajectory(self) -> dict:
         """Compute 3D trajectory using auto time-offset and spatial parabola fitting.
@@ -949,7 +1422,15 @@ class Orchestrator:
             else:
                 combined_state = "starting"
 
-            return {
+            # Collect ensemble stats from completed cameras
+            ensemble_stats = {}
+            for cam_name, handle in self._video_test_handles.items():
+                sd = handle.status_dict
+                es = sd.get("ensemble_stats")
+                if es:
+                    ensemble_stats[cam_name] = es
+
+            result = {
                 "state": combined_state,
                 "total_frames": total_frames,
                 "processed_frames": processed_frames,
@@ -957,6 +1438,9 @@ class Orchestrator:
                 "error_msg": error_msg,
                 "per_camera": per_camera,
             }
+            if ensemble_stats:
+                result["ensemble_stats"] = ensemble_stats
+            return result
 
         # Legacy single handle
         handle = self._video_test_handle

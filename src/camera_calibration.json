@@ -82,7 +82,7 @@
     "camera_position_3d": [
       4.321,
       -4.236,
-      5.4265
+      7.0
     ],
     "mean_reprojection_error_px": 0.926,
     "max_reprojection_error_px": 2.498,
@@ -468,7 +468,7 @@
     "camera_position_3d": [
       4.2176,
       28.9077,
-      5.4163
+      7.0
     ],
     "mean_reprojection_error_px": 0.827,
     "max_reprojection_error_px": 1.812,
@@ -780,19 +780,19 @@
   "stereo": {
     "baseline_m": 33.144,
     "camera_heights_m": {
-      "cam66": 5.426,
-      "cam68": 5.416
+      "cam66": 7.0,
+      "cam68": 7.0
     },
     "camera_positions": {
       "cam66": [
         4.321,
         -4.236,
-        5.4265
+        7.0
       ],
       "cam68": [
         4.2176,
         28.9077,
-        5.4163
+        7.0
       ]
     },
     "relative_rotation": [

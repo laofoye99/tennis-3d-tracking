@@ -299,6 +299,24 @@ async def set_track_ball(state: str):
     return {"inference_enabled": orch.inference_enabled}
 
 
+@router.post("/api/model/switch/{model_name}")
+async def switch_model(model_name: str):
+    """Switch detection model: model_name = 'hrnet' | 'tracknet'"""
+    orch = _get_orch()
+    try:
+        result = orch.switch_model(model_name)
+        return result
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@router.get("/api/model/current")
+async def current_model():
+    """Get current model info."""
+    orch = _get_orch()
+    return orch.get_current_model()
+
+
 # ---- Recording ----
 
 @router.post("/api/recording/start")
@@ -619,6 +637,38 @@ async def compute_trajectory():
     return result
 
 
+# ---- CVAT XML Export ----
+
+@router.get("/api/video-test/export-cvat")
+async def export_cvat(camera: str, filename: str):
+    """Export single-camera detections as CVAT for Video 1.1 XML.
+
+    Downloads an XML file that can be imported into CVAT.
+
+    Query params:
+        camera: camera name (e.g. "cam66")
+        filename: original video filename in uploads/
+    """
+    orch = _get_orch()
+    video_path = str(_UPLOAD_DIR / filename)
+    if not Path(video_path).exists():
+        raise HTTPException(404, f"Video not found: {filename}")
+    try:
+        xml_str = orch.export_cvat_xml(camera, video_path)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+    stem = Path(filename).stem
+    out_name = f"annotations_{camera}_{stem}.xml"
+    return StreamingResponse(
+        iter([xml_str.encode("utf-8")]),
+        media_type="application/xml",
+        headers={
+            "Content-Disposition": f'attachment; filename="{out_name}"',
+        },
+    )
+
+
 # ---------------------------------------------------------------------------
 # Annotation save / list / load
 # ---------------------------------------------------------------------------
@@ -680,3 +730,42 @@ async def load_annotation(filename: str):
     with open(filepath, "r", encoding="utf-8") as f:
         data = json.load(f)
     return data
+
+
+# ------------------------------------------------------------------
+# Import LabelImg annotations → 3D
+# ------------------------------------------------------------------
+
+_UPLOADS_DIR = Path("uploads")
+
+
+@router.get("/api/annotation-folders")
+async def list_annotation_folders():
+    """List subfolders in uploads/ that contain LabelImg JSON annotation files."""
+    folders = []
+    if _UPLOADS_DIR.is_dir():
+        for sub in sorted(_UPLOADS_DIR.iterdir()):
+            if sub.is_dir() and any(sub.glob("*.json")):
+                folders.append(sub.name)
+    return {"folders": folders}
+
+
+@router.post("/api/import-annotations")
+async def import_annotations(request: Request):
+    """Import LabelImg annotations from two camera folders and compute 3D trajectory.
+
+    Body: {"cam1_folder": "cam66_clip", "cam2_folder": "cam68_clip"}
+    """
+    body = await request.json()
+    cam1_folder = body.get("cam1_folder", "")
+    cam2_folder = body.get("cam2_folder", "")
+    if not cam1_folder or not cam2_folder:
+        raise HTTPException(400, "Both cam1_folder and cam2_folder are required")
+
+    orch: Orchestrator = request.app.state.orchestrator
+    result = orch.import_labelimg_annotations(cam1_folder, cam2_folder)
+
+    if "error" in result:
+        raise HTTPException(400, result["error"])
+
+    return result

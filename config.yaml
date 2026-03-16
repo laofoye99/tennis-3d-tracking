@@ -7,14 +7,14 @@ cameras:
     position_3d:
     - 3.7657
     - -15.7273
-    - 7.4776
+    - 7.0
     rtsp_url: rtsp://admin:motion168@192.168.1.66:554/Streaming/Channels/101
   cam68:
     homography_key: cam68
     position_3d:
     - 5.8058
     - 45.0351
-    - 10.2461
+    - 7.0
     rtsp_url: rtsp://admin:motion168@192.168.1.68:554/Streaming/Channels/101
 homography:
   path: src/homography_matrices.json
@@ -25,8 +25,21 @@ model:
   input_size:
   - 288
   - 512
-  path: model_weight/TrackNet_best.pt
-  threshold: 0.5
+  path: model_weight/TrackNet_finetuned.pt
+  threshold: 0.3
+  heatmap_mask:
+  - [0, 0, 620, 40]
+blob_verifier:
+  enabled: true
+  model_path: model_weight/blob_verifier_yolo.pt
+  crop_size: 128
+  conf: 0.15
+ensemble:
+  enabled: false
+  hrnet_path: model_weight/hrnet_tennis.onnx
+  hrnet_frames_in: 3
+  hrnet_frames_out: 3
+  agree_distance: 3.0
 server:
   host: 0.0.0.0
   port: 8000
