@@ -80,7 +80,11 @@ class MultiBlobMatcher:
     For each frame, tries all (cam1_blob, cam2_blob) pairs, triangulates,
     and picks the pair with the lowest composite score:
 
-        score = ray_distance + temporal_weight * dist_to_predicted_3d
+        score = ray_distance + blob_rank_penalty * (i + j)
+               + temporal_weight * dist_to_predicted_3d
+
+    The blob_rank_penalty ensures top-1 blobs (highest heatmap response)
+    are preferred unless a non-top1 pair has significantly better ray_distance.
 
     When no recent tracking history exists (LOST state), temporal_weight
     is effectively 0, so only ray_distance matters. This allows new rallies
@@ -102,6 +106,7 @@ class MultiBlobMatcher:
         max_ray_distance: float = 2.0,
         valid_z_range: tuple[float, float] = (0.0, 6.0),
         temporal_weight: float = 0.3,
+        blob_rank_penalty: float = 0.5,
         lost_timeout: int = 30,
         max_velocity: float = 50.0,
         history_size: int = 5,
@@ -114,6 +119,7 @@ class MultiBlobMatcher:
 
         # Temporal tracking parameters
         self.temporal_weight = temporal_weight
+        self.blob_rank_penalty = blob_rank_penalty
         self.lost_timeout = lost_timeout
         self.max_velocity = max_velocity
         self.history_size = history_size
@@ -229,7 +235,11 @@ class MultiBlobMatcher:
                     continue
 
                 # Composite score
-                score = ray_dist
+                # Blob rank penalty: top-1 blob (index 0) has strong heatmap
+                # response, non-top1 needs clearly better ray_dist to win.
+                # Penalty = blob_rank_penalty * (i + j), so (0,0)=0, (1,0)=0.5, (1,1)=1.0
+                rank_pen = self.blob_rank_penalty * (i + j)
+                score = ray_dist + rank_pen
                 if predicted is not None:
                     d3d = float(np.linalg.norm(
                         np.array([x, y, z]) - predicted
