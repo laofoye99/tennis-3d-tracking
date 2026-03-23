@@ -24,44 +24,50 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 COURT_LENGTH = 23.77
-COURT_WIDTH = 8.23
+DOUBLES_WIDTH = 8.23
 NET_Y = COURT_LENGTH / 2  # 11.885
 SERVICE_DIST = 6.40
 SERVICE_NEAR_Y = NET_Y - SERVICE_DIST  # 5.485
 SERVICE_FAR_Y = NET_Y + SERVICE_DIST  # 18.285
-CENTER_X = COURT_WIDTH / 2  # 4.115
+
+# Singles court lines — the labeled keypoints are on SINGLES sidelines
+SINGLES_LEFT = 1.37        # singles left sideline
+SINGLES_RIGHT = 6.86       # singles right sideline
+CENTER_X = (SINGLES_LEFT + SINGLES_RIGHT) / 2  # 4.115
 
 # 3D world coordinates for 12 labeled keypoints (z=0 on ground plane)
+# IMPORTANT: left/right labels correspond to SINGLES sidelines, not doubles.
 # Camera 66: near baseline at y=0, looking toward y=23.77
 WORLD_COORDS_CAM66 = {
-    "left_top": (0.0, COURT_LENGTH, 0.0),
-    "left_top_serve": (0.0, SERVICE_FAR_Y, 0.0),
-    "left_bottom_serve": (0.0, SERVICE_NEAR_Y, 0.0),
-    "left_bottom": (0.0, 0.0, 0.0),
+    "left_top": (SINGLES_LEFT, COURT_LENGTH, 0.0),
+    "left_top_serve": (SINGLES_LEFT, SERVICE_FAR_Y, 0.0),
+    "left_bottom_serve": (SINGLES_LEFT, SERVICE_NEAR_Y, 0.0),
+    "left_bottom": (SINGLES_LEFT, 0.0, 0.0),
     "center_top": (CENTER_X, COURT_LENGTH, 0.0),
     "center_top_serve": (CENTER_X, SERVICE_FAR_Y, 0.0),
     "center_bottom_serve": (CENTER_X, SERVICE_NEAR_Y, 0.0),
     "center_bottom": (CENTER_X, 0.0, 0.0),
-    "right_top": (COURT_WIDTH, COURT_LENGTH, 0.0),
-    "right_top_serve": (COURT_WIDTH, SERVICE_FAR_Y, 0.0),
-    "right_bottom_serve": (COURT_WIDTH, SERVICE_NEAR_Y, 0.0),
-    "right_bottom": (COURT_WIDTH, 0.0, 0.0),
+    "right_top": (SINGLES_RIGHT, COURT_LENGTH, 0.0),
+    "right_top_serve": (SINGLES_RIGHT, SERVICE_FAR_Y, 0.0),
+    "right_bottom_serve": (SINGLES_RIGHT, SERVICE_NEAR_Y, 0.0),
+    "right_bottom": (SINGLES_RIGHT, 0.0, 0.0),
 }
 
 # Camera 68: opposite end, facing toward y=0
+# Its "left" = cam66's "right" (x=6.86), its "right" = cam66's "left" (x=1.37)
 WORLD_COORDS_CAM68 = {
-    "left_top": (COURT_WIDTH, 0.0, 0.0),
-    "left_top_serve": (COURT_WIDTH, SERVICE_NEAR_Y, 0.0),
-    "left_bottom_serve": (COURT_WIDTH, SERVICE_FAR_Y, 0.0),
-    "left_bottom": (COURT_WIDTH, COURT_LENGTH, 0.0),
+    "left_top": (SINGLES_RIGHT, 0.0, 0.0),
+    "left_top_serve": (SINGLES_RIGHT, SERVICE_NEAR_Y, 0.0),
+    "left_bottom_serve": (SINGLES_RIGHT, SERVICE_FAR_Y, 0.0),
+    "left_bottom": (SINGLES_RIGHT, COURT_LENGTH, 0.0),
     "center_top": (CENTER_X, 0.0, 0.0),
     "center_top_serve": (CENTER_X, SERVICE_NEAR_Y, 0.0),
     "center_bottom_serve": (CENTER_X, SERVICE_FAR_Y, 0.0),
     "center_bottom": (CENTER_X, COURT_LENGTH, 0.0),
-    "right_top": (0.0, 0.0, 0.0),
-    "right_top_serve": (0.0, SERVICE_NEAR_Y, 0.0),
-    "right_bottom_serve": (0.0, SERVICE_FAR_Y, 0.0),
-    "right_bottom": (0.0, COURT_LENGTH, 0.0),
+    "right_top": (SINGLES_LEFT, 0.0, 0.0),
+    "right_top_serve": (SINGLES_LEFT, SERVICE_NEAR_Y, 0.0),
+    "right_bottom_serve": (SINGLES_LEFT, SERVICE_FAR_Y, 0.0),
+    "right_bottom": (SINGLES_LEFT, COURT_LENGTH, 0.0),
 }
 
 WORLD_COORDS = {"cam66": WORLD_COORDS_CAM66, "cam68": WORLD_COORDS_CAM68}
@@ -498,7 +504,7 @@ def run_calibration(
         "calibration_method": "PnP",
         "court_dimensions": {
             "length_m": COURT_LENGTH,
-            "width_m": COURT_WIDTH,
+            "width_m": DOUBLES_WIDTH,
             "net_y_m": NET_Y,
         },
         "cam66": results["cam66"],

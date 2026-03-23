@@ -7,8 +7,8 @@
       "score": null,
       "points": [
         [
-          724.4,
-          119.0
+          722.5,
+          117.3
         ]
       ],
       "group_id": null,
@@ -24,8 +24,8 @@
       "score": null,
       "points": [
         [
-          687.0,
-          177.2
+          684.0,
+          176.4
         ]
       ],
       "group_id": null,
@@ -41,8 +41,8 @@
       "score": null,
       "points": [
         [
-          472.25577264653646,
-          503.73001776198936
+          466.4835164835165,
+          505.6043956043956
         ]
       ],
       "group_id": null,
@@ -58,8 +58,8 @@
       "score": null,
       "points": [
         [
-          181.0084033613444,
-          950.9243697478993
+          168.84154460719043,
+          958.9747003994675
         ]
       ],
       "group_id": null,
@@ -75,8 +75,8 @@
       "score": null,
       "points": [
         [
-          914.6,
-          121.8
+          914.4,
+          120.4
         ]
       ],
       "group_id": null,
@@ -92,8 +92,8 @@
       "score": null,
       "points": [
         [
-          916.1,
-          181.1
+          916.2,
+          180.1
         ]
       ],
       "group_id": null,
@@ -109,8 +109,8 @@
       "score": null,
       "points": [
         [
-          922.5130890052355,
-          504.3979057591623
+          922.7,
+          506.1
         ]
       ],
       "group_id": null,
@@ -126,59 +126,8 @@
       "score": null,
       "points": [
         [
-          926.1363636363636,
-          949.9431818181818
-        ]
-      ],
-      "group_id": null,
-      "description": "",
-      "difficult": false,
-      "shape_type": "point",
-      "flags": {},
-      "attributes": {},
-      "kie_linking": []
-    },
-    {
-      "label": "right_bottom",
-      "score": null,
-      "points": [
-        [
-          1630.6818181818182,
-          943.6931818181818
-        ]
-      ],
-      "group_id": null,
-      "description": "",
-      "difficult": false,
-      "shape_type": "point",
-      "flags": {},
-      "attributes": {},
-      "kie_linking": []
-    },
-    {
-      "label": "right_bottom_serve",
-      "score": null,
-      "points": [
-        [
-          1357.9178885630497,
-          508.1818181818182
-        ]
-      ],
-      "group_id": null,
-      "description": "",
-      "difficult": false,
-      "shape_type": "point",
-      "flags": {},
-      "attributes": {},
-      "kie_linking": []
-    },
-    {
-      "label": "right_top_serve",
-      "score": null,
-      "points": [
-        [
-          1141.0557184750733,
-          183.84164222873903
+          926.3,
+          955.0
         ]
       ],
       "group_id": null,
@@ -194,8 +143,59 @@
       "score": null,
       "points": [
         [
-          1102.0527859237536,
-          124.16422287390031
+          1103.7,
+          122.7
+        ]
+      ],
+      "group_id": null,
+      "description": "",
+      "difficult": false,
+      "shape_type": "point",
+      "flags": {},
+      "attributes": {},
+      "kie_linking": []
+    },
+    {
+      "label": "right_top_serve",
+      "score": null,
+      "points": [
+        [
+          1143.1,
+          182.6
+        ]
+      ],
+      "group_id": null,
+      "description": "",
+      "difficult": false,
+      "shape_type": "point",
+      "flags": {},
+      "attributes": {},
+      "kie_linking": []
+    },
+    {
+      "label": "right_bottom_serve",
+      "score": null,
+      "points": [
+        [
+          1362.5806451612902,
+          510.0
+        ]
+      ],
+      "group_id": null,
+      "description": "",
+      "difficult": false,
+      "shape_type": "point",
+      "flags": {},
+      "attributes": {},
+      "kie_linking": []
+    },
+    {
+      "label": "right_bottom",
+      "score": null,
+      "points": [
+        [
+          1641.5,
+          949.6
         ]
       ],
       "group_id": null,
@@ -210,5 +210,6 @@
   "imagePath": "00000.jpg",
   "imageData": null,
   "imageHeight": 1080,
-  "imageWidth": 1920
+  "imageWidth": 1920,
+  "description": ""
 }

@@ -89,6 +89,24 @@ class Orchestrator:
         self._live_rallies: list[dict] = []
         self._analytics_lock = threading.Lock()
 
+        # Confidence filtering (top1_conf20)
+        self._conf_percentile = 20  # reject bottom 20% by blob_sum
+        self._conf_history: list[float] = []  # rolling blob_sum values
+        self._conf_threshold = 0.0  # dynamic, updated from history
+
+        # Net crossing speed detection
+        self._prev_3d: Optional[dict] = None  # previous 3D point for speed calc
+        self._latest_net_crossing: Optional[dict] = None
+        self._net_crossings: list[dict] = []
+        NET_Y = 11.885  # net position
+        self._NET_Y = NET_Y
+
+        # 3D display WebSocket push
+        self._ws_bounce_queue: list[dict] = []  # bounces to push
+        self._ws_thread: Optional[threading.Thread] = None
+        self._ws_url = "wss://tennisserver.motionrivalry.com:8086/general"
+        self._ws_enabled = False
+
     def _get_camera_positions(self) -> dict[str, list[float]]:
         """Get camera 3D positions, optionally overriding with calibrated values.
 
@@ -244,6 +262,20 @@ class Orchestrator:
                 d2 = self._latest_detections[cam_names[1]]
                 dt = abs(d1["timestamp"] - d2["timestamp"])
                 if dt < _MATCH_WINDOW:
+                    # --- Confidence filtering (top1_conf20) ---
+                    blob_sum1 = d1.get("blob_sum", d1.get("confidence", 1.0))
+                    blob_sum2 = d2.get("blob_sum", d2.get("confidence", 1.0))
+                    avg_conf = (blob_sum1 + blob_sum2) / 2
+                    self._conf_history.append(avg_conf)
+                    if len(self._conf_history) > 500:
+                        self._conf_history = self._conf_history[-500:]
+                    if len(self._conf_history) >= 50:
+                        sorted_h = sorted(self._conf_history)
+                        idx = int(len(sorted_h) * self._conf_percentile / 100)
+                        self._conf_threshold = sorted_h[idx]
+                    if avg_conf < self._conf_threshold:
+                        continue  # skip low-confidence detection
+
                     try:
                         x, y, z = None, None, None
 
@@ -269,10 +301,39 @@ class Orchestrator:
                             cam66_world=WorldPoint2D(**d1),
                             cam68_world=WorldPoint2D(**d2),
                         )
-                        # Feed live analytics
+
+                        # --- Net crossing speed detection ---
                         now = time.time()
                         pt = {"x": x, "y": y, "z": z, "timestamp": now}
-                        # Build per-camera detection info for enhanced analytics
+                        if self._prev_3d is not None:
+                            prev_y = self._prev_3d["y"]
+                            curr_y = y
+                            # Check if ball crossed the net
+                            if (prev_y < self._NET_Y and curr_y >= self._NET_Y) or \
+                               (prev_y > self._NET_Y and curr_y <= self._NET_Y):
+                                t_delta = now - self._prev_3d["timestamp"]
+                                if t_delta > 0.001:
+                                    dx = x - self._prev_3d["x"]
+                                    dy = y - self._prev_3d["y"]
+                                    dz = z - self._prev_3d["z"]
+                                    dist = (dx**2 + dy**2 + dz**2) ** 0.5
+                                    speed_ms = dist / t_delta
+                                    speed_kmh = speed_ms * 3.6
+                                    if 20 <= speed_kmh <= 250:  # sane range
+                                        direction = "near_to_far" if curr_y > prev_y else "far_to_near"
+                                        crossing = {
+                                            "speed_kmh": round(speed_kmh, 1),
+                                            "direction": direction,
+                                            "timestamp": now,
+                                            "x": x, "y": y, "z": z,
+                                        }
+                                        self._latest_net_crossing = crossing
+                                        self._net_crossings.append(crossing)
+                                        if len(self._net_crossings) > 100:
+                                            self._net_crossings = self._net_crossings[-100:]
+                        self._prev_3d = pt
+
+                        # Feed live analytics
                         cam_dets = {}
                         for cname, det in [(cam_names[0], d1), (cam_names[1], d2)]:
                             cam_dets[cname] = {
@@ -290,6 +351,15 @@ class Orchestrator:
                                 self._live_bounces.append(bounce.to_dict())
                                 if len(self._live_bounces) > 50:
                                     self._live_bounces = self._live_bounces[-50:]
+                                # --- Push bounce to 3D display queue ---
+                                if self._ws_enabled:
+                                    bx, by = bounce.x, bounce.y
+                                    self._ws_bounce_queue.append({
+                                        "x": (bx - 1.37) / 5.49,  # singles normalized
+                                        "y": 1.0 - (by / 23.77),  # 0=far, 1=near
+                                        "speed": self._latest_net_crossing["speed_kmh"] if self._latest_net_crossing else 0,
+                                        "timestamp": int(now * 1000),
+                                    })
                             # Enhanced analytics
                             ebounce = self._enhanced_bounce.update(pt, cam_dets)
                             rally_result = self._rally_sm.update(pt, ebounce)
@@ -468,6 +538,80 @@ class Orchestrator:
             self._enhanced_bounce.reset()
             self._rally_sm.reset()
             self._live_rallies.clear()
+
+    def get_latest_net_crossing(self) -> Optional[dict]:
+        """Return the most recent net crossing event with speed."""
+        return self._latest_net_crossing
+
+    def get_net_crossings(self) -> list[dict]:
+        """Return recent net crossing events."""
+        return list(self._net_crossings[-20:])
+
+    def enable_3d_display(self, url: str = None) -> dict:
+        """Enable WebSocket push to 3D display."""
+        if url:
+            self._ws_url = url
+        self._ws_enabled = True
+        if self._ws_thread is None or not self._ws_thread.is_alive():
+            self._ws_thread = threading.Thread(
+                target=self._ws_push_loop, daemon=True, name="ws-3d-push"
+            )
+            self._ws_thread.start()
+        return {"enabled": True, "url": self._ws_url}
+
+    def disable_3d_display(self) -> dict:
+        """Disable WebSocket push."""
+        self._ws_enabled = False
+        return {"enabled": False}
+
+    def _ws_push_loop(self) -> None:
+        """Background thread: push bounce events to 3D display via WebSocket."""
+        import asyncio
+        import ssl
+
+        async def _run():
+            ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            ssl_ctx.check_hostname = False
+            ssl_ctx.verify_mode = ssl.CERT_NONE
+
+            try:
+                import websockets
+            except ImportError:
+                logger.warning("websockets not installed, 3D display push disabled")
+                return
+
+            while self._ws_enabled and not self._stopped.is_set():
+                try:
+                    connect_kwargs = {"ssl": ssl_ctx} if self._ws_url.startswith("wss://") else {}
+                    async with websockets.connect(self._ws_url, **connect_kwargs) as ws:
+                        logger.info("3D display connected: %s", self._ws_url)
+                        while self._ws_enabled and not self._stopped.is_set():
+                            if self._ws_bounce_queue:
+                                bd = self._ws_bounce_queue.pop(0)
+                                msg = json.dumps({
+                                    "room": "general",
+                                    "msg": {
+                                        "message": "bounce_data",
+                                        "data": {
+                                            "bounce": {
+                                                "timeStamp": bd["timestamp"],
+                                                "x": round(bd["x"], 4),
+                                                "y": round(bd["y"], 4),
+                                                "speed": round(bd["speed"], 1),
+                                            }
+                                        }
+                                    }
+                                })
+                                await ws.send(msg)
+                                logger.info("3D display: sent bounce x=%.3f y=%.3f speed=%.0f",
+                                           bd["x"], bd["y"], bd["speed"])
+                            else:
+                                await asyncio.sleep(0.1)
+                except Exception as e:
+                    logger.warning("3D display WebSocket error: %s, reconnecting in 5s", e)
+                    await asyncio.sleep(5)
+
+        asyncio.run(_run())
 
     def get_latest_frame(self, name: str) -> Optional[bytes]:
         """返回指定摄像头的最新 JPEG 帧字节（用于 MJPEG 流）。"""
@@ -1161,7 +1305,7 @@ class Orchestrator:
             next_z = points[i + 1]["z"]
             if curr_z < prev_z and curr_z < next_z and curr_z < 0.3:
                 bx, by = points[i]["x"], points[i]["y"]
-                in_court = 0 <= bx <= 8.23 and 0 <= by <= 23.77
+                in_court = 1.37 <= bx <= 6.86 and 0 <= by <= 23.77
                 bounces.append({
                     "frame": points[i]["frame_index"],
                     "x": bx, "y": by, "z": curr_z,

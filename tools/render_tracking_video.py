@@ -27,14 +27,16 @@ import yaml
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
-# ── Court dimensions (meters) ─────────────────────────────────────────────
-COURT_W = 8.23
+# ── Court dimensions (meters) — SINGLES court ────────────────────────────
+# This is a singles court. All coordinates use singles sidelines as boundaries.
+SINGLES_X_MIN = 1.37              # singles sideline (left)
+SINGLES_X_MAX = 6.86              # singles sideline (right)
+COURT_W = SINGLES_X_MAX - SINGLES_X_MIN  # singles width = 5.49m
 COURT_L = 23.77
 NET_Y = COURT_L / 2  # 11.885
+NET_H = 0.914        # net height (meters)
 SERVICE_NEAR = 5.485
 SERVICE_FAR = 18.285
-SINGLES_X_MIN = 1.37              # singles sideline (left)
-SINGLES_X_MAX = COURT_W - 1.37    # singles sideline (right) = 6.86
 
 # ── Rendering constants ──────────────────────────────────────────────────
 TRAIL_LEN = 30
@@ -166,6 +168,57 @@ def run_detection_multi(video_path, detector, postproc, max_frames, top_k=2):
         len(multi_detections), n, multi_blob_count, multi_frames, rejected_temporal,
     )
     return multi_detections, single_detections, n
+
+
+def load_stereo_calibration(calib_path="src/camera_calibration.json"):
+    """Load solvePnP stereo calibration data."""
+    with open(calib_path) as f:
+        data = json.load(f)
+    result = {}
+    for cam in ["cam66", "cam68"]:
+        c = data[cam]
+        K = np.array(c["K"], dtype=np.float64)
+        dist = np.array(c["dist"], dtype=np.float64)
+        P = np.array(c["P"], dtype=np.float64)
+        result[cam] = {"K": K, "dist": dist, "P": P}
+    return result
+
+
+def triangulate_stereo(px66, py66, px68, py68, stereo_cal):
+    """Triangulate using solvePnP projection matrices (works at any height).
+
+    Returns (x, y, z, ray_dist) or None if invalid.
+    """
+    K1, d1, P1 = stereo_cal["cam66"]["K"], stereo_cal["cam66"]["dist"], stereo_cal["cam66"]["P"]
+    K2, d2, P2 = stereo_cal["cam68"]["K"], stereo_cal["cam68"]["dist"], stereo_cal["cam68"]["P"]
+
+    # Undistort pixel coordinates
+    pt1 = cv2.undistortPoints(
+        np.array([[[px66, py66]]], dtype=np.float64), K1, d1, P=K1
+    ).reshape(2)
+    pt2 = cv2.undistortPoints(
+        np.array([[[px68, py68]]], dtype=np.float64), K2, d2, P=K2
+    ).reshape(2)
+
+    # Triangulate
+    pts4d = cv2.triangulatePoints(P1, P2, pt1.reshape(2, 1), pt2.reshape(2, 1))
+    if abs(pts4d[3, 0]) < 1e-10:
+        return None
+    pts3d = (pts4d[:3, 0] / pts4d[3, 0])
+
+    x, y, z = float(pts3d[0]), float(pts3d[1]), float(pts3d[2])
+
+    # Compute ray distance as quality metric
+    # Reproject and check consistency
+    proj1, _ = cv2.projectPoints(
+        pts3d.reshape(1, 3), np.zeros(3), np.zeros(3),
+        K1, d1,
+    )
+    # Use reprojection error as proxy for ray_dist
+    reproj_err1 = np.linalg.norm(proj1.reshape(2) - np.array([px66, py66]))
+    ray_dist = reproj_err1 * 0.01  # Scale to approximate meters
+
+    return x, y, z, ray_dist
 
 
 def triangulate_with_ray_dist(w66, w68, cam66_pos, cam68_pos):
@@ -369,7 +422,7 @@ def build_flight_mask(points_3d, det66, det68, fps=25.0):
         if rd > RAY_DIST_MAX:
             continue
         # Court bounds: ball should be in reasonable area
-        if x < -COURT_EXTEND or x > COURT_W + COURT_EXTEND:
+        if x < SINGLES_X_MIN - COURT_EXTEND or x > SINGLES_X_MAX + COURT_EXTEND:
             continue
         if y < -COURT_EXTEND or y > COURT_L + COURT_EXTEND:
             continue
@@ -509,6 +562,78 @@ def smooth_trajectory_sg(points_3d, window_length=11, polyorder=3, overlap=8):
     return smoothed
 
 
+def _smooth_2d_for_render(det_dict, median_k=5, max_gap=3, interp_gap=4):
+    """Smooth 2D pixel detections for visual rendering.
+
+    Pipeline:
+    1. Median filter (kernel=median_k) to remove outlier pixel spikes
+    2. Linear interpolation for short gaps (1-interp_gap missing frames)
+
+    Args:
+        det_dict: {frame: (px, py, conf)} -- detection dict with confidence
+        median_k: median filter kernel size
+        max_gap: max frame gap within a segment for median filtering
+        interp_gap: max gap size (in frames) for linear interpolation
+
+    Returns:
+        smoothed dict in same format {frame: (px, py, conf)}
+    """
+    if not det_dict:
+        return det_dict
+
+    frames = sorted(det_dict.keys())
+    if len(frames) < 3:
+        return det_dict
+
+    # Step 1: median filter within segments
+    half = median_k // 2
+    segments = []
+    seg_start = 0
+    for i in range(1, len(frames)):
+        if frames[i] - frames[i - 1] > max_gap:
+            segments.append(frames[seg_start:i])
+            seg_start = i
+    segments.append(frames[seg_start:])
+
+    smoothed = {}
+    for seg in segments:
+        xs = [det_dict[fi][0] for fi in seg]
+        ys = [det_dict[fi][1] for fi in seg]
+        confs = [det_dict[fi][2] if len(det_dict[fi]) > 2 else 1.0 for fi in seg]
+        for i, fi in enumerate(seg):
+            lo = max(0, i - half)
+            hi = min(len(seg), i + half + 1)
+            mx = float(np.median(xs[lo:hi]))
+            my = float(np.median(ys[lo:hi]))
+            smoothed[fi] = (mx, my, confs[i])
+
+    # Step 2: interpolate short gaps
+    frames_s = sorted(smoothed.keys())
+    interpolated = dict(smoothed)
+    for i in range(len(frames_s) - 1):
+        gap = frames_s[i + 1] - frames_s[i]
+        if 2 <= gap <= interp_gap:
+            x0, y0, c0 = smoothed[frames_s[i]]
+            x1, y1, c1 = smoothed[frames_s[i + 1]]
+            avg_conf = (c0 + c1) / 2
+            for g in range(1, gap):
+                t = g / gap
+                fi_interp = frames_s[i] + g
+                interpolated[fi_interp] = (
+                    float(x0 + t * (x1 - x0)),
+                    float(y0 + t * (y1 - y0)),
+                    avg_conf,
+                )
+
+    n_orig = len(det_dict)
+    n_interp = len(interpolated) - n_orig
+    logger.info(
+        "2D smooth: %d frames -> %d (median%d + %d interpolated)",
+        n_orig, len(interpolated), median_k, n_interp,
+    )
+    return interpolated
+
+
 def detect_bounces(points_3d, fps=25.0):
     """Hybrid bounce detection: V-shape + parabolic trajectory segmentation.
 
@@ -578,7 +703,7 @@ def detect_bounces(points_3d, fps=25.0):
                 continue
 
             x_i, y_i = x_arr[i], y_arr[i]
-            if x_i < -1.0 or x_i > COURT_W + 1.0:
+            if x_i < SINGLES_X_MIN - 1.0 or x_i > SINGLES_X_MAX + 1.0:
                 continue
             if y_i < -1.0 or y_i > COURT_L + 1.0:
                 continue
@@ -818,40 +943,168 @@ def draw_court(panel_w, panel_h, margin):
     draw_w = panel_w - 2 * margin
     draw_h = panel_h - 2 * margin
 
+    # Map world coordinates (singles: x=1.37..6.86, y=0..23.77) to court pixels
     def w2c(wx, wy):
-        cx = int(margin + (wx / COURT_W) * draw_w)
+        cx = int(margin + ((wx - SINGLES_X_MIN) / COURT_W) * draw_w)
         cy = int(margin + (1.0 - wy / COURT_L) * draw_h)  # flip Y: baseline at bottom
         return cx, cy
 
-    # Court fill
-    tl = w2c(0, COURT_L)
-    br = w2c(COURT_W, 0)
+    # Court fill (singles boundaries)
+    tl = w2c(SINGLES_X_MIN, COURT_L)
+    br = w2c(SINGLES_X_MAX, 0)
     cv2.rectangle(court, tl, br, (45, 100, 45), -1)
 
-    # Court outline
+    # Court outline (singles)
     cv2.rectangle(court, tl, br, (255, 255, 255), 2)
 
     # Net line
-    cv2.line(court, w2c(0, NET_Y), w2c(COURT_W, NET_Y), (200, 200, 200), 2)
+    cv2.line(court, w2c(SINGLES_X_MIN, NET_Y), w2c(SINGLES_X_MAX, NET_Y), (200, 200, 200), 2)
 
     # Service lines
-    cv2.line(court, w2c(0, SERVICE_NEAR), w2c(COURT_W, SERVICE_NEAR), (180, 180, 180), 1)
-    cv2.line(court, w2c(0, SERVICE_FAR), w2c(COURT_W, SERVICE_FAR), (180, 180, 180), 1)
-
-    # Singles sidelines
-    cv2.line(court, w2c(SINGLES_X_MIN, 0), w2c(SINGLES_X_MIN, COURT_L), (180, 180, 180), 1)
-    cv2.line(court, w2c(SINGLES_X_MAX, 0), w2c(SINGLES_X_MAX, COURT_L), (180, 180, 180), 1)
+    cv2.line(court, w2c(SINGLES_X_MIN, SERVICE_NEAR), w2c(SINGLES_X_MAX, SERVICE_NEAR), (180, 180, 180), 1)
+    cv2.line(court, w2c(SINGLES_X_MIN, SERVICE_FAR), w2c(SINGLES_X_MAX, SERVICE_FAR), (180, 180, 180), 1)
 
     # Center service line
-    cv2.line(court, w2c(COURT_W / 2, SERVICE_NEAR), w2c(COURT_W / 2, SERVICE_FAR), (180, 180, 180), 1)
+    center_x = (SINGLES_X_MIN + SINGLES_X_MAX) / 2
+    cv2.line(court, w2c(center_x, SERVICE_NEAR), w2c(center_x, SERVICE_FAR), (180, 180, 180), 1)
 
     # Center marks
-    ct = w2c(COURT_W / 2, 0)
+    ct = w2c(center_x, 0)
     cv2.line(court, ct, (ct[0], ct[1] - 8), (180, 180, 180), 1)
-    ct2 = w2c(COURT_W / 2, COURT_L)
+    ct2 = w2c(center_x, COURT_L)
     cv2.line(court, ct2, (ct2[0], ct2[1] + 8), (180, 180, 180), 1)
 
     return court, w2c
+
+
+def draw_3d_view(panel_w, panel_h, smoothed_3d, bounces_so_far, current_frame,
+                  trail_len=60):
+    """Render a 3D perspective view of the court with ball trajectory.
+
+    Uses a simple perspective projection from a fixed camera angle.
+    """
+    img = np.zeros((panel_h, panel_w, 3), dtype=np.uint8)
+    img[:] = (25, 25, 35)  # dark background
+
+    # 3D perspective camera parameters (viewing from above-behind near end)
+    cam_pos = np.array([4.115, -8.0, 16.0])  # x=center, behind near baseline, high up
+    look_at = np.array([4.115, 11.885, 0.0])  # look at net center
+    up = np.array([0.0, 0.0, 1.0])
+
+    # Build view matrix
+    fwd = look_at - cam_pos
+    fwd = fwd / np.linalg.norm(fwd)
+    right = np.cross(fwd, up)
+    right = right / np.linalg.norm(right)
+    cam_up = np.cross(right, fwd)
+
+    focal = panel_w * 0.9
+    cx, cy = panel_w / 2, panel_h / 2 - 30  # shift up slightly
+
+    def project_3d(wx, wy, wz):
+        """Project world (x,y,z) to panel pixel."""
+        p = np.array([wx, wy, wz]) - cam_pos
+        x_cam = np.dot(p, right)
+        y_cam = np.dot(p, cam_up)
+        z_cam = np.dot(p, fwd)
+        if z_cam < 0.1:
+            return None
+        px = int(cx + focal * x_cam / z_cam)
+        py = int(cy - focal * y_cam / z_cam)
+        return (px, py)
+
+    # Draw court wireframe
+    court_pts = [
+        # Singles court corners (z=0)
+        (SINGLES_X_MIN, 0, 0), (SINGLES_X_MAX, 0, 0),
+        (SINGLES_X_MAX, COURT_L, 0), (SINGLES_X_MIN, COURT_L, 0),
+    ]
+    court_lines = [
+        # Court outline
+        ((SINGLES_X_MIN, 0, 0), (SINGLES_X_MAX, 0, 0)),
+        ((SINGLES_X_MAX, 0, 0), (SINGLES_X_MAX, COURT_L, 0)),
+        ((SINGLES_X_MAX, COURT_L, 0), (SINGLES_X_MIN, COURT_L, 0)),
+        ((SINGLES_X_MIN, COURT_L, 0), (SINGLES_X_MIN, 0, 0)),
+        # Net
+        ((SINGLES_X_MIN, NET_Y, 0), (SINGLES_X_MAX, NET_Y, 0)),
+        ((SINGLES_X_MIN, NET_Y, NET_H), (SINGLES_X_MAX, NET_Y, NET_H)),
+        ((SINGLES_X_MIN, NET_Y, 0), (SINGLES_X_MIN, NET_Y, NET_H)),
+        ((SINGLES_X_MAX, NET_Y, 0), (SINGLES_X_MAX, NET_Y, NET_H)),
+        (((SINGLES_X_MIN + SINGLES_X_MAX) / 2, NET_Y, 0),
+         ((SINGLES_X_MIN + SINGLES_X_MAX) / 2, NET_Y, NET_H)),
+        # Service lines
+        ((SINGLES_X_MIN, SERVICE_NEAR, 0), (SINGLES_X_MAX, SERVICE_NEAR, 0)),
+        ((SINGLES_X_MIN, SERVICE_FAR, 0), (SINGLES_X_MAX, SERVICE_FAR, 0)),
+        # Center service line
+        (((SINGLES_X_MIN + SINGLES_X_MAX) / 2, SERVICE_NEAR, 0),
+         ((SINGLES_X_MIN + SINGLES_X_MAX) / 2, SERVICE_FAR, 0)),
+    ]
+
+    # Draw court surface (filled quad)
+    corners_2d = [project_3d(*p) for p in court_pts]
+    if all(c is not None for c in corners_2d):
+        pts = np.array(corners_2d, dtype=np.int32)
+        cv2.fillPoly(img, [pts], (35, 70, 35))
+
+    # Draw lines
+    for (x1, y1, z1), (x2, y2, z2) in court_lines:
+        p1 = project_3d(x1, y1, z1)
+        p2 = project_3d(x2, y2, z2)
+        if p1 and p2:
+            is_net = (z1 > 0 or z2 > 0)
+            color = (200, 200, 200) if is_net else (150, 150, 150)
+            thickness = 2 if is_net else 1
+            cv2.line(img, p1, p2, color, thickness, cv2.LINE_AA)
+
+    # Draw ball trajectory trail
+    trail_frames = sorted([f for f in smoothed_3d if current_frame - trail_len <= f <= current_frame])
+
+    if len(trail_frames) >= 2:
+        for i in range(1, len(trail_frames)):
+            f0, f1 = trail_frames[i - 1], trail_frames[i]
+            x0, y0, z0 = smoothed_3d[f0][:3]
+            x1, y1, z1 = smoothed_3d[f1][:3]
+            p0 = project_3d(x0, y0, z0)
+            p1 = project_3d(x1, y1, z1)
+            if p0 and p1:
+                alpha = (i / len(trail_frames))
+                # Color by height: blue(ground) → yellow(high)
+                r = int(50 + 200 * min(1, z1 / 3.0))
+                g = int(200 * alpha)
+                b = int(255 * (1 - min(1, z1 / 3.0)) * alpha)
+                cv2.line(img, p0, p1, (b, g, r), max(1, int(2 * alpha)), cv2.LINE_AA)
+
+    # Draw current ball position
+    if current_frame in smoothed_3d:
+        x, y, z = smoothed_3d[current_frame][:3]
+        bp = project_3d(x, y, z)
+        if bp:
+            # Shadow on ground
+            sp = project_3d(x, y, 0)
+            if sp:
+                cv2.circle(img, sp, 4, (40, 40, 40), -1, cv2.LINE_AA)
+                # Vertical line from shadow to ball
+                cv2.line(img, sp, bp, (80, 80, 80), 1, cv2.LINE_AA)
+            # Ball glow
+            overlay = img.copy()
+            cv2.circle(overlay, bp, 10, (0, 200, 255), -1, cv2.LINE_AA)
+            cv2.addWeighted(overlay, 0.3, img, 0.7, 0, img)
+            cv2.circle(img, bp, 5, (0, 255, 255), -1, cv2.LINE_AA)
+
+    # Draw bounce markers
+    for bi, b in enumerate(bounces_so_far):
+        bx = b.get("x_homo", b["x"])
+        by = b.get("y_homo", b["y"])
+        bp = project_3d(bx, by, 0)
+        if bp:
+            color = (0, 200, 0) if b["in_court"] else (0, 0, 200)
+            cv2.circle(img, bp, 4, color, -1, cv2.LINE_AA)
+
+    # Label
+    cv2.putText(img, "3D View", (8, 20),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (150, 150, 150), 1, cv2.LINE_AA)
+
+    return img
 
 
 def draw_ball_marker(img, px, py, scale, color=(0, 200, 255)):
@@ -887,7 +1140,7 @@ def draw_trail(img, trail, scale, color=(0, 200, 255)):
 
 def render_video(
     video66_path, video68_path, det66, det68, bounces, n_frames, output_path,
-    net_crossings=None, canvas_w=1920,
+    net_crossings=None, smoothed_3d=None, canvas_w=1920,
 ):
     """Render the final tracking video."""
     cap66 = cv2.VideoCapture(video66_path)
@@ -1002,7 +1255,10 @@ def render_video(
 
         # Draw all bounce markers
         for bi, b in enumerate(bounces_so_far):
-            bpt = w2c(b["x"], b["y"])
+            # Use homography-refined coords when available (more accurate for ground contact)
+            bx = b.get("x_homo", b["x"])
+            by = b.get("y_homo", b["y"])
+            bpt = w2c(bx, by)
 
             # Color: green=IN, red=OUT; recent ones brighter
             age = len(bounces_so_far) - 1 - bi
@@ -1072,7 +1328,7 @@ def render_video(
                     cv2.FONT_HERSHEY_SIMPLEX, 1.2, color, 3, cv2.LINE_AA,
                 )
                 # Direction arrow on minimap at net line
-                net_pt = w2c(COURT_W / 2, NET_Y)
+                net_pt = w2c((SINGLES_X_MIN + SINGLES_X_MAX) / 2, NET_Y)
                 arrow_len = 15
                 if nc["direction"] == "near_to_far":
                     arrow_end = (net_pt[0], net_pt[1] - arrow_len)
@@ -1130,8 +1386,8 @@ def main():
     parser.add_argument("--max-frames", type=int, default=1800)
     parser.add_argument("--top-k", type=int, default=2, help="Top-K blobs per camera")
     parser.add_argument(
-        "--mode", choices=["top1", "multi"], default="multi",
-        help="top1: legacy single-blob; multi: top-K + MultiBlobMatcher",
+        "--mode", choices=["top1", "multi", "viterbi"], default="viterbi",
+        help="top1: legacy single-blob; multi: top-K + MultiBlobMatcher; viterbi: global optimal path",
     )
     args = parser.parse_args()
 
@@ -1158,15 +1414,86 @@ def main():
     n_frames = min(n66, n68)
     logger.info("Common frames: %d, det66=%d, det68=%d", n_frames, len(det66), len(det68))
 
-    if args.mode == "multi":
+    if args.mode == "viterbi":
+        # ── Phase 2: Viterbi Global Optimal Path ─────────────────
+        logger.info("=== Phase 2: Viterbi Global Optimal Trajectory ===")
+        from app.pipeline.homography import HomographyTransformer
+        from app.pipeline.viterbi_tracker import ViterbiTracker
+
+        homo_path = cfg["homography"]["path"]
+        homo66 = HomographyTransformer(homo_path, "cam66")
+        homo68 = HomographyTransformer(homo_path, "cam68")
+
+        cam66_pos = cfg["cameras"]["cam66"]["position_3d"]
+        cam68_pos = cfg["cameras"]["cam68"]["position_3d"]
+
+        # Load stereo calibration for reprojection consistency check + re-triangulation
+        stereo_cal = load_stereo_calibration("src/camera_calibration.json")
+
+        tracker = ViterbiTracker(
+            cam1_pos=cam66_pos,
+            cam2_pos=cam68_pos,
+            max_ray_distance=2.5,
+            valid_z_range=(0.0, 8.0),
+            fps=25.0,
+            gap_threshold=5,
+            stereo_cal=stereo_cal,
+        )
+
+        points_3d_homo, chosen_pixels, viterbi_stats = tracker.track(
+            multi66, multi68, homo66, homo68,
+        )
+
+        # Re-triangulate Viterbi-selected pixels using solvePnP (better Z accuracy)
+        points_3d = {}
+        stereo_ok = 0
+        for fi, cp in chosen_pixels.items():
+            px66, py66 = cp["cam66"]
+            px68, py68 = cp["cam68"]
+            result = triangulate_stereo(px66, py66, px68, py68, stereo_cal)
+            if result is not None:
+                x, y, z, rd = result
+                if -2 < z < 10:
+                    points_3d[fi] = (x, y, z, rd)
+                    stereo_ok += 1
+                else:
+                    # Fallback to homography result
+                    points_3d[fi] = points_3d_homo[fi]
+            elif fi in points_3d_homo:
+                points_3d[fi] = points_3d_homo[fi]
+
+        logger.info(
+            "solvePnP re-triangulation: %d/%d frames upgraded (%d fallback to homography)",
+            stereo_ok, len(chosen_pixels), len(points_3d) - stereo_ok,
+        )
+
+        # For rendering: use Viterbi-chosen blob pixels (not raw top-1).
+        # This ensures the rendered ball position matches what Viterbi selected,
+        # eliminating flickering when Viterbi picks blob#2 instead of blob#1.
+        matched_frames = set(points_3d.keys())
+        filt66 = {}
+        filt68 = {}
+        for fi in matched_frames:
+            if fi in chosen_pixels:
+                cp = chosen_pixels[fi]
+                filt66[fi] = (cp["cam66"][0], cp["cam66"][1], 1.0)
+                filt68[fi] = (cp["cam68"][0], cp["cam68"][1], 1.0)
+            else:
+                if fi in det66:
+                    filt66[fi] = det66[fi]
+                if fi in det68:
+                    filt68[fi] = det68[fi]
+
+        logger.info(
+            "After Viterbi + solvePnP: %d 3D points (render det66=%d, det68=%d)",
+            len(points_3d), len(filt66), len(filt68),
+        )
+
+    elif args.mode == "multi":
         # ── Phase 2: Multi-Blob Matching with Temporal Continuity ──
         logger.info("=== Phase 2: Multi-Blob Matching (top-%d + temporal) ===", args.top_k)
         points_3d, chosen_pixels, matcher_stats = triangulate_multi_blob(multi66, multi68, cfg)
 
-        # For RENDERING: use raw top-1 detections (better pixel accuracy)
-        # The matcher gives best 3D, but cam66 pixel from a non-top1 blob
-        # can be wrong. Raw top-1 has 92.9% <10px vs matcher's lower accuracy.
-        # Only show cam66/cam68 markers on frames where matcher found a valid 3D.
         matched_frames = set(points_3d.keys())
         filt66 = {fi: det66[fi] for fi in matched_frames if fi in det66}
         filt68 = {fi: det68[fi] for fi in matched_frames if fi in det68}
@@ -1185,6 +1512,70 @@ def main():
         fps = 25.0
         _, filt66, filt68 = build_flight_mask(points_3d, det66, det68, fps)
 
+    # ── Phase 2.5: Rally Segmentation ──────────────────────────────
+    rally_model_path = Path("model_weight/rally_segmentation.pkl")
+    if rally_model_path.exists():
+        logger.info("=== Phase 2.5: Rally Segmentation (ML model) ===")
+        import pickle
+        from tools.train_rally_model import extract_features, smooth_predictions
+
+        with open(rally_model_path, "rb") as f:
+            rally_bundle = pickle.load(f)
+
+        rally_threshold = rally_bundle.get("threshold", 0.42)
+        rally_scaler = rally_bundle.get("scaler", None)
+
+        # Build features from detection data
+        X_rally = extract_features(det66, multi66, multi68, n_frames)
+        if rally_scaler is not None:
+            X_rally = rally_scaler.transform(X_rally)
+
+        # Ensemble prediction
+        models_to_avg = []
+        for key in ["rf", "rf_model"]:
+            if key in rally_bundle:
+                models_to_avg.append(rally_bundle[key].predict_proba(X_rally)[:, 1])
+                break
+        for key in ["gbt", "gb_model"]:
+            if key in rally_bundle:
+                models_to_avg.append(rally_bundle[key].predict_proba(X_rally)[:, 1])
+                break
+        if "lstm_state" in rally_bundle:
+            from tools.train_rally_model import BiLSTMClassifier
+            lstm_model = BiLSTMClassifier(X_rally.shape[1])
+            lstm_model.load_state_dict(rally_bundle["lstm_state"])
+            lstm_model.eval()
+            import torch as _torch
+            with _torch.no_grad():
+                seq = _torch.from_numpy(X_rally.astype(np.float32)).unsqueeze(0)
+                lstm_probs = _torch.sigmoid(lstm_model(seq)).squeeze().numpy()
+            models_to_avg.append(lstm_probs)
+
+        if models_to_avg:
+            rally_probs = np.mean(models_to_avg, axis=0)
+            rally_preds = (rally_probs >= rally_threshold).astype(int)
+            rally_preds = smooth_predictions(rally_preds, min_rally=5, min_gap=10)
+
+            rally_frames = set(int(fi) for fi in range(n_frames) if rally_preds[fi] == 1)
+            non_rally_removed_3d = len(points_3d) - len([fi for fi in points_3d if fi in rally_frames])
+            non_rally_removed_66 = len(filt66) - len([fi for fi in filt66 if fi in rally_frames])
+
+            # Filter: only keep detections in rally frames
+            points_3d = {fi: v for fi, v in points_3d.items() if fi in rally_frames}
+            filt66 = {fi: v for fi, v in filt66.items() if fi in rally_frames}
+            filt68 = {fi: v for fi, v in filt68.items() if fi in rally_frames}
+
+            logger.info(
+                "Rally segmentation: %d/%d frames are rally (%.1f%%). "
+                "Removed %d 3D points and %d cam66 detections from non-rally.",
+                len(rally_frames), n_frames, 100 * len(rally_frames) / n_frames,
+                non_rally_removed_3d, non_rally_removed_66,
+            )
+        else:
+            logger.warning("Rally model loaded but no valid sub-models found, skipping.")
+    else:
+        logger.info("No rally segmentation model found, skipping.")
+
     # ── Phase 3: Savitzky-Golay Smoothing + Bounce Detection ───────
     logger.info("=== Phase 3: SG Smoothing + Bounce Detection ===")
     flight_3d = {fi: points_3d[fi][:3] for fi in points_3d}
@@ -1201,6 +1592,172 @@ def main():
     # Net crossing speed detection
     net_crossings = detect_net_crossings(smoothed_3d, fps=25.0)
 
+    # ── Net-crossing anchor filter ────────────────────────────────
+    # Only keep bounces that occur near a net crossing event.
+    # This eliminates false positives during dead-ball / preparation periods
+    # where no rally is in progress (no ball crossing the net).
+    NC_ANCHOR_WINDOW = 75  # frames (~3 seconds at 25fps)
+    nc_frames = [nc["frame"] for nc in net_crossings]
+    if nc_frames:
+        pre_filter = len(bounces)
+        bounces = [
+            b for b in bounces
+            if any(abs(b["frame"] - ncf) <= NC_ANCHOR_WINDOW for ncf in nc_frames)
+        ]
+        removed = pre_filter - len(bounces)
+        if removed:
+            logger.info("Net-crossing anchor filter removed %d bounce(s) "
+                        "(no net crossing within ±%d frames)", removed, NC_ANCHOR_WINDOW)
+
+    # ── Bounce IN/OUT refinement using nearest-camera homography ────
+    # Homography assumes z=0 (ball on ground). Only reliable when z is small.
+    # For each bounce, find the frame with lowest z within ±3 frames
+    # (the actual ground contact), then use nearest camera's homography.
+    from app.pipeline.homography import HomographyTransformer
+    homo_path = "src/homography_matrices.json"
+    homo66 = HomographyTransformer(homo_path, "cam66")
+    homo68 = HomographyTransformer(homo_path, "cam68")
+
+    MAX_Z_FOR_HOMO = 0.35  # only trust homography when z < 35cm
+    SEARCH_RADIUS = 3      # search ±3 frames for lowest z
+
+    for b in bounces:
+        fi = b["frame"]
+
+        # Find frame with lowest z near the bounce (actual ground contact)
+        best_fi = fi
+        best_z = b["z"]
+        for offset in range(-SEARCH_RADIUS, SEARCH_RADIUS + 1):
+            check_fi = fi + offset
+            if check_fi in smoothed_3d:
+                cz = smoothed_3d[check_fi][2]
+                if cz < best_z:
+                    best_z = cz
+                    best_fi = check_fi
+
+        # Skip homography refinement if ball is too high (not on ground)
+        if best_z > MAX_Z_FOR_HOMO:
+            b["homo_skip"] = True
+            b["cam_used"] = "3d"
+            continue
+
+        # Determine which camera: ball on which side of net?
+        last_nc = None
+        for nc in net_crossings:
+            if nc["frame"] <= fi:
+                last_nc = nc
+            else:
+                break
+
+        if last_nc and last_nc.get("direction") == "near_to_far":
+            use_cam68 = True
+        elif last_nc and last_nc.get("direction") == "far_to_near":
+            use_cam68 = False
+        else:
+            use_cam68 = b["y"] > NET_Y
+
+        # Get pixel position from chosen camera at the lowest-z frame
+        homo_fi = best_fi
+        if use_cam68 and homo_fi in filt68:
+            px, py = filt68[homo_fi][:2]
+            wx, wy = homo68.pixel_to_world(px, py)
+            cam_used = "cam68"
+        elif not use_cam68 and homo_fi in filt66:
+            px, py = filt66[homo_fi][:2]
+            wx, wy = homo66.pixel_to_world(px, py)
+            cam_used = "cam66"
+        elif homo_fi in filt66:
+            px, py = filt66[homo_fi][:2]
+            wx, wy = homo66.pixel_to_world(px, py)
+            cam_used = "cam66"
+        elif homo_fi in filt68:
+            px, py = filt68[homo_fi][:2]
+            wx, wy = homo68.pixel_to_world(px, py)
+            cam_used = "cam68"
+        else:
+            b["cam_used"] = "3d"
+            continue
+
+        old_in = b["in_court"]
+        b["x_homo"] = float(wx)
+        b["y_homo"] = float(wy)
+        b["in_court"] = (SINGLES_X_MIN <= wx <= SINGLES_X_MAX and
+                         0 <= wy <= COURT_L)
+        b["cam_used"] = cam_used
+        b["homo_z"] = float(best_z)
+
+        if old_in != b["in_court"]:
+            tag = "IN" if b["in_court"] else "OUT"
+            logger.info("  Bounce frame=%d: IN/OUT changed by homography "
+                        "(%s, z=%.2f, x=%.2f y=%.2f -> %s)",
+                        fi, cam_used, best_z, wx, wy, tag)
+
+    # ── Shot/Bounce disambiguation for z > 0.35m ─────────────────
+    # A "bounce" with z > 0.35m is suspicious — likely a low shot.
+    # Key difference: after a real bounce the ball stays on the same side,
+    # after a shot the ball crosses the net.
+    # Check: does the ball cross the net within 15 frames AFTER this "bounce"?
+    # If yes → it's a shot (hit), not a bounce → remove it.
+    SHOT_Z_THRESHOLD = 0.35
+    SHOT_CHECK_WINDOW = 15  # frames after bounce to check for net crossing
+
+    pre_shot_filter = len(bounces)
+    nc_frame_set = set(nc["frame"] for nc in net_crossings)
+
+    def _has_net_crossing_nearby(frame, window):
+        """Check if ball crosses net within -3 to +window frames of `frame`.
+
+        A shot happens AT the net crossing, so the crossing could be
+        a few frames before or after the detected V-shape minimum.
+        """
+        for ncf in nc_frame_set:
+            if -3 <= ncf - frame <= window:
+                return True
+        return False
+
+    # Real bounces happen at ground level, but 3D Z accuracy depends on
+    # which half of the court the ball is on:
+    #   Near end (y < NET_Y): Z more accurate → stricter threshold
+    #   Far end  (y > NET_Y): Z noisier (up to +0.3-0.6m) → relaxed threshold
+    # Also trust homography-refined z if available (actual ground contact frame).
+    def _z_threshold_for_bounce(b):
+        y = b["y"]
+        if y > NET_Y:
+            return 0.65  # far end: allow higher z due to reconstruction noise
+        else:
+            return 0.35  # near end: z should be accurate
+
+    bounces = [b for b in bounces
+               if b["z"] <= _z_threshold_for_bounce(b)
+               or b.get("homo_z", b["z"]) <= _z_threshold_for_bounce(b)]
+
+    shot_removed = pre_shot_filter - len(bounces)
+    if shot_removed:
+        logger.info("Shot/bounce filter: removed %d suspicious bounce(s) "
+                     "(z > %.2fm + net crossing after)", shot_removed, SHOT_Z_THRESHOLD)
+
+    logger.info("Bounce IN/OUT refined using nearest-camera homography")
+    for i, b in enumerate(bounces):
+        tag = "IN" if b["in_court"] else "OUT"
+        cam = b.get("cam_used", "3d")
+        if cam == "3d" or b.get("homo_skip"):
+            logger.info("  Bounce %d: frame=%d (3d: x=%.2f, y=%.2f, z=%.2f) %s [z too high for homo]",
+                         i + 1, b["frame"], b["x"], b["y"], b["z"], tag)
+        else:
+            logger.info("  Bounce %d: frame=%d (%s: x=%.2f, y=%.2f, z=%.2f) %s",
+                         i + 1, b["frame"], cam,
+                         b.get("x_homo", b["x"]), b.get("y_homo", b["y"]),
+                         b.get("homo_z", b["z"]), tag)
+
+    # ── Phase 3.5: 2D Pixel Smoothing for Visual Trajectory ─────────
+    # Apply median3 + gap interpolation to make rendered trajectory smooth.
+    # This is the "conf20_median5" approach adapted for rendering: we use
+    # median filter to remove outlier pixel spikes, then interpolate short
+    # gaps for visual continuity of the trail.
+    logger.info("=== Phase 3.5: 2D Pixel Smoothing (median + interpolation) ===")
+    filt66 = _smooth_2d_for_render(filt66)
+    filt68 = _smooth_2d_for_render(filt68)
+
     # ── Phase 4: Render Video ───────────────────────────────────────
     logger.info("=== Phase 4: Render Video ===")
     render_video(
@@ -1208,6 +1765,7 @@ def main():
         filt66, filt68, bounces,
         n_frames, args.output,
         net_crossings=net_crossings,
+        smoothed_3d=smoothed_3d,
     )
 
 

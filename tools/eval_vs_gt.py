@@ -139,10 +139,28 @@ def run_pipeline(max_frames: int, mode: str = "multi", top_k: int = 2):
         detector, postproc, max_frames, top_k=top_k,
     )
 
-    if mode == "multi":
+    if mode == "viterbi":
+        from app.pipeline.homography import HomographyTransformer
+        from app.pipeline.viterbi_tracker import ViterbiTracker
+
+        homo_path = cfg["homography"]["path"]
+        homo66 = HomographyTransformer(homo_path, "cam66")
+        homo68 = HomographyTransformer(homo_path, "cam68")
+        cam66_pos = cfg["cameras"]["cam66"]["position_3d"]
+        cam68_pos = cfg["cameras"]["cam68"]["position_3d"]
+
+        tracker = ViterbiTracker(
+            cam1_pos=cam66_pos, cam2_pos=cam68_pos,
+            max_ray_distance=2.5, valid_z_range=(0.0, 8.0),
+            fps=25.0, gap_threshold=5,
+        )
+        points_3d, chosen_pixels, stats = tracker.track(
+            multi66, multi68, homo66, homo68,
+        )
+        matched_frames = set(points_3d.keys())
+        render_det66 = {fi: det66[fi] for fi in matched_frames if fi in det66}
+    elif mode == "multi":
         points_3d, chosen_pixels, stats = triangulate_multi_blob(multi66, multi68, cfg)
-        # Use raw top-1 for rendering (better pixel accuracy),
-        # but only on frames where matcher found valid 3D
         matched_frames = set(points_3d.keys())
         render_det66 = {fi: det66[fi] for fi in matched_frames if fi in det66}
     else:
@@ -349,11 +367,17 @@ def main():
         len(gt["serves"]), len(gt["shots"]),
     )
 
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--mode", choices=["multi", "viterbi"], default="multi")
+    parser.add_argument("--top-k", type=int, default=2)
+    args = parser.parse_args()
+
     logger.info("\n" + "=" * 60)
-    logger.info("Running pipeline (multi-blob mode)...")
+    logger.info("Running pipeline (%s mode)...", args.mode)
     logger.info("=" * 60)
     det66, render_det66, points_3d, smoothed_3d, bounces = run_pipeline(
-        MAX_FRAMES, mode="multi", top_k=2,
+        MAX_FRAMES, mode=args.mode, top_k=args.top_k,
     )
 
     logger.info("\n" + "=" * 60)
