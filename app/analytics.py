@@ -25,14 +25,16 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 # Court dimensions (meters)
-COURT_X = 8.23
+DOUBLES_WIDTH = 8.23
 COURT_Y = 23.77
 NET_Y = 11.885
 NET_HEIGHT = 0.914
 
-# Court boundaries with margin for in/out calls
-COURT_X_MIN = 0.0
-COURT_X_MAX = COURT_X
+# Singles court boundaries (labeled keypoints are on singles lines)
+SINGLES_X_MIN = 1.37
+SINGLES_X_MAX = 6.86
+COURT_X_MIN = SINGLES_X_MIN
+COURT_X_MAX = SINGLES_X_MAX
 COURT_Y_MIN = 0.0
 COURT_Y_MAX = COURT_Y
 

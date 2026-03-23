@@ -44,14 +44,14 @@ CANVAS_H = 600  # two half-height views stacked or side-by-side
 TRAIL_LENGTH = 30  # number of past frames to draw as trajectory trail
 TRAIL_JUMP_THRESHOLD = 150.0  # pixels — break trail if detection jumps too far
 
-# Court dimensions (meters)
-COURT_W = 8.23
+# Court dimensions (meters) — singles court
+SINGLES_X_MIN = 1.37
+SINGLES_X_MAX = 6.86
+COURT_W = SINGLES_X_MAX - SINGLES_X_MIN  # 5.49m singles width
 COURT_L = 23.77
 NET_Y = COURT_L / 2  # 11.885m
 SERVICE_LINE_NEAR = 5.485
 SERVICE_LINE_FAR = 18.285
-SINGLES_W = 8.23
-DOUBLES_ALLEY = 1.37  # each side
 
 # Mini court diagram dimensions (pixels)
 COURT_PANEL_W = 200

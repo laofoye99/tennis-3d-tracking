@@ -11,59 +11,67 @@ import cv2
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
-# Standard ITF singles court dimensions (meters)
+# Standard ITF court dimensions (meters)
 # ---------------------------------------------------------------------------
 COURT_LENGTH = 23.77       # baseline to baseline
-COURT_WIDTH = 8.23         # singles sideline to sideline
+DOUBLES_WIDTH = 8.23       # doubles sideline to sideline
 NET_Y = COURT_LENGTH / 2   # 11.885 m
 SERVICE_DIST = 6.40        # service line distance from net
 SERVICE_NEAR_Y = NET_Y - SERVICE_DIST   # 5.485 m
 SERVICE_FAR_Y = NET_Y + SERVICE_DIST    # 18.285 m
-CENTER_X = COURT_WIDTH / 2              # 4.115 m
+
+# Singles court dimensions — the labeled keypoints are on SINGLES lines
+SINGLES_LEFT = 1.37        # singles left sideline
+SINGLES_RIGHT = 6.86       # singles right sideline (8.23 - 1.37)
+CENTER_X = (SINGLES_LEFT + SINGLES_RIGHT) / 2   # 4.115 m
 
 # ---------------------------------------------------------------------------
 # World coordinates for the 12 labeled keypoints
-# Coordinate system: origin at near-left corner (from camera's own view),
+# Coordinate system: x=0 is doubles left sideline, y=0 is near baseline.
 # x → right, y → away from camera.
 #
-# Camera 66 sits at y=0  (near baseline), looks toward y=23.77 (far baseline)
-# Camera 68 sits at y=23.77 (opposite end), looks toward y=0
+# IMPORTANT: The labeled points (left_top, right_bottom, etc.) correspond to
+# SINGLES sidelines, NOT doubles sidelines. left = x=1.37, right = x=6.86.
+#
+# Camera 66 sits at y≈-5 (near baseline), looks toward y=23.77 (far baseline)
+# Camera 68 sits at y≈29 (opposite end), looks toward y=0
 # Since labels are *relative* to each camera's viewpoint, the same label maps
 # to different physical locations for each camera.
 # ---------------------------------------------------------------------------
 
-# Camera 66: bottom = y=0 (near), top = y=23.77 (far), left = x=0, right = x=8.23
+# Camera 66: bottom = y=0 (near), top = y=23.77 (far)
+# left = singles left sideline (x=1.37), right = singles right sideline (x=6.86)
 WORLD_COORDS_CAM66 = {
-    "left_top":           (0.0,      COURT_LENGTH),
-    "left_top_serve":     (0.0,      SERVICE_FAR_Y),
-    "left_bottom_serve":  (0.0,      SERVICE_NEAR_Y),
-    "left_bottom":        (0.0,      0.0),
-    "center_top":         (CENTER_X, COURT_LENGTH),
-    "center_top_serve":   (CENTER_X, SERVICE_FAR_Y),
-    "center_bottom_serve":(CENTER_X, SERVICE_NEAR_Y),
-    "center_bottom":      (CENTER_X, 0.0),
-    "right_top":          (COURT_WIDTH, COURT_LENGTH),
-    "right_top_serve":    (COURT_WIDTH, SERVICE_FAR_Y),
-    "right_bottom_serve": (COURT_WIDTH, SERVICE_NEAR_Y),
-    "right_bottom":       (COURT_WIDTH, 0.0),
+    "left_top":           (SINGLES_LEFT,   COURT_LENGTH),
+    "left_top_serve":     (SINGLES_LEFT,   SERVICE_FAR_Y),
+    "left_bottom_serve":  (SINGLES_LEFT,   SERVICE_NEAR_Y),
+    "left_bottom":        (SINGLES_LEFT,   0.0),
+    "center_top":         (CENTER_X,       COURT_LENGTH),
+    "center_top_serve":   (CENTER_X,       SERVICE_FAR_Y),
+    "center_bottom_serve":(CENTER_X,       SERVICE_NEAR_Y),
+    "center_bottom":      (CENTER_X,       0.0),
+    "right_top":          (SINGLES_RIGHT,  COURT_LENGTH),
+    "right_top_serve":    (SINGLES_RIGHT,  SERVICE_FAR_Y),
+    "right_bottom_serve": (SINGLES_RIGHT,  SERVICE_NEAR_Y),
+    "right_bottom":       (SINGLES_RIGHT,  0.0),
 }
 
 # Camera 68: faces the opposite direction
-# Its "left" = cam66's "right" (x=8.23), its "right" = cam66's "left" (x=0)
+# Its "left" = cam66's "right" (x=6.86), its "right" = cam66's "left" (x=1.37)
 # Its "bottom" (near) = cam66's "top" (y=23.77), its "top" (far) = cam66's "bottom" (y=0)
 WORLD_COORDS_CAM68 = {
-    "left_top":           (COURT_WIDTH, 0.0),
-    "left_top_serve":     (COURT_WIDTH, SERVICE_NEAR_Y),
-    "left_bottom_serve":  (COURT_WIDTH, SERVICE_FAR_Y),
-    "left_bottom":        (COURT_WIDTH, COURT_LENGTH),
-    "center_top":         (CENTER_X, 0.0),
-    "center_top_serve":   (CENTER_X, SERVICE_NEAR_Y),
-    "center_bottom_serve":(CENTER_X, SERVICE_FAR_Y),
-    "center_bottom":      (CENTER_X, COURT_LENGTH),
-    "right_top":          (0.0, 0.0),
-    "right_top_serve":    (0.0, SERVICE_NEAR_Y),
-    "right_bottom_serve": (0.0, SERVICE_FAR_Y),
-    "right_bottom":       (0.0, COURT_LENGTH),
+    "left_top":           (SINGLES_RIGHT,  0.0),
+    "left_top_serve":     (SINGLES_RIGHT,  SERVICE_NEAR_Y),
+    "left_bottom_serve":  (SINGLES_RIGHT,  SERVICE_FAR_Y),
+    "left_bottom":        (SINGLES_RIGHT,  COURT_LENGTH),
+    "center_top":         (CENTER_X,       0.0),
+    "center_top_serve":   (CENTER_X,       SERVICE_NEAR_Y),
+    "center_bottom_serve":(CENTER_X,       SERVICE_FAR_Y),
+    "center_bottom":      (CENTER_X,       COURT_LENGTH),
+    "right_top":          (SINGLES_LEFT,   0.0),
+    "right_top_serve":    (SINGLES_LEFT,   SERVICE_NEAR_Y),
+    "right_bottom_serve": (SINGLES_LEFT,   SERVICE_FAR_Y),
+    "right_bottom":       (SINGLES_LEFT,   COURT_LENGTH),
 }
 
 
@@ -160,7 +168,7 @@ def main():
     output = {
         "court_dimensions": {
             "length_m": COURT_LENGTH,
-            "width_m": COURT_WIDTH,
+            "width_m": DOUBLES_WIDTH,
             "net_y_m": NET_Y,
             "service_near_y_m": SERVICE_NEAR_Y,
             "service_far_y_m": SERVICE_FAR_Y,

@@ -25,8 +25,9 @@ logger = logging.getLogger(__name__)
 
 GRAVITY = np.array([0.0, 0.0, -9.81])
 
-# Court dimensions (meters)
-_COURT_X = 8.23
+# Court dimensions (meters) — singles sidelines
+_COURT_X_MIN = 1.37
+_COURT_X_MAX = 6.86
 _COURT_Y = 23.77
 _NET_Y = 11.885
 
@@ -81,7 +82,7 @@ def clean_detections(
         return [], stats
 
     # Step 2: Court bounds filter (world-space)
-    x_min, x_max = -court_margin, _COURT_X + court_margin
+    x_min, x_max = _COURT_X_MIN - court_margin, _COURT_X_MAX + court_margin
     y_min, y_max = -court_margin, _COURT_Y + court_margin
     bounded = []
     for d in filtered:

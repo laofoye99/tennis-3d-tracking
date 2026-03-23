@@ -32,9 +32,9 @@ OSD_MASK = (0, 0, 620, 40)
 OUTPUT_DIR = Path("debug_heatmaps")
 THRESHOLDS = [0.5, 0.3, 0.2, 0.1]
 
-# Court X range (meters)
-COURT_X_MIN = -1.0   # small margin
-COURT_X_MAX = 9.23   # 8.23 + small margin
+# Court X range (meters) — singles sidelines with margin
+COURT_X_MIN = 0.37   # 1.37 - 1.0 margin
+COURT_X_MAX = 7.86   # 6.86 + 1.0 margin
 
 
 def load_homography(cam_name):

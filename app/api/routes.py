@@ -100,6 +100,41 @@ async def reset_analytics():
     return {"status": "ok"}
 
 
+# ---- Net Crossing Speed ----
+
+@router.get("/api/net-crossing")
+async def net_crossing():
+    """Get the latest net crossing event with ball speed."""
+    orch = _get_orch()
+    crossing = orch.get_latest_net_crossing()
+    if crossing is None:
+        return {"detected": False}
+    return {"detected": True, **crossing}
+
+
+@router.get("/api/net-crossings")
+async def net_crossings():
+    """Get recent net crossing events."""
+    orch = _get_orch()
+    return {"crossings": orch.get_net_crossings()}
+
+
+# ---- 3D Display (WebSocket Push) ----
+
+@router.post("/api/3d-display/enable")
+async def enable_3d_display(url: str = None):
+    """Enable real-time bounce push to 3D display via WebSocket."""
+    orch = _get_orch()
+    return orch.enable_3d_display(url)
+
+
+@router.post("/api/3d-display/disable")
+async def disable_3d_display():
+    """Disable 3D display push."""
+    orch = _get_orch()
+    return orch.disable_3d_display()
+
+
 # ---- Camera Calibration ----
 
 @router.post("/api/calibration/run")
