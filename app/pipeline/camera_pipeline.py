@@ -50,9 +50,18 @@ def run_pipeline(
         stream = CameraStream(rtsp_url, name)
         stream.start()
 
-        detector = create_detector(model_path, input_size, frames_in, frames_out, device)
-        tracker = BallTracker(original_size=(1920, 1080), threshold=threshold)
-        homography = HomographyTransformer(homography_path, homography_key)
+        # Model loading is optional – if it fails, video stream and recording
+        # continue to work; only inference is disabled.
+        detector = None
+        tracker = None
+        homography = None
+        try:
+            detector = create_detector(model_path, input_size, frames_in, frames_out, device)
+            tracker = BallTracker(original_size=(1920, 1080), threshold=threshold)
+            homography = HomographyTransformer(homography_path, homography_key)
+        except Exception as e:
+            log.warning("Inference components failed to load, inference disabled: %s", e)
+            status_dict["inference_enabled"] = False
 
         status_dict["state"] = "running"
         log.info("Pipeline running")
@@ -109,8 +118,8 @@ def run_pipeline(
             if len(frame_buffer) < frames_in:
                 continue
 
-            # 推理开关关闭时直接跳过 GPU 调用，释放 GPU 占用
-            if not status_dict.get("inference_enabled", True):
+            # 推理开关关闭或模型未加载时直接跳过 GPU 调用
+            if detector is None or not status_dict.get("inference_enabled", True):
                 frame_buffer.clear()
                 frame_id_buffer.clear()
                 continue
