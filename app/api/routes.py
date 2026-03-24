@@ -135,6 +135,29 @@ async def disable_3d_display():
     return orch.disable_3d_display()
 
 
+# ---- ML Rally Segmentation ----
+
+@router.post("/api/ml-rally/enable")
+async def enable_ml_rally():
+    """Enable ML-based rally segmentation filter."""
+    orch = _get_orch()
+    return orch.enable_ml_rally()
+
+
+@router.post("/api/ml-rally/disable")
+async def disable_ml_rally():
+    """Disable ML rally filter."""
+    orch = _get_orch()
+    return orch.disable_ml_rally()
+
+
+@router.get("/api/ml-rally/status")
+async def ml_rally_status():
+    """Get ML rally filter status."""
+    orch = _get_orch()
+    return orch.get_ml_rally_status()
+
+
 # ---- Camera Calibration ----
 
 @router.post("/api/calibration/run")

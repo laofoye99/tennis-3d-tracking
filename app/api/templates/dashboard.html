@@ -439,6 +439,7 @@ body{font-family:'Lato',sans-serif;background:var(--bg);color:var(--text);height
             <div class="func-item"><span>1. track ball</span><div class="toggle on" id="tog-track" onclick="toggleTrackBall(this)"></div></div>
             <div class="func-item"><span>2. event</span><div class="toggle" id="tog-event" onclick="this.classList.toggle('on')"></div></div>
             <div class="func-item"><span>3. pose</span><div class="toggle" id="tog-pose" onclick="this.classList.toggle('on')"></div></div>
+            <div class="func-item"><span>4. ML Rally</span><div class="toggle" id="tog-ml-rally" onclick="toggleMLRally(this)"></div></div>
           </div>
         </div>
 
@@ -1074,27 +1075,44 @@ function drawCourt(canvas,ballX,ballY,bounces){
     ctx.fillText(tb.label,bx+6,by+3);
   });
 
-  // Draw bounce markers
+  // Draw bounce markers — show last 4 only
+  // Solid circle = IN (match play), Hollow circle = OUT / fault / let
   if(bounces&&bounces.length){
-    bounces.forEach((b,i)=>{
+    const last4 = bounces.slice(-4);
+    last4.forEach((b,i)=>{
       const bx=tx(b.x),by=ty(b.y);
-      const color=b.in_court?'#4caf50':'#f44336';
-      // Outer ring
-      ctx.beginPath();ctx.arc(bx,by,7,0,Math.PI*2);
-      ctx.strokeStyle=color;ctx.lineWidth=2;ctx.stroke();
-      // Inner fill
-      ctx.beginPath();ctx.arc(bx,by,3,0,Math.PI*2);
-      ctx.fillStyle=color;ctx.fill();
-      // Label
-      ctx.font='bold 8px Lato';ctx.fillStyle=color;
-      ctx.fillText(b.in_court?'IN':'OUT',bx+10,by+3);
-      // Fade older bounces: reduce opacity for all but the latest 3
-      if(i<bounces.length-3){
-        ctx.globalAlpha=0.4;
-        ctx.beginPath();ctx.arc(bx,by,7,0,Math.PI*2);
-        ctx.fillStyle='rgba(0,0,0,.4)';ctx.fill();
-        ctx.globalAlpha=1.0;
+      const isIn = b.in_court;
+      const color = isIn ? '#4caf50' : '#f44336';
+      const r = 7;
+      const globalIdx = bounces.length - 4 + i;
+      const num = globalIdx >= 0 ? globalIdx + 1 : i + 1;
+
+      // Fade older: newest=full, older=dimmer
+      const age = last4.length - 1 - i;
+      ctx.globalAlpha = age === 0 ? 1.0 : age === 1 ? 0.8 : age === 2 ? 0.6 : 0.4;
+
+      if(isIn){
+        // Solid filled circle = IN
+        ctx.beginPath();ctx.arc(bx,by,r,0,Math.PI*2);
+        ctx.fillStyle=color;ctx.fill();
+        ctx.strokeStyle='#fff';ctx.lineWidth=1.5;ctx.stroke();
+      }else{
+        // Hollow circle = OUT / fault / restart
+        ctx.beginPath();ctx.arc(bx,by,r,0,Math.PI*2);
+        ctx.strokeStyle=color;ctx.lineWidth=2.5;ctx.stroke();
       }
+
+      // Number label
+      ctx.font='bold 9px Lato';ctx.fillStyle='#fff';
+      ctx.textAlign='center';ctx.textBaseline='middle';
+      ctx.fillText(num,bx,by+1);
+      ctx.textAlign='start';ctx.textBaseline='alphabetic';
+
+      // IN/OUT label
+      ctx.fillStyle=color;ctx.font='bold 8px Lato';
+      ctx.fillText(isIn?'IN':'OUT',bx+r+4,by+3);
+
+      ctx.globalAlpha=1.0;
     });
   }
 
@@ -1179,6 +1197,20 @@ async function toggleTrackBall(el){
   }catch(e){
     el.classList.toggle('on');
     console.error('toggleTrackBall failed',e);
+  }
+}
+
+async function toggleMLRally(el){
+  const enabling = !el.classList.contains('on');
+  try{
+    const endpoint = enabling ? '/api/ml-rally/enable' : '/api/ml-rally/disable';
+    const r = await fetch(endpoint, {method:'POST'});
+    const data = await r.json();
+    if(data.enabled) el.classList.add('on');
+    else el.classList.remove('on');
+    if(data.error) console.warn('ML Rally:', data.error);
+  }catch(e){
+    console.error('toggleMLRally failed',e);
   }
 }
 

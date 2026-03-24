@@ -178,8 +178,14 @@ def load_stereo_calibration(calib_path="src/camera_calibration.json"):
     for cam in ["cam66", "cam68"]:
         c = data[cam]
         K = np.array(c["K"], dtype=np.float64)
-        dist = np.array(c["dist"], dtype=np.float64)
-        P = np.array(c["P"], dtype=np.float64)
+        dist = np.array(c.get("dist_coeffs", c.get("dist", [0, 0, 0, 0, 0])), dtype=np.float64)
+        # Compute projection matrix P = K @ [R | t]
+        if "P" in c:
+            P = np.array(c["P"], dtype=np.float64)
+        else:
+            R = np.array(c["R"], dtype=np.float64)
+            tvec = np.array(c["tvec"], dtype=np.float64).reshape(3, 1)
+            P = K @ np.hstack([R, tvec])
         result[cam] = {"K": K, "dist": dist, "P": P}
     return result
 
@@ -1253,44 +1259,63 @@ def render_video(
         if fi in bounce_by_frame:
             bounces_so_far.append(bounce_by_frame[fi])
 
-        # Draw all bounce markers
-        for bi, b in enumerate(bounces_so_far):
-            # Use homography-refined coords when available (more accurate for ground contact)
+        # Draw only the last 4 bounces
+        recent_bounces = bounces_so_far[-4:] if len(bounces_so_far) > 4 else bounces_so_far
+        for bi_rel, b in enumerate(recent_bounces):
+            bi_abs = len(bounces_so_far) - len(recent_bounces) + bi_rel
             bx = b.get("x_homo", b["x"])
             by = b.get("y_homo", b["y"])
             bpt = w2c(bx, by)
 
-            # Color: green=IN, red=OUT; recent ones brighter
-            age = len(bounces_so_far) - 1 - bi
-            brightness = max(0.4, 1.0 - age * 0.05)
+            age = len(recent_bounces) - 1 - bi_rel
+            brightness = max(0.5, 1.0 - age * 0.12)
 
+            # IN = filled green circle, OUT = hollow red circle
             if b["in_court"]:
-                outer_c = (0, int(200 * brightness), 0)
-                inner_c = (0, int(255 * brightness), int(100 * brightness))
+                color = (0, int(255 * brightness), int(80 * brightness))
+                cv2.circle(court_panel, bpt, 7, color, -1, cv2.LINE_AA)  # filled
             else:
-                outer_c = (0, 0, int(200 * brightness))
-                inner_c = (0, int(80 * brightness), int(255 * brightness))
+                color = (0, int(80 * brightness), int(255 * brightness))
+                cv2.circle(court_panel, bpt, 7, color, 2, cv2.LINE_AA)   # hollow
 
-            # Outer ring
-            cv2.circle(court_panel, bpt, 8, outer_c, 2, cv2.LINE_AA)
-            # Inner filled
-            cv2.circle(court_panel, bpt, 4, inner_c, -1, cv2.LINE_AA)
-
-            # Bounce number label
-            label = str(bi + 1)
+            # Bounce number
+            label = str(bi_abs + 1)
             cv2.putText(
                 court_panel, label, (bpt[0] + 10, bpt[1] + 4),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1, cv2.LINE_AA,
             )
 
-            # IN/OUT label for recent bounces
-            if age < 5:
-                tag = "IN" if b["in_court"] else "OUT"
-                tag_c = (0, 255, 0) if b["in_court"] else (0, 0, 255)
-                cv2.putText(
-                    court_panel, tag, (bpt[0] + 10, bpt[1] + 18),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.35, tag_c, 1, cv2.LINE_AA,
-                )
+            # IN/OUT label
+            tag = "IN" if b["in_court"] else "OUT"
+            tag_c = (0, 255, 0) if b["in_court"] else (0, 0, 255)
+            cv2.putText(
+                court_panel, tag, (bpt[0] + 10, bpt[1] + 18),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.35, tag_c, 1, cv2.LINE_AA,
+            )
+
+        # Draw landing circle on camera views for recent bounces
+        BOUNCE_CIRCLE_FADE = 40  # frames to show landing circle
+        for b in recent_bounces:
+            b_age = fi - b["frame"]
+            if 0 <= b_age < BOUNCE_CIRCLE_FADE:
+                alpha = 1.0 - b_age / BOUNCE_CIRCLE_FADE
+                thickness = 2 if b["in_court"] else 1  # thicker for IN
+                # cam66
+                if b["frame"] in det66:
+                    bpx, bpy, _ = det66[b["frame"]]
+                    sx, sy = int(bpx * scale), int(bpy * scale)
+                    radius = int(18 * alpha) + 8
+                    cv2.circle(small66, (sx, sy), radius,
+                               (int(255 * alpha), int(255 * alpha), int(255 * alpha)),
+                               thickness, cv2.LINE_AA)
+                # cam68
+                if b["frame"] in det68:
+                    bpx, bpy, _ = det68[b["frame"]]
+                    sx, sy = int(bpx * scale), int(bpy * scale)
+                    radius = int(18 * alpha) + 8
+                    cv2.circle(small68, (sx, sy), radius,
+                               (int(255 * alpha), int(255 * alpha), int(255 * alpha)),
+                               thickness, cv2.LINE_AA)
 
         # ── Net crossing speed overlay on cam66 ────────────────────
         if fi in nc_by_frame:
@@ -1596,7 +1621,7 @@ def main():
     # Only keep bounces that occur near a net crossing event.
     # This eliminates false positives during dead-ball / preparation periods
     # where no rally is in progress (no ball crossing the net).
-    NC_ANCHOR_WINDOW = 75  # frames (~3 seconds at 25fps)
+    NC_ANCHOR_WINDOW = 150  # frames (~6 seconds at 25fps, enough for serve→bounce)
     nc_frames = [nc["frame"] for nc in net_crossings]
     if nc_frames:
         pre_filter = len(bounces)
@@ -1657,21 +1682,23 @@ def main():
             use_cam68 = b["y"] > NET_Y
 
         # Get pixel position from chosen camera at the lowest-z frame
+        # Use ORIGINAL detections (det66/det68), not rally-filtered (filt66/filt68)
+        # because bounce frames at rally edges may have been filtered out
         homo_fi = best_fi
-        if use_cam68 and homo_fi in filt68:
-            px, py = filt68[homo_fi][:2]
+        if use_cam68 and homo_fi in det68:
+            px, py = det68[homo_fi][:2]
             wx, wy = homo68.pixel_to_world(px, py)
             cam_used = "cam68"
-        elif not use_cam68 and homo_fi in filt66:
-            px, py = filt66[homo_fi][:2]
+        elif not use_cam68 and homo_fi in det66:
+            px, py = det66[homo_fi][:2]
             wx, wy = homo66.pixel_to_world(px, py)
             cam_used = "cam66"
-        elif homo_fi in filt66:
-            px, py = filt66[homo_fi][:2]
+        elif homo_fi in det66:
+            px, py = det66[homo_fi][:2]
             wx, wy = homo66.pixel_to_world(px, py)
             cam_used = "cam66"
-        elif homo_fi in filt68:
-            px, py = filt68[homo_fi][:2]
+        elif homo_fi in det68:
+            px, py = det68[homo_fi][:2]
             wx, wy = homo68.pixel_to_world(px, py)
             cam_used = "cam68"
         else:

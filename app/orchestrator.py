@@ -107,6 +107,11 @@ class Orchestrator:
         self._ws_url = "wss://tennisserver.motionrivalry.com:8086/general"
         self._ws_enabled = False
 
+        # ML Rally segmentation filter
+        self._ml_rally_enabled = False
+        self._ml_rally_model = None
+        self._ml_rally_features_buffer: list[dict] = []  # rolling buffer for feature extraction
+
     def _get_camera_positions(self) -> dict[str, list[float]]:
         """Get camera 3D positions, optionally overriding with calibrated values.
 
@@ -563,6 +568,33 @@ class Orchestrator:
         """Disable WebSocket push."""
         self._ws_enabled = False
         return {"enabled": False}
+
+    def enable_ml_rally(self) -> dict:
+        """Enable ML-based rally segmentation filter."""
+        if self._ml_rally_model is None:
+            model_path = Path("model_weight/rally_segmentation.pkl")
+            if model_path.exists():
+                import pickle
+                with open(model_path, "rb") as f:
+                    self._ml_rally_model = pickle.load(f)
+                logger.info("ML Rally model loaded from %s", model_path)
+            else:
+                logger.warning("ML Rally model not found at %s", model_path)
+                return {"enabled": False, "error": "model not found"}
+        self._ml_rally_enabled = True
+        return {"enabled": True}
+
+    def disable_ml_rally(self) -> dict:
+        """Disable ML rally filter (pass all detections through)."""
+        self._ml_rally_enabled = False
+        return {"enabled": False}
+
+    def get_ml_rally_status(self) -> dict:
+        """Return ML rally filter status."""
+        return {
+            "enabled": self._ml_rally_enabled,
+            "model_loaded": self._ml_rally_model is not None,
+        }
 
     def _ws_push_loop(self) -> None:
         """Background thread: push bounce events to 3D display via WebSocket."""
