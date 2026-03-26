@@ -1044,7 +1044,7 @@ function _renderGrid(cams){
 }
 
 // ---- Mini Map ----
-function drawCourt(canvas,ballX,ballY,bounces){
+function drawCourt(canvas,bounces){
   const ctx=canvas.getContext('2d'),W=canvas.width,H=canvas.height;
   const margin=12,cw=W-2*margin,ch=H-2*margin;
   const sx=cw/COURT_W,sy=ch/COURT_L;
@@ -1067,18 +1067,6 @@ function drawCourt(canvas,ballX,ballY,bounces){
   ctx.beginPath();ctx.moveTo(tx(CX),ty(SRV_N));ctx.lineTo(tx(CX),ty(SRV_F));ctx.stroke();
   ctx.beginPath();ctx.moveTo(tx(CX),ty(0));ctx.lineTo(tx(CX),ty(0.4));ctx.stroke();
   ctx.beginPath();ctx.moveTo(tx(CX),ty(COURT_L));ctx.lineTo(tx(CX),ty(COURT_L-0.4));ctx.stroke();
-
-  TEST_BALLS.forEach(tb=>{
-    const bx=tx(tb.x),by=ty(tb.y),r=4;
-    ctx.beginPath();
-    ctx.moveTo(bx,by-r);ctx.lineTo(bx+r,by);
-    ctx.lineTo(bx,by+r);ctx.lineTo(bx-r,by);
-    ctx.closePath();
-    ctx.fillStyle=tb.color+'cc';ctx.fill();
-    ctx.strokeStyle='rgba(255,255,255,.5)';ctx.lineWidth=1;ctx.stroke();
-    ctx.fillStyle=tb.color;ctx.font='bold 7px Lato';
-    ctx.fillText(tb.label,bx+6,by+3);
-  });
 
   // Draw bounce markers — show LATEST 5 only, numbered 1=newest
   // Green = IN, Red = OUT, fading opacity for older points
@@ -1118,14 +1106,6 @@ function drawCourt(canvas,ballX,ballY,bounces){
     });
   }
 
-  if(ballX!=null&&ballY!=null){
-    const bx=tx(ballX),by=ty(ballY);
-    const grd=ctx.createRadialGradient(bx,by,0,bx,by,12);
-    grd.addColorStop(0,'rgba(250,78,78,.6)');grd.addColorStop(1,'rgba(250,78,78,0)');
-    ctx.fillStyle=grd;ctx.fillRect(bx-12,by-12,24,24);
-    ctx.beginPath();ctx.arc(bx,by,5,0,Math.PI*2);ctx.fillStyle='#fa4e4e';ctx.fill();
-    ctx.strokeStyle='#fff';ctx.lineWidth=1;ctx.stroke();
-  }
 }
 
 // ---- 3D Map ----
@@ -1562,13 +1542,8 @@ async function poll(){
     const rallyState=analytics.rally_state||{};
 
     const b=d.latest_ball_3d;
-    if(b){
-      drawCourt(document.getElementById('minimap'),b.x,b.y,recentBounces);
-      update3DCourt(b, recentBounces);
-    }else{
-      drawCourt(document.getElementById('minimap'),null,null,recentBounces);
-      update3DCourt(null, recentBounces);
-    }
+    drawCourt(document.getElementById('minimap'),recentBounces);
+    update3DCourt(b, recentBounces);
 
     // Update rally state display
     const stateEl=document.getElementById('rally-state');
@@ -1585,7 +1560,7 @@ async function poll(){
 }
 
 // Init
-drawCourt(document.getElementById('minimap'),null,null,[]);
+drawCourt(document.getElementById('minimap'),[]);
 init3DCourt();
 setInterval(poll,500);
 

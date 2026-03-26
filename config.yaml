@@ -1,20 +1,20 @@
 calibration:
   path: src/camera_calibration.json
-  use_calibrated_positions: true
+  use_calibrated_positions: false
 cameras:
   cam66:
     homography_key: cam66
     position_3d:
-    - 3.7657
-    - -15.7273
-    - 7.0
+    - 4.36
+    - 28.93
+    - 6.92
     rtsp_url: rtsp://admin:motion168@192.168.1.66:554/Streaming/Channels/101
   cam68:
     homography_key: cam68
     position_3d:
-    - 5.8058
-    - 45.0351
-    - 7.0
+    - 4.431
+    - -5.28
+    - 6.10
     rtsp_url: rtsp://admin:motion168@192.168.1.68:554/Streaming/Channels/101
 homography:
   path: src/homography_matrices.json
@@ -25,7 +25,7 @@ model:
   input_size:
   - 288
   - 512
-  path: model_weight/TrackNet_finetuned.pt
+  path: model_weight/TrackNet_finetuned.pt # 
   threshold: 0.3
   heatmap_mask:
   - [0, 0, 620, 40]
