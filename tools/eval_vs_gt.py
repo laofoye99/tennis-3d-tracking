@@ -114,6 +114,9 @@ def run_pipeline(max_frames: int, mode: str = "multi", top_k: int = 2):
         build_detector,
         build_flight_mask,
         detect_bounces,
+        detect_bounces_2d,
+        refine_bounces_with_2d,
+        merge_3d_and_2d_bounces,
         load_config,
         run_detection_multi,
         smooth_trajectory_sg,
@@ -171,7 +174,31 @@ def run_pipeline(max_frames: int, mode: str = "multi", top_k: int = 2):
     smoothed_3d = smooth_trajectory_sg(flight_3d, window_length=11, polyorder=3)
     bounces = detect_bounces(smoothed_3d)
 
-    return det66, render_det66, points_3d, smoothed_3d, bounces
+    # Also run 2D pixel bounce detection (with 3D confirmation for rally filtering)
+    bounces_2d = detect_bounces_2d(det66, det68, cfg, smoothed_3d=smoothed_3d)
+
+    # Also run 2D-refined 3D bounces
+    bounces_refined = refine_bounces_with_2d(bounces, det66, det68, cfg)
+
+    # Merged: 3D bounces + non-overlapping 2D bounces
+    bounces_merged = merge_3d_and_2d_bounces(bounces, bounces_2d)
+
+    # Apply same net-crossing anchor filter to 2D bounces
+    from tools.render_tracking_video import detect_net_crossings
+    net_crossings = detect_net_crossings(smoothed_3d, fps=25.0)
+    nc_frames = [nc["frame"] for nc in net_crossings]
+    NC_ANCHOR_WINDOW = 150
+    if nc_frames:
+        pre_2d = len(bounces_2d)
+        bounces_2d = [
+            b for b in bounces_2d
+            if any(abs(b["frame"] - ncf) <= NC_ANCHOR_WINDOW for ncf in nc_frames)
+        ]
+        removed_2d = pre_2d - len(bounces_2d)
+        if removed_2d:
+            logger.info("2D net-crossing anchor filter removed %d bounce(s)", removed_2d)
+
+    return det66, det68, render_det66, points_3d, smoothed_3d, bounces, bounces_2d, bounces_refined, bounces_merged, cfg
 
 
 def eval_detection_recall(gt, det66, render_det66):
@@ -376,7 +403,7 @@ def main():
     logger.info("\n" + "=" * 60)
     logger.info("Running pipeline (%s mode)...", args.mode)
     logger.info("=" * 60)
-    det66, render_det66, points_3d, smoothed_3d, bounces = run_pipeline(
+    det66, det68, render_det66, points_3d, smoothed_3d, bounces, bounces_2d, bounces_refined, bounces_merged, cfg = run_pipeline(
         MAX_FRAMES, mode=args.mode, top_k=args.top_k,
     )
 
@@ -388,7 +415,35 @@ def main():
     logger.info("")
     eval_pixel_accuracy(gt, det66, render_det66)
     logger.info("")
-    eval_bounces(gt, bounces, tolerance_frames=5)
+    logger.info("--- 3D V-shape Bounce Detection ---")
+    result_3d = eval_bounces(gt, bounces, tolerance_frames=5)
+    logger.info("")
+    logger.info("--- 2D Pixel Bounce Detection (standalone) ---")
+    result_2d = eval_bounces(gt, bounces_2d, tolerance_frames=5)
+    logger.info("")
+    logger.info("--- 2D-Refined 3D Bounces ---")
+    result_refined = eval_bounces(gt, bounces_refined, tolerance_frames=5)
+    logger.info("")
+    logger.info("--- 3D + 2D Merged ---")
+    result_merged = eval_bounces(gt, bounces_merged, tolerance_frames=5)
+    logger.info("")
+
+    # ── Summary comparison table ──────────────────────────────────
+    logger.info("=" * 70)
+    logger.info("BOUNCE DETECTION COMPARISON")
+    logger.info("=" * 70)
+    logger.info("%-20s | %3s | %3s | %3s | %9s | %6s | %5s",
+                "Method", "TP", "FP", "FN", "Precision", "Recall", "F1")
+    logger.info("-" * 70)
+    for name, r in [("3D V-shape", result_3d),
+                    ("2D pixel (alone)", result_2d),
+                    ("3D + 2D refined", result_refined),
+                    ("3D + 2D merged", result_merged)]:
+        logger.info("%-20s | %3d | %3d | %3d | %8.1f%% | %5.1f%% | %4.1f%%",
+                    name, r["tp"], r["fp"], r["fn"],
+                    100 * r["precision"], 100 * r["recall"], 100 * r["f1"])
+    logger.info("=" * 70)
+
     logger.info("")
     eval_rally_coverage(gt, points_3d)
 

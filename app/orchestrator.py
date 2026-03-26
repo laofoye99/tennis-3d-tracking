@@ -112,6 +112,11 @@ class Orchestrator:
         self._ml_rally_model = None
         self._ml_rally_features_buffer: list[dict] = []  # rolling buffer for feature extraction
 
+        # Feature toggles (bounce detection, net crossing, OCR align)
+        self._bounce_detection_enabled: bool = True
+        self._net_crossing_enabled: bool = True
+        self._ocr_align_enabled: bool = False
+
     def _get_camera_positions(self) -> dict[str, list[float]]:
         """Get camera 3D positions, optionally overriding with calibrated values.
 
@@ -702,6 +707,31 @@ class Orchestrator:
         return {
             "enabled": self._ml_rally_enabled,
             "model_loaded": self._ml_rally_model is not None,
+        }
+
+    # ------------------------------------------------------------------
+    # Feature toggles: bounce detection, net crossing, OCR align
+    # ------------------------------------------------------------------
+    def set_bounce_detection_enabled(self, enabled: bool) -> dict:
+        self._bounce_detection_enabled = enabled
+        return {"enabled": self._bounce_detection_enabled}
+
+    def set_net_crossing_enabled(self, enabled: bool) -> dict:
+        self._net_crossing_enabled = enabled
+        return {"enabled": self._net_crossing_enabled}
+
+    def set_ocr_align_enabled(self, enabled: bool) -> dict:
+        self._ocr_align_enabled = enabled
+        return {"enabled": self._ocr_align_enabled}
+
+    def get_feature_toggles(self) -> dict:
+        return {
+            "bounce_detection": self._bounce_detection_enabled,
+            "net_crossing": self._net_crossing_enabled,
+            "ocr_align": self._ocr_align_enabled,
+            "ws_3d_display": self._ws_enabled,
+            "ml_rally": self._ml_rally_enabled,
+            "inference": self._inference_enabled,
         }
 
     def _ws_push_loop(self) -> None:

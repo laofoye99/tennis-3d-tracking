@@ -158,6 +158,42 @@ async def ml_rally_status():
     return orch.get_ml_rally_status()
 
 
+# ---- Feature Toggles (bounce, net crossing, OCR) ----
+
+@router.post("/api/function/bounce/{state}")
+async def set_bounce_detection(state: str):
+    """Toggle bounce detection: state = 'on' | 'off'"""
+    orch = _get_orch()
+    if state not in ("on", "off"):
+        raise HTTPException(400, "state must be 'on' or 'off'")
+    return orch.set_bounce_detection_enabled(state == "on")
+
+
+@router.post("/api/function/net-crossing/{state}")
+async def set_net_crossing(state: str):
+    """Toggle net crossing speed detection: state = 'on' | 'off'"""
+    orch = _get_orch()
+    if state not in ("on", "off"):
+        raise HTTPException(400, "state must be 'on' or 'off'")
+    return orch.set_net_crossing_enabled(state == "on")
+
+
+@router.post("/api/function/ocr-align/{state}")
+async def set_ocr_align(state: str):
+    """Toggle OCR frame alignment: state = 'on' | 'off'"""
+    orch = _get_orch()
+    if state not in ("on", "off"):
+        raise HTTPException(400, "state must be 'on' or 'off'")
+    return orch.set_ocr_align_enabled(state == "on")
+
+
+@router.get("/api/function/toggles")
+async def get_feature_toggles():
+    """Get all feature toggle states."""
+    orch = _get_orch()
+    return orch.get_feature_toggles()
+
+
 # ---- Camera Calibration ----
 
 @router.post("/api/calibration/run")

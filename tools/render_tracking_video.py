@@ -834,6 +834,401 @@ def detect_bounces(points_3d, fps=25.0):
     return bounces
 
 
+def detect_bounces_2d(det66, det68, cfg, window=8, min_margin_px=20, min_py=200,
+                      smoothed_3d=None):
+    """Detect bounces from 2D pixel Y local maxima (single-camera).
+
+    Instead of detecting bounces on noisy 3D Z values (+-0.5m error), detect them
+    on precise 2D pixel Y coordinates (+-3px error). Ball descending = pixel Y
+    increasing (in image coords), ball bouncing up = pixel Y decreasing.
+    So bounce = local MAXIMUM of pixel Y.
+
+    Use the CLOSER camera for each bounce:
+    - cam66 for near-end bounces (ball in lower half of cam66 image, py > min_py)
+    - cam68 for far-end bounces (ball in lower half of cam68 image, py > min_py)
+
+    Args:
+        det66: {frame: (px, py, conf)} cam66 detections
+        det68: {frame: (px, py, conf)} cam68 detections
+        cfg: config dict (for homography path)
+        window: half-window size for V-shape margin check (frames)
+        min_margin_px: minimum pixel margin for V-shape (stronger side)
+        min_py: minimum pixel Y for bounce candidate (ball in lower portion = near ground)
+
+    Returns:
+        List of bounce dicts: {frame, x, y, in_court, cam_used, px, py, margin_left, margin_right}
+    """
+    from app.pipeline.homography import HomographyTransformer
+
+    homo_path = cfg["homography"]["path"]
+    homo66 = HomographyTransformer(homo_path, "cam66")
+    homo68 = HomographyTransformer(homo_path, "cam68")
+
+    all_bounces = []
+
+    for cam_name, det, homo in [("cam66", det66, homo66), ("cam68", det68, homo68)]:
+        frames = sorted(det.keys())
+        if len(frames) < 2 * window + 1:
+            continue
+
+        # Build arrays
+        frame_arr = np.array(frames)
+        py_arr = np.array([det[fi][1] for fi in frames])
+        px_arr = np.array([det[fi][0] for fi in frames])
+
+        # Step 1: Median filter (kernel=5) to remove jitter
+        median_k = 5
+        half_m = median_k // 2
+        py_smooth = np.copy(py_arr)
+        for i in range(len(py_arr)):
+            lo = max(0, i - half_m)
+            hi = min(len(py_arr), i + half_m + 1)
+            py_smooth[i] = np.median(py_arr[lo:hi])
+
+        # Split into continuous segments (max gap = 3 frames)
+        MAX_GAP = 3
+        segments = []
+        seg_start = 0
+        for i in range(1, len(frame_arr)):
+            if frame_arr[i] - frame_arr[i - 1] > MAX_GAP:
+                segments.append((seg_start, i))
+                seg_start = i
+        segments.append((seg_start, len(frame_arr)))
+
+        # Step 2: Find local maxima of py within each segment
+        MIN_SEG_LEN = 2 * window + 1
+        weak_margin_ratio = 0.5  # weaker side >= min_margin_px * this
+
+        for seg_s, seg_e in segments:
+            seg_len = seg_e - seg_s
+            if seg_len < MIN_SEG_LEN:
+                continue
+
+            for i in range(seg_s + window, seg_e - window):
+                py_i = py_smooth[i]
+
+                # Ball must be in the lower portion of frame (near ground)
+                if py_i < min_py:
+                    continue
+
+                # Compute left margin: py_i - min(py in left window)
+                left_window = py_smooth[i - window:i]
+                right_window = py_smooth[i + 1:i + window + 1]
+
+                margin_left = float(py_i - np.min(left_window))
+                margin_right = float(py_i - np.min(right_window))
+
+                # Must be a local maximum: both sides lower
+                if margin_left <= 0 or margin_right <= 0:
+                    continue
+
+                # Asymmetric check: stronger side >= min_margin_px,
+                # weaker side >= min_margin_px * weak_margin_ratio
+                strong_side = max(margin_left, margin_right)
+                weak_side = min(margin_left, margin_right)
+
+                if strong_side < min_margin_px:
+                    continue
+                if weak_side < min_margin_px * weak_margin_ratio:
+                    continue
+
+                # Also check that this is actually the peak in its local neighborhood
+                # (not just on the slope of a bigger peak)
+                local_neighborhood = py_smooth[max(seg_s, i - 3):min(seg_e, i + 4)]
+                if py_i < np.max(local_neighborhood) - 1.0:
+                    continue
+
+                # Descent/ascent check: verify monotonic trend
+                # Before peak: py should generally increase (ball descending)
+                # After peak: py should generally decrease (ball ascending)
+                # Check using the slope of a 4-frame sub-window on each side
+                descent_ok = False
+                ascent_ok = False
+                check_len = min(4, window)
+                if i - check_len >= seg_s:
+                    pre_slope = py_smooth[i] - py_smooth[i - check_len]
+                    descent_ok = pre_slope > 8.0  # at least 8px increase (ball descending)
+                if i + check_len < seg_e:
+                    post_slope = py_smooth[i] - py_smooth[i + check_len]
+                    ascent_ok = post_slope > 8.0  # at least 8px decrease after (ball ascending)
+                if not (descent_ok and ascent_ok):
+                    continue
+
+                # Use homography to get world coordinates
+                px_i = float(px_arr[i])
+                py_orig = float(py_arr[i])  # use original (not smoothed) for homography
+                wx, wy = homo.pixel_to_world(px_i, py_orig)
+
+                in_court = (SINGLES_X_MIN <= wx <= SINGLES_X_MAX and
+                            0 <= wy <= COURT_L)
+
+                # Determine if this is the "near" camera for this bounce
+                # cam66 is near-end (y < NET_Y), cam68 is far-end (y > NET_Y)
+                if cam_name == "cam66" and wy > NET_Y + 2.0:
+                    continue  # cam66 shouldn't detect far-end bounces
+                if cam_name == "cam68" and wy < NET_Y - 2.0:
+                    continue  # cam68 shouldn't detect near-end bounces
+
+                all_bounces.append({
+                    "frame": int(frame_arr[i]),
+                    "x": float(wx),
+                    "y": float(wy),
+                    "z": 0.0,  # 2D method assumes z=0 at bounce
+                    "in_court": in_court,
+                    "cam_used": cam_name,
+                    "px": px_i,
+                    "py": py_orig,
+                    "margin_left": margin_left,
+                    "margin_right": margin_right,
+                    "score": margin_left + margin_right,
+                })
+
+    # Sort by frame
+    all_bounces.sort(key=lambda b: b["frame"])
+
+    # Dense segment filter: need enough detections nearby (from either camera)
+    all_det_frames = set(det66.keys()) | set(det68.keys())
+
+    def _in_dense_region(fi):
+        nearby = sum(1 for f in range(fi - 20, fi + 21) if f in all_det_frames)
+        return nearby >= 15
+
+    all_bounces = [b for b in all_bounces if _in_dense_region(b["frame"])]
+
+    # Pixel speed filter: ball must be moving significantly (not dead-ball jitter)
+    # Use a wider window and check BOTH px and py displacement
+    MIN_PX_SPEED = 5.0  # pixels per frame (higher threshold to filter dead ball)
+    SPEED_DT = 5
+
+    def _pixel_speed_and_py_range(b):
+        """Return (speed_px_per_frame, py_range_in_window).
+        py_range measures how much the ball moves vertically in a +-10 frame window.
+        A real bounce has large py_range (ball descending then ascending).
+        """
+        cam_det = det66 if b["cam_used"] == "cam66" else det68
+        fi = b["frame"]
+        frames_sorted = sorted(cam_det.keys())
+        idx = None
+        for j, f in enumerate(frames_sorted):
+            if f == fi:
+                idx = j
+                break
+        if idx is None:
+            return 0.0, 0.0
+        i_back = max(0, idx - SPEED_DT)
+        i_fwd = min(len(frames_sorted) - 1, idx + SPEED_DT)
+        if i_fwd == i_back:
+            return 0.0, 0.0
+        dt_frames = frames_sorted[i_fwd] - frames_sorted[i_back]
+        if dt_frames == 0:
+            return 0.0, 0.0
+        px0, py0 = cam_det[frames_sorted[i_back]][:2]
+        px1, py1 = cam_det[frames_sorted[i_fwd]][:2]
+        speed = math.hypot(px1 - px0, py1 - py0) / dt_frames
+
+        # py range in wider window (±10 frames) to check trajectory shape
+        i_wide_back = max(0, idx - 10)
+        i_wide_fwd = min(len(frames_sorted) - 1, idx + 10)
+        py_vals = [cam_det[frames_sorted[j]][1] for j in range(i_wide_back, i_wide_fwd + 1)]
+        py_range = max(py_vals) - min(py_vals) if py_vals else 0.0
+
+        return speed, py_range
+
+    # Filter: need sufficient speed AND the py range must be significant
+    # (dead ball on ground has large py but small py_range because it's static)
+    MIN_PY_RANGE = 80.0  # pixels — ball must move at least 80px vertically in ±10 frames
+
+    filtered = []
+    for b in all_bounces:
+        speed, py_range = _pixel_speed_and_py_range(b)
+        if speed >= MIN_PX_SPEED and py_range >= MIN_PY_RANGE:
+            filtered.append(b)
+    all_bounces = filtered
+
+    # 3D-confirmed rally filter: if smoothed_3d is available, use it to confirm
+    # that the ball was in active flight before the bounce.
+    # Require: (a) the ball must have been elevated (z > 0.5) in the 12 frames before, AND
+    #          (b) the ball must be descending (z decreasing) before the bounce frame.
+    if smoothed_3d:
+        MIN_Z_BEFORE = 0.5
+        Z_CHECK_WINDOW = 12
+
+        def _was_flying_and_descending(fi):
+            """Check ball was in flight AND descending toward ground."""
+            z_vals = [(f, smoothed_3d[f][2]) for f in range(fi - Z_CHECK_WINDOW, fi)
+                      if f in smoothed_3d]
+            if len(z_vals) < 3:
+                return False
+            max_z = max(z for _, z in z_vals)
+            if max_z < MIN_Z_BEFORE:
+                return False
+            # Check descending: last 3 z values should be decreasing
+            last3 = [z for _, z in z_vals[-3:]]
+            if len(last3) >= 2 and last3[-1] < last3[0]:
+                return True
+            return False
+
+        pre_flight = len(all_bounces)
+        all_bounces = [b for b in all_bounces if _was_flying_and_descending(b["frame"])]
+        if pre_flight - len(all_bounces) > 0:
+            logger.info("3D flight+descending filter removed %d bounce(s)",
+                        pre_flight - len(all_bounces))
+
+    # NMS: pick best bounce within clusters (min gap = 20 frames)
+    # In a real rally, bounces are at least 25+ frames apart (ball crosses court)
+    MIN_GAP = 20
+    bounces = []
+    for c in all_bounces:
+        if bounces and c["frame"] - bounces[-1]["frame"] < MIN_GAP:
+            if c["score"] > bounces[-1]["score"]:
+                bounces[-1] = c
+            continue
+        bounces.append(c)
+
+    # Clean up internal fields
+    for b in bounces:
+        b.pop("score", None)
+
+    logger.info("Detected %d bounces (2D pixel V-shape)", len(bounces))
+    for i, b in enumerate(bounces):
+        tag = "IN" if b["in_court"] else "OUT"
+        logger.info(
+            "  2D Bounce %d: frame=%d (%s py=%.0f, margins=%.0f/%.0fpx, "
+            "world=(%.2f, %.2f)) %s",
+            i + 1, b["frame"], b["cam_used"], b["py"],
+            b["margin_left"], b["margin_right"],
+            b["x"], b["y"], tag,
+        )
+    return bounces
+
+
+def refine_bounces_with_2d(bounces_3d, det66, det68, cfg, search_radius=2):
+    """Refine 3D bounce frame timing using 2D pixel Y local maximum.
+
+    For each 3D bounce candidate, find the frame with the highest pixel Y
+    in the appropriate camera within +-search_radius frames. This gives
+    sub-frame accuracy on the exact bounce point.
+
+    Also uses homography from the closer camera for accurate world position.
+
+    Args:
+        bounces_3d: list of 3D bounce dicts from detect_bounces()
+        det66, det68: single-camera detections {frame: (px, py, conf)}
+        cfg: config dict
+        search_radius: search +-N frames for the pixel Y maximum
+
+    Returns:
+        List of refined bounce dicts
+    """
+    from app.pipeline.homography import HomographyTransformer
+
+    homo_path = cfg["homography"]["path"]
+    homo66 = HomographyTransformer(homo_path, "cam66")
+    homo68 = HomographyTransformer(homo_path, "cam68")
+
+    refined = []
+    for b in bounces_3d:
+        fi = b["frame"]
+        wy = b.get("y_homo", b["y"])
+
+        # Determine which camera is closer
+        if wy < NET_Y:
+            cam_det, homo, cam_name = det66, homo66, "cam66"
+        else:
+            cam_det, homo, cam_name = det68, homo68, "cam68"
+
+        # Find the frame with highest pixel Y (lowest point in image = ground contact)
+        # within +-search_radius. Only adjust if the new py is significantly higher
+        # AND within tight search radius (conservative refinement).
+        best_fi = fi
+        best_py = cam_det[fi][1] if fi in cam_det else -1
+        orig_py = best_py
+        for offset in range(-search_radius, search_radius + 1):
+            if offset == 0:
+                continue
+            check_fi = fi + offset
+            if check_fi in cam_det:
+                py = cam_det[check_fi][1]
+                # Only accept if meaningfully higher (>3px) than original
+                if py > best_py + 3.0:
+                    best_py = py
+                    best_fi = check_fi
+
+        # Get world position from the closer camera at the refined frame
+        if best_fi in cam_det:
+            px, py = cam_det[best_fi][:2]
+            wx, wy_new = homo.pixel_to_world(px, py)
+            in_court = (SINGLES_X_MIN <= wx <= SINGLES_X_MAX and
+                        0 <= wy_new <= COURT_L)
+        else:
+            # Fallback to original
+            wx, wy_new = b.get("x_homo", b["x"]), b.get("y_homo", b["y"])
+            px, py = 0, 0
+            in_court = b["in_court"]
+
+        refined.append({
+            "frame": best_fi,
+            "frame_3d": fi,  # original 3D bounce frame
+            "x": float(wx),
+            "y": float(wy_new),
+            "z": b["z"],
+            "in_court": in_court,
+            "cam_used": cam_name,
+            "px": float(px),
+            "py": float(py),
+            "method": "2d_refined",
+        })
+
+        if best_fi != fi:
+            logger.info("  Bounce frame=%d refined to %d by 2D pixel Y (Δ=%+d, %s py=%.0f)",
+                        fi, best_fi, best_fi - fi, cam_name, best_py)
+
+    logger.info("Refined %d bounces using 2D pixel Y (search_radius=±%d)",
+                len(refined), search_radius)
+    return refined
+
+
+def merge_3d_and_2d_bounces(bounces_3d, bounces_2d, merge_window=8,
+                            min_2d_margin=200):
+    """Merge 3D and 2D bounce detections, preferring 3D when they overlap.
+
+    Strategy:
+    - Start with all 3D bounces
+    - Add 2D bounces that don't overlap with any 3D bounce AND have strong
+      margin evidence (high-confidence additions only)
+    - For overlapping bounces, use the 3D frame (more reliable overall)
+
+    Args:
+        bounces_3d: list of 3D bounce dicts
+        bounces_2d: list of 2D bounce dicts
+        merge_window: frames within which bounces are considered duplicates
+        min_2d_margin: minimum margin sum (left+right) for a 2D bounce to be
+            added as supplementary detection
+
+    Returns:
+        Merged list of bounce dicts
+    """
+    merged = list(bounces_3d)
+    frames_3d = {b["frame"] for b in bounces_3d}
+
+    added_2d = 0
+    for b2d in bounces_2d:
+        f2d = b2d["frame"]
+        # Check if this 2D bounce overlaps with any 3D bounce
+        overlaps = any(abs(f2d - f3d) <= merge_window for f3d in frames_3d)
+        if not overlaps:
+            # Only add high-confidence 2D bounces
+            margin_sum = b2d.get("margin_left", 0) + b2d.get("margin_right", 0)
+            if margin_sum >= min_2d_margin:
+                merged.append(b2d)
+                added_2d += 1
+
+    merged.sort(key=lambda b: b["frame"])
+    logger.info("Merged bounces: %d from 3D + %d new from 2D = %d total",
+                len(bounces_3d), added_2d, len(merged))
+    return merged
+
+
 def detect_net_crossings(smoothed_3d, fps=25.0):
     """Detect frames where the ball crosses the net and compute speed.
 
@@ -1458,6 +1853,10 @@ def main():
                         help="JSON file with frame alignment pairs [(cam66_frame, cam68_frame), ...]")
     parser.add_argument("--ocr-align", action="store_true",
                         help="Use PaddleOCR to read OSD timestamps and align frames automatically")
+    parser.add_argument("--bounce-mode", choices=["3d", "2d", "merged", "refined", "both"],
+                        default="3d",
+                        help="Bounce detection: 3d=traditional, 2d=pixel Y standalone, "
+                             "merged=3D+2D union, refined=3D with 2D frame adjustment, both=compare")
     args = parser.parse_args()
 
     cfg = load_config()
@@ -2005,6 +2404,40 @@ def main():
                          i + 1, b["frame"], cam,
                          b.get("x_homo", b["x"]), b.get("y_homo", b["y"]),
                          b.get("homo_z", b["z"]), tag)
+
+    # ── Phase 3.2: 2D Pixel Bounce Detection ────────────────────────
+    bounce_mode = getattr(args, 'bounce_mode', '3d')
+    if bounce_mode in ("2d", "merged", "refined", "both"):
+        logger.info("=== Phase 3.2: 2D Pixel Bounce Detection ===")
+        bounces_2d = detect_bounces_2d(det66, det68, cfg, smoothed_3d=smoothed_3d)
+
+        # Apply net-crossing anchor filter to 2D bounces too
+        if nc_frames:
+            pre_2d = len(bounces_2d)
+            bounces_2d = [
+                b for b in bounces_2d
+                if any(abs(b["frame"] - ncf) <= NC_ANCHOR_WINDOW for ncf in nc_frames)
+            ]
+            removed_2d = pre_2d - len(bounces_2d)
+            if removed_2d:
+                logger.info("2D net-crossing anchor filter removed %d bounce(s)", removed_2d)
+
+        if bounce_mode == "2d":
+            bounces = bounces_2d
+            logger.info("Using 2D pixel bounces (%d bounces)", len(bounces))
+        elif bounce_mode == "merged":
+            bounces = merge_3d_and_2d_bounces(bounces, bounces_2d)
+            logger.info("Using merged 3D+2D bounces (%d bounces)", len(bounces))
+        elif bounce_mode == "refined":
+            bounces = refine_bounces_with_2d(bounces, det66, det68, cfg)
+            logger.info("Using 2D-refined bounces (%d bounces)", len(bounces))
+        else:
+            # "both" mode: log comparison
+            logger.info("=== Bounce Comparison: 3D vs 2D ===")
+            logger.info("3D bounces: %s", [b["frame"] for b in bounces])
+            logger.info("2D bounces: %s", [b["frame"] for b in bounces_2d])
+    else:
+        bounces_2d = []
 
     # ── Phase 3.5: 2D Pixel Smoothing for Visual Trajectory ─────────
     # Apply median3 + gap interpolation to make rendered trajectory smooth.

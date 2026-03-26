@@ -436,10 +436,13 @@ body{font-family:'Lato',sans-serif;background:var(--bg);color:var(--text);height
         <div>
           <div class="section-title">Function</div>
           <div class="func-list">
-            <div class="func-item"><span>1. track ball</span><div class="toggle on" id="tog-track" onclick="toggleTrackBall(this)"></div></div>
-            <div class="func-item"><span>2. event</span><div class="toggle" id="tog-event" onclick="this.classList.toggle('on')"></div></div>
-            <div class="func-item"><span>3. pose</span><div class="toggle" id="tog-pose" onclick="this.classList.toggle('on')"></div></div>
-            <div class="func-item"><span>4. ML Rally</span><div class="toggle" id="tog-ml-rally" onclick="toggleMLRally(this)"></div></div>
+            <div class="func-item"><span>Track</span><div class="toggle on" id="tog-track" onclick="toggleTrackBall(this)"></div></div>
+            <div class="func-item"><span>Record</span><div class="toggle" id="tog-record" onclick="toggleRecordToggle(this)"></div></div>
+            <div class="func-item"><span>ML Rally</span><div class="toggle" id="tog-ml-rally" onclick="toggleMLRally(this)"></div></div>
+            <div class="func-item"><span>Bounce Det.</span><div class="toggle on" id="tog-bounce" onclick="toggleBounce(this)"></div></div>
+            <div class="func-item"><span>Net Speed</span><div class="toggle on" id="tog-net-crossing" onclick="toggleNetCrossing(this)"></div></div>
+            <div class="func-item"><span>OCR Align</span><div class="toggle" id="tog-ocr" onclick="toggleOCRAlign(this)"></div></div>
+            <div class="func-item"><span>3D Push</span><div class="toggle" id="tog-3d-push" onclick="toggle3DPush(this)"></div></div>
           </div>
         </div>
 
@@ -519,12 +522,10 @@ body{font-family:'Lato',sans-serif;background:var(--bg);color:var(--text);height
         </div>
       </div>
 
-      <!-- Right bottom: 3D Map -->
+      <!-- Right bottom: 3D Court (Three.js) -->
       <div class="map3d-panel">
-        <div class="panel-title">3D Map</div>
-        <div class="map3d-canvas">
-          <canvas id="map3d" width="440" height="220"></canvas>
-        </div>
+        <div class="panel-title">3D Court</div>
+        <div id="threejs-container" style="width:100%;height:calc(100% - 30px)"></div>
       </div>
     </div>
     </div><!-- /page-dashboard -->
@@ -1079,34 +1080,31 @@ function drawCourt(canvas,ballX,ballY,bounces){
     ctx.fillText(tb.label,bx+6,by+3);
   });
 
-  // Draw bounce markers — show last 4 only
-  // Solid circle = IN (match play), Hollow circle = OUT / fault / let
+  // Draw bounce markers — show LATEST 5 only, numbered 1=newest
+  // Green = IN, Red = OUT, fading opacity for older points
   if(bounces&&bounces.length){
-    const last4 = bounces.slice(-4);
-    last4.forEach((b,i)=>{
+    const last5 = bounces.slice(-5);
+    last5.forEach((b,i)=>{
       const bx=tx(b.x),by=ty(b.y);
       const isIn = b.in_court;
       const color = isIn ? '#4caf50' : '#f44336';
-      const r = 7;
-      const globalIdx = bounces.length - 4 + i;
-      const num = globalIdx >= 0 ? globalIdx + 1 : i + 1;
+      const age = last5.length - 1 - i;  // 0=newest, 4=oldest
+      const num = age + 1;  // 1=newest, 5=oldest
+      const r = age === 0 ? 8 : 6;  // newest is larger
 
-      // Fade older: newest=full, older=dimmer
-      const age = last4.length - 1 - i;
-      ctx.globalAlpha = age === 0 ? 1.0 : age === 1 ? 0.8 : age === 2 ? 0.6 : 0.4;
+      // Fade older: newest=full, older=progressively dimmer
+      ctx.globalAlpha = age === 0 ? 1.0 : age === 1 ? 0.8 : age === 2 ? 0.6 : age === 3 ? 0.4 : 0.25;
 
       if(isIn){
-        // Solid filled circle = IN
         ctx.beginPath();ctx.arc(bx,by,r,0,Math.PI*2);
         ctx.fillStyle=color;ctx.fill();
         ctx.strokeStyle='#fff';ctx.lineWidth=1.5;ctx.stroke();
       }else{
-        // Hollow circle = OUT / fault / restart
         ctx.beginPath();ctx.arc(bx,by,r,0,Math.PI*2);
         ctx.strokeStyle=color;ctx.lineWidth=2.5;ctx.stroke();
       }
 
-      // Number label
+      // Number label (1=newest)
       ctx.font='bold 9px Lato';ctx.fillStyle='#fff';
       ctx.textAlign='center';ctx.textBaseline='middle';
       ctx.fillText(num,bx,by+1);
@@ -1188,6 +1186,197 @@ function draw3DMap(canvas,ball){
   }
 }
 
+// ---- Three.js 3D Court ----
+let _3dScene, _3dCamera, _3dRenderer, _3dControls;
+let _3dBallMesh, _3dTrailLine, _3dTrailPoints=[];
+let _3dBounceMeshes=[];
+const MAX_TRAIL=50, MAX_BOUNCES_3D=5;
+
+function init3DCourt(){
+  const container=document.getElementById('threejs-container');
+  if(!container||typeof THREE==='undefined') return;
+
+  _3dScene=new THREE.Scene();
+  _3dScene.background=new THREE.Color(0x1a1a2e);
+
+  // Camera: look from above and to the side
+  _3dCamera=new THREE.PerspectiveCamera(45, container.clientWidth/Math.max(container.clientHeight,1), 0.1, 200);
+  _3dCamera.position.set(4.1, -8, 18);
+  _3dCamera.lookAt(4.1, 11.9, 0);
+
+  _3dRenderer=new THREE.WebGLRenderer({antialias:true});
+  _3dRenderer.setSize(container.clientWidth, container.clientHeight);
+  _3dRenderer.setPixelRatio(window.devicePixelRatio);
+  container.appendChild(_3dRenderer.domElement);
+
+  // OrbitControls
+  if(THREE.OrbitControls){
+    _3dControls=new THREE.OrbitControls(_3dCamera, _3dRenderer.domElement);
+    _3dControls.target.set(4.1, 11.9, 0);
+    _3dControls.enableDamping=true;
+    _3dControls.dampingFactor=0.1;
+    _3dControls.maxPolarAngle=Math.PI/2-0.05;
+    _3dControls.update();
+  }
+
+  // Ambient + directional light
+  _3dScene.add(new THREE.AmbientLight(0xffffff, 0.6));
+  const dirLight=new THREE.DirectionalLight(0xffffff, 0.8);
+  dirLight.position.set(10, 20, 15);
+  _3dScene.add(dirLight);
+
+  // Court surface (green)
+  const courtGeo=new THREE.PlaneGeometry(COURT_W, COURT_L);
+  const courtMat=new THREE.MeshLambertMaterial({color:0x2d6a3f, side:THREE.DoubleSide});
+  const courtMesh=new THREE.Mesh(courtGeo, courtMat);
+  courtMesh.position.set(COURT_W/2, COURT_L/2, 0);
+  _3dScene.add(courtMesh);
+
+  // Surrounding ground
+  const groundGeo=new THREE.PlaneGeometry(20, 35);
+  const groundMat=new THREE.MeshLambertMaterial({color:0x1a2e1a, side:THREE.DoubleSide});
+  const groundMesh=new THREE.Mesh(groundGeo, groundMat);
+  groundMesh.position.set(COURT_W/2, COURT_L/2, -0.01);
+  _3dScene.add(groundMesh);
+
+  // Court lines (white)
+  const lineMat=new THREE.LineBasicMaterial({color:0xffffff, linewidth:1});
+  function addLine(pts){
+    const geo=new THREE.BufferGeometry().setFromPoints(pts.map(p=>new THREE.Vector3(p[0],p[1],0.01)));
+    _3dScene.add(new THREE.Line(geo, lineMat));
+  }
+  // Outer rectangle (singles)
+  addLine([[0,0],[COURT_W,0],[COURT_W,COURT_L],[0,COURT_L],[0,0]]);
+  // Net line
+  addLine([[0,NET_Y],[COURT_W,NET_Y]]);
+  // Service lines
+  addLine([[0,SRV_N],[COURT_W,SRV_N]]);
+  addLine([[0,SRV_F],[COURT_W,SRV_F]]);
+  // Center service line
+  addLine([[CX,SRV_N],[CX,SRV_F]]);
+  // Center marks
+  addLine([[CX,0],[CX,0.4]]);
+  addLine([[CX,COURT_L],[CX,COURT_L-0.4]]);
+
+  // Net mesh (semi-transparent)
+  const netGeo=new THREE.PlaneGeometry(COURT_W+0.4, 0.914);
+  const netMat=new THREE.MeshBasicMaterial({color:0xcccccc, transparent:true, opacity:0.35, side:THREE.DoubleSide});
+  const netMesh=new THREE.Mesh(netGeo, netMat);
+  netMesh.position.set(COURT_W/2, NET_Y, 0.914/2);
+  netMesh.rotation.x=Math.PI/2;
+  _3dScene.add(netMesh);
+  // Net top line (cable)
+  const netTopGeo=new THREE.BufferGeometry().setFromPoints([
+    new THREE.Vector3(-0.2, NET_Y, 0.914+0.03),
+    new THREE.Vector3(COURT_W+0.2, NET_Y, 0.914+0.03)
+  ]);
+  _3dScene.add(new THREE.Line(netTopGeo, new THREE.LineBasicMaterial({color:0xffffff})));
+  // Net posts (vertical boxes)
+  const postMat=new THREE.MeshLambertMaterial({color:0x888888});
+  [-0.2, COURT_W+0.2].forEach(x=>{
+    const p=new THREE.Mesh(new THREE.BoxGeometry(0.08,0.08,1.07), postMat);
+    p.position.set(x, NET_Y, 1.07/2);
+    _3dScene.add(p);
+  });
+
+  // Ball (sphere)
+  const ballGeo=new THREE.SphereGeometry(0.15, 16, 16);
+  const ballMat=new THREE.MeshLambertMaterial({color:0xccff00});
+  _3dBallMesh=new THREE.Mesh(ballGeo, ballMat);
+  _3dBallMesh.visible=false;
+  _3dScene.add(_3dBallMesh);
+
+  // Trail line
+  const trailGeo=new THREE.BufferGeometry();
+  const trailMat=new THREE.LineBasicMaterial({color:0xffaa33, linewidth:2});
+  _3dTrailLine=new THREE.Line(trailGeo, trailMat);
+  _3dScene.add(_3dTrailLine);
+
+  // Bounce marker meshes (pre-create 5)
+  for(let i=0;i<MAX_BOUNCES_3D;i++){
+    const bGeo=new THREE.SphereGeometry(0.12, 12, 12);
+    const bMat=new THREE.MeshLambertMaterial({color:0x4caf50, transparent:true, opacity:1.0});
+    const bMesh=new THREE.Mesh(bGeo, bMat);
+    bMesh.visible=false;
+    _3dScene.add(bMesh);
+    _3dBounceMeshes.push(bMesh);
+  }
+
+  // Responsive resize
+  const ro=new ResizeObserver(()=>{
+    const w=container.clientWidth, h=container.clientHeight;
+    if(w>0&&h>0){
+      _3dCamera.aspect=w/h;
+      _3dCamera.updateProjectionMatrix();
+      _3dRenderer.setSize(w, h);
+    }
+  });
+  ro.observe(container);
+
+  // Render loop
+  function animate(){
+    requestAnimationFrame(animate);
+    if(_3dControls) _3dControls.update();
+    _3dRenderer.render(_3dScene, _3dCamera);
+  }
+  animate();
+}
+
+function update3DCourt(ball, bounces){
+  if(!_3dScene) return;
+
+  // Update ball position
+  if(ball){
+    _3dBallMesh.visible=true;
+    _3dBallMesh.position.set(COURT_W-ball.x, ball.y, ball.z);
+
+    // Add to trail
+    _3dTrailPoints.push(new THREE.Vector3(COURT_W-ball.x, ball.y, ball.z));
+    if(_3dTrailPoints.length>MAX_TRAIL) _3dTrailPoints.shift();
+
+    // Update trail geometry with color gradient (newest=bright, oldest=dim)
+    if(_3dTrailPoints.length>1){
+      const geo=new THREE.BufferGeometry().setFromPoints(_3dTrailPoints);
+      const colors=new Float32Array(_3dTrailPoints.length*3);
+      _3dTrailPoints.forEach((p,i)=>{
+        const t=i/(_3dTrailPoints.length-1); // 0=oldest, 1=newest
+        colors[i*3]=1.0;       // R
+        colors[i*3+1]=0.5+t*0.5; // G (fade from orange to yellow)
+        colors[i*3+2]=t*0.3;  // B
+      });
+      geo.setAttribute('color',new THREE.BufferAttribute(colors,3));
+      _3dTrailLine.geometry.dispose();
+      _3dTrailLine.geometry=geo;
+      _3dTrailLine.material.vertexColors=true;
+      _3dTrailLine.material.needsUpdate=true;
+    }
+  } else {
+    _3dBallMesh.visible=false;
+  }
+
+  // Update bounce markers (latest 5)
+  const last5=bounces?bounces.slice(-5):[];
+  for(let i=0;i<MAX_BOUNCES_3D;i++){
+    const mesh=_3dBounceMeshes[i];
+    if(i<last5.length){
+      const b=last5[i];
+      const age=last5.length-1-i; // 0=newest
+      mesh.visible=true;
+      mesh.position.set(COURT_W-b.x, b.y, 0.12);
+      // Scale: newest bigger
+      const s=age===0?1.3:1.0;
+      mesh.scale.set(s,s,s);
+      // Color: green=IN, red=OUT
+      const isIn=b.in_court;
+      mesh.material.color.setHex(isIn?0x4caf50:0xf44336);
+      // Opacity fading
+      mesh.material.opacity=age===0?1.0:age===1?0.8:age===2?0.6:age===3?0.4:0.25;
+    } else {
+      mesh.visible=false;
+    }
+  }
+}
+
 // ---- API ----
 async function ctrlPipeline(name,action){
   try{await fetch(`/api/pipeline/${name}/${action}`,{method:'POST'})}catch(e){console.error(e)}
@@ -1215,6 +1404,51 @@ async function toggleMLRally(el){
     if(data.error) console.warn('ML Rally:', data.error);
   }catch(e){
     console.error('toggleMLRally failed',e);
+  }
+}
+
+async function toggleBounce(el){
+  el.classList.toggle('on');
+  const state = el.classList.contains('on') ? 'on' : 'off';
+  try{ await fetch(`/api/function/bounce/${state}`,{method:'POST'}); }
+  catch(e){ el.classList.toggle('on'); console.error('toggleBounce failed',e); }
+}
+
+async function toggleNetCrossing(el){
+  el.classList.toggle('on');
+  const state = el.classList.contains('on') ? 'on' : 'off';
+  try{ await fetch(`/api/function/net-crossing/${state}`,{method:'POST'}); }
+  catch(e){ el.classList.toggle('on'); console.error('toggleNetCrossing failed',e); }
+}
+
+async function toggleOCRAlign(el){
+  el.classList.toggle('on');
+  const state = el.classList.contains('on') ? 'on' : 'off';
+  try{ await fetch(`/api/function/ocr-align/${state}`,{method:'POST'}); }
+  catch(e){ el.classList.toggle('on'); console.error('toggleOCRAlign failed',e); }
+}
+
+async function toggle3DPush(el){
+  const enabling = !el.classList.contains('on');
+  try{
+    const endpoint = enabling ? '/api/3d-display/enable' : '/api/3d-display/disable';
+    const r = await fetch(endpoint, {method:'POST'});
+    const data = await r.json();
+    if(data.enabled) el.classList.add('on');
+    else el.classList.remove('on');
+  }catch(e){
+    console.error('toggle3DPush failed',e);
+  }
+}
+
+function toggleRecordToggle(el){
+  // This delegates to the existing recording toggle
+  if(!el.classList.contains('on')){
+    el.classList.add('on');
+    if(!_recording) toggleRecording();
+  } else {
+    el.classList.remove('on');
+    if(_recording) toggleRecording();
   }
 }
 
@@ -1330,10 +1564,10 @@ async function poll(){
     const b=d.latest_ball_3d;
     if(b){
       drawCourt(document.getElementById('minimap'),b.x,b.y,recentBounces);
-      draw3DMap(document.getElementById('map3d'),b);
+      update3DCourt(b, recentBounces);
     }else{
       drawCourt(document.getElementById('minimap'),null,null,recentBounces);
-      draw3DMap(document.getElementById('map3d'),null);
+      update3DCourt(null, recentBounces);
     }
 
     // Update rally state display
@@ -1352,8 +1586,27 @@ async function poll(){
 
 // Init
 drawCourt(document.getElementById('minimap'),null,null,[]);
-draw3DMap(document.getElementById('map3d'),null);
+init3DCourt();
 setInterval(poll,500);
+
+// Sync toggle states from server on load
+(async function syncToggles(){
+  try{
+    const r=await fetch('/api/function/toggles');
+    const d=await r.json();
+    const map={
+      'tog-bounce':'bounce_detection','tog-net-crossing':'net_crossing',
+      'tog-ocr':'ocr_align','tog-3d-push':'ws_3d_display',
+      'tog-ml-rally':'ml_rally','tog-track':'inference'
+    };
+    for(const[elId,key]of Object.entries(map)){
+      const el=document.getElementById(elId);
+      if(el && d[key]!==undefined){
+        if(d[key]) el.classList.add('on'); else el.classList.remove('on');
+      }
+    }
+  }catch(e){console.warn('syncToggles:',e)}
+})();
 
 // ============================================================
 // Page Switching

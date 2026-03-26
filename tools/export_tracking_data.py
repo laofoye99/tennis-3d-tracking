@@ -36,6 +36,7 @@ from tools.render_tracking_video import (
     build_flight_mask,
     smooth_trajectory_sg,
     detect_bounces,
+    detect_bounces_2d,
     detect_net_crossings,
     SINGLES_X_MIN, SINGLES_X_MAX, COURT_L, NET_Y,
 )
@@ -468,6 +469,11 @@ def main():
 
     export["bounces"] = bounces
     export["net_crossings"] = net_crossings
+
+    # ── 2D Pixel Bounce Detection ──────────────────────────────────
+    logger.info("=== 2D Pixel Bounce Detection ===")
+    bounces_2d = detect_bounces_2d(det66, det68, cfg, smoothed_3d=smoothed_3d)
+    export["bounces_2d"] = bounces_2d
 
     # ── Compute speed over time ────────────────────────────────────
     logger.info("=== Computing speed profile ===")
