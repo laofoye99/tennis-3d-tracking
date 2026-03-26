@@ -40,6 +40,11 @@ class CameraStream:
         try:
             cap = cv2.VideoCapture(self.url, cv2.CAP_FFMPEG)
             if cap.isOpened():
+                # Set buffer size and timeouts for stable RTSP reading
+                cap.set(cv2.CAP_PROP_BUFFERSIZE, 3)
+                # Use TCP transport for RTSP (more reliable than UDP)
+                cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 10000)
+                cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 10000)
                 self._cap = cap
                 logger.info("[%s] Connected to %s", self.name, self.url)
                 return True

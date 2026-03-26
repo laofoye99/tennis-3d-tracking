@@ -311,6 +311,10 @@ class Orchestrator:
                             cam66_world=WorldPoint2D(**d1),
                             cam68_world=WorldPoint2D(**d2),
                         )
+                        logger.debug("Ball 3D: (%.2f, %.2f, %.2f) cam66_px=(%.0f,%.0f) cam68_px=(%.0f,%.0f)",
+                                     x, y, z,
+                                     d1.get("pixel_x", 0), d1.get("pixel_y", 0),
+                                     d2.get("pixel_x", 0), d2.get("pixel_y", 0))
 
                         # --- Net crossing speed detection ---
                         now = time.time()
@@ -341,6 +345,8 @@ class Orchestrator:
                                         self._net_crossings.append(crossing)
                                         if len(self._net_crossings) > 100:
                                             self._net_crossings = self._net_crossings[-100:]
+                                        logger.info("NET CROSSING: %.0f km/h %s at (%.2f, %.2f, %.2f)",
+                                                    speed_kmh, direction, x, y, z)
                         self._prev_3d = pt
 
                         # Feed live analytics
@@ -361,6 +367,10 @@ class Orchestrator:
                                 self._live_bounces.append(bounce.to_dict())
                                 if len(self._live_bounces) > 50:
                                     self._live_bounces = self._live_bounces[-50:]
+                                bd = bounce.to_dict()
+                                logger.info("BOUNCE: (%.2f, %.2f, z=%.2f) %s",
+                                            bd.get("x", 0), bd.get("y", 0), bd.get("z", 0),
+                                            "IN" if bd.get("in_court", False) else "OUT")
                                 # --- Push bounce to 3D display queue ---
                                 if self._ws_enabled:
                                     bx, by = bounce.x, bounce.y
@@ -375,10 +385,15 @@ class Orchestrator:
                             rally_result = self._rally_sm.update(pt, ebounce)
                             if ebounce is not None:
                                 self._live_bounces.append(ebounce.to_dict())
+                                ebd = ebounce.to_dict()
+                                logger.info("BOUNCE(enhanced): (%.2f, %.2f, z=%.2f) %s",
+                                            ebd.get("x", 0), ebd.get("y", 0), ebd.get("z", 0),
+                                            "IN" if ebd.get("in_court", False) else "OUT")
                             if rally_result is not None:
                                 self._live_rallies.append(rally_result.to_dict())
                                 if len(self._live_rallies) > 20:
                                     self._live_rallies = self._live_rallies[-20:]
+                                logger.info("RALLY: %s", rally_result.to_dict())
                     except Exception as e:
                         logger.error("Triangulation error: %s", e)
 

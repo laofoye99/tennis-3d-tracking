@@ -14,11 +14,23 @@ from app.api.routes import router, set_orchestrator
 from app.config import load_config
 from app.orchestrator import Orchestrator
 
+import datetime as _dt
+
+# Log to both console and file
+_log_dir = Path("logs")
+_log_dir.mkdir(exist_ok=True)
+_log_file = _log_dir / f"tennis_{_dt.datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(name)s] %(levelname)s %(message)s",
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler(str(_log_file), encoding="utf-8"),
+    ],
 )
 logger = logging.getLogger("main")
+logger.info("Log file: %s", _log_file)
 
 
 def create_app() -> FastAPI:

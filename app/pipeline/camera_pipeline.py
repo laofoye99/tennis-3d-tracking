@@ -1,11 +1,20 @@
-"""Camera pipeline subprocess: stream → inference → postprocess → homography → output queue."""
+"""Camera pipeline subprocess: stream → inference → postprocess → homography → output queue.
+
+Architecture:
+  - Main loop: reads frames from RTSP, sends JPEG to preview queue (always smooth)
+  - Inference thread: consumes frames from an internal queue, runs TrackNet + postprocess
+  This ensures video preview is never blocked by GPU inference.
+"""
 
 import logging
 import multiprocessing as mp
+import queue
+import threading
 import time
 from typing import Any, Optional
 
 import cv2
+import numpy as np
 from app.pipeline.camera_stream import CameraStream
 from app.pipeline.homography import HomographyTransformer
 from app.pipeline.inference import create_detector
@@ -66,11 +75,91 @@ def run_pipeline(
         status_dict["state"] = "running"
         log.info("Pipeline running")
 
-        frame_buffer: list = []
-        frame_id_buffer: list[int] = []
+        # Internal queue for passing frames to inference thread
+        infer_q: queue.Queue = queue.Queue(maxsize=2)
+
+        # --- Inference thread (runs in background, never blocks preview) ---
+        def inference_loop():
+            frame_buffer: list = []
+            fps_counter = 0
+            fps_time = time.time()
+            infer_count = 0
+            det_count = 0
+
+            while not stop_event.is_set():
+                try:
+                    det_frame = infer_q.get(timeout=0.1)
+                except queue.Empty:
+                    continue
+
+                frame_buffer.append(det_frame)
+                if len(frame_buffer) < frames_in:
+                    log.debug("Buffer: %d/%d frames", len(frame_buffer), frames_in)
+                    continue
+
+                # Run inference
+                try:
+                    heatmaps = detector.infer(frame_buffer)
+                    infer_count += 1
+                    if infer_count <= 3 or infer_count % 50 == 0:
+                        log.info("Inference #%d: got %d heatmaps from %d frames",
+                                 infer_count, len(heatmaps), len(frame_buffer))
+                except Exception as e:
+                    log.error("Inference error: %s", e)
+                    frame_buffer.clear()
+                    continue
+
+                # Post-process
+                for i in range(min(frames_out, len(heatmaps))):
+                    result = tracker.process_heatmap(heatmaps[i])
+                    if result is None:
+                        continue
+
+                    det_count += 1
+                    px, py, conf = result
+                    wx, wy = homography.pixel_to_world(px, py)
+                    log.info("Detection #%d: px=(%.0f,%.0f) conf=%.1f world=(%.2f,%.2f)",
+                             det_count, px, py, conf, wx, wy)
+
+                    if not (homography.court_x_min <= wx <= homography.court_x_max):
+                        continue
+
+                    detection = {
+                        "camera_name": name,
+                        "x": wx,
+                        "y": wy,
+                        "pixel_x": px,
+                        "pixel_y": py,
+                        "confidence": conf,
+                        "timestamp": time.time(),
+                    }
+
+                    try:
+                        result_queue.put_nowait(detection)
+                    except Exception:
+                        pass
+
+                    status_dict["last_detection_time"] = time.time()
+
+                fps_counter += frames_out
+                now = time.time()
+                if now - fps_time >= 1.0:
+                    status_dict["fps"] = fps_counter / (now - fps_time)
+                    fps_counter = 0
+                    fps_time = now
+
+                frame_buffer.clear()
+
+        # Start inference thread if model is loaded
+        if detector is not None:
+            infer_thread = threading.Thread(target=inference_loop, daemon=True)
+            infer_thread.start()
+            log.info("Inference thread started")
+
+        # --- Main loop: frame reading + preview (never blocks) ---
         last_frame_id = -1
-        fps_counter = 0
-        fps_time = time.time()
+        frame_count = 0
+        infer_sent = 0
 
         while not stop_event.is_set():
             frame, frame_id, ts = stream.read()
@@ -78,24 +167,26 @@ def run_pipeline(
                 time.sleep(0.002)
                 continue
             last_frame_id = frame_id
+            frame_count += 1
+            if frame_count <= 3 or frame_count % 100 == 0:
+                log.info("Frame %d (id=%d), shape=%s, infer_queue=%d, sent_to_infer=%d",
+                         frame_count, frame_id, frame.shape, infer_q.qsize(), infer_sent)
 
-            # --- 向 frame_queue 放 JPEG（预览或录像）---
+            # 预览/录像：始终执行，不受推理影响
             if frame_queue is not None:
                 is_recording = status_dict.get("recording_enabled", False)
                 if is_recording or frame_id % 4 == 0:
                     try:
                         h, w = frame.shape[:2]
                         if is_recording:
-                            # 录像模式：原画质，不缩放，JPEG quality 95
                             _, jpeg = cv2.imencode(
                                 ".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 95]
                             )
                             try:
                                 frame_queue.put(jpeg.tobytes(), timeout=0.5)
                             except Exception:
-                                pass  # 队列满超时丢帧
+                                pass
                         else:
-                            # 预览模式：缩放到 960 宽，JPEG quality 75，只保留最新帧
                             preview = cv2.resize(frame, (960, int(h * 960 / w))) if w > 960 else frame
                             _, jpeg = cv2.imencode(
                                 ".jpg", preview, [cv2.IMWRITE_JPEG_QUALITY, 75]
@@ -109,69 +200,21 @@ def run_pipeline(
                     except Exception:
                         pass
 
-            # Mask out timestamp overlay (top-left corner) to avoid interfering with detection
-            frame[0:41, 0:603] = 0
-
-            frame_buffer.append(frame)
-            frame_id_buffer.append(frame_id)
-
-            if len(frame_buffer) < frames_in:
-                continue
-
-            # 推理开关关闭或模型未加载时直接跳过 GPU 调用
-            if detector is None or not status_dict.get("inference_enabled", True):
-                frame_buffer.clear()
-                frame_id_buffer.clear()
-                continue
-
-            # Inference on the buffer
-            try:
-                heatmaps = detector.infer(frame_buffer)
-            except Exception as e:
-                log.error("Inference error: %s", e)
-                frame_buffer.clear()
-                frame_id_buffer.clear()
-                continue
-
-            # Post-process each output frame
-            for i in range(min(frames_out, len(heatmaps))):
-                result = tracker.process_heatmap(heatmaps[i])
-                if result is None:
-                    continue
-
-                px, py, conf = result
-                wx, wy = homography.pixel_to_world(px, py)
-
-                # Filter: skip detections outside court X range
-                if not (homography.court_x_min <= wx <= homography.court_x_max):
-                    continue
-
-                detection = {
-                    "camera_name": name,
-                    "x": wx,
-                    "y": wy,
-                    "pixel_x": px,
-                    "pixel_y": py,
-                    "confidence": conf,
-                    "timestamp": time.time(),
-                }
-
+            # 推理：把帧送到推理线程（非阻塞，满了就丢）
+            if detector is not None and status_dict.get("inference_enabled", True):
+                det_frame = frame.copy()
+                det_frame[0:41, 0:603] = 0
                 try:
-                    result_queue.put_nowait(detection)
-                except Exception:
-                    pass  # Queue full, skip
-
-                status_dict["last_detection_time"] = time.time()
-
-            fps_counter += frames_out
-            now = time.time()
-            if now - fps_time >= 1.0:
-                status_dict["fps"] = fps_counter / (now - fps_time)
-                fps_counter = 0
-                fps_time = now
-
-            frame_buffer.clear()
-            frame_id_buffer.clear()
+                    infer_q.put_nowait(det_frame)
+                    infer_sent += 1
+                except queue.Full:
+                    pass  # 推理跟不上就丢帧，不影响预览
+            elif detector is None:
+                if frame_count <= 3:
+                    log.warning("Detector is None, inference disabled")
+            elif not status_dict.get("inference_enabled", True):
+                if frame_count <= 3:
+                    log.warning("Inference disabled by toggle")
 
     except Exception as e:
         log.exception("Pipeline crashed: %s", e)
