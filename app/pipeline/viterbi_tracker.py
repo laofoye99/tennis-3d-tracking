@@ -25,10 +25,10 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 # Court constants (singles)
-SINGLES_X_MIN = 1.37
-SINGLES_X_MAX = 6.86
-COURT_L = 23.77
-NET_Y = COURT_L / 2  # 11.885
+SINGLES_X_MIN = -4.115  # V2
+SINGLES_X_MAX = 4.115  # V2
+COURT_L = 23.78  # V2
+NET_Y = 0.0  # V2: net at origin
 
 
 def _triangulate(world_2d_1, world_2d_2, cam1_pos, cam2_pos):

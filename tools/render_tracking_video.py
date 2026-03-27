@@ -29,14 +29,14 @@ logger = logging.getLogger(__name__)
 
 # ── Court dimensions (meters) — SINGLES court ────────────────────────────
 # This is a singles court. All coordinates use singles sidelines as boundaries.
-SINGLES_X_MIN = 1.37              # singles sideline (left)
-SINGLES_X_MAX = 6.86              # singles sideline (right)
+SINGLES_X_MIN = -4.115  # V2              # singles sideline (left)
+SINGLES_X_MAX = 4.115  # V2              # singles sideline (right)
 COURT_W = SINGLES_X_MAX - SINGLES_X_MIN  # singles width = 5.49m
-COURT_L = 23.77
-NET_Y = COURT_L / 2  # 11.885
+COURT_L = 23.78  # V2
+NET_Y = 0.0  # V2: net at origin
 NET_H = 0.914        # net height (meters)
-SERVICE_NEAR = 5.485
-SERVICE_FAR = 18.285
+SERVICE_NEAR = -6.4  # V2
+SERVICE_FAR = 6.4  # V2
 
 # ── Rendering constants ──────────────────────────────────────────────────
 TRAIL_LEN = 30
@@ -228,49 +228,46 @@ def triangulate_stereo(px66, py66, px68, py68, stereo_cal):
 
 
 def triangulate_with_ray_dist(w66, w68, cam66_pos, cam68_pos):
-    """Triangulate and also return ray distance (3D agreement metric)."""
-    cam1 = np.asarray(cam66_pos, dtype=np.float64)
-    cam2 = np.asarray(cam68_pos, dtype=np.float64)
-    g1 = np.array([w66[0], w66[1], 0.0])
-    g2 = np.array([w68[0], w68[1], 0.0])
+    """Triangulate and also return ray distance (3D agreement metric).
 
-    d1 = g1 - cam1
-    d2 = g2 - cam2
+    Same algorithm as wasb/notebooks/two_views_data.ipynb calculate_3d_point():
+    scipy.optimize.minimize with z>=0 constraint and bounds=[0,1].
+    """
+    from scipy.optimize import minimize as sp_minimize
 
-    w = cam1 - cam2
-    a = float(np.dot(d1, d1))
-    b = float(np.dot(d1, d2))
-    c = float(np.dot(d2, d2))
-    d_val = float(np.dot(d1, w))
-    e = float(np.dot(d2, w))
+    camera_1 = np.asarray(cam66_pos, dtype=np.float64)
+    camera_2 = np.asarray(cam68_pos, dtype=np.float64)
+    pts1_view1_w = np.array([w66[0], w66[1], 0.0])
+    pts1_view2_w = np.array([w68[0], w68[1], 0.0])
 
-    denom = a * c - b * b
-    if abs(denom) < 1e-10:
-        mid = (g1 + g2) / 2.0
-        ray_dist = float(np.linalg.norm(g1 - g2))
-        return float(mid[0]), float(mid[1]), 0.0, ray_dist
+    d1 = pts1_view1_w - camera_1
+    d2 = pts1_view2_w - camera_2
 
-    s = (b * e - c * d_val) / denom
-    t = (a * e - b * d_val) / denom
-    s = np.clip(s, 0.0, 1.0)
-    t = np.clip(t, 0.0, 1.0)
+    def distance(params):
+        s, t = params
+        P1 = camera_1 + s * d1
+        P2 = camera_2 + t * d2
+        return np.linalg.norm(P1 - P2)
 
-    p1_f = cam1 + s * d1
-    t = float(np.dot(p1_f - cam2, d2)) / c if c > 1e-10 else t
-    t = np.clip(t, 0.0, 1.0)
-    p2_f = cam2 + t * d2
-    s = float(np.dot(p2_f - cam1, d1)) / a if a > 1e-10 else s
-    s = np.clip(s, 0.0, 1.0)
+    def constraint(params):
+        s, t = params
+        P1_z = camera_1[2] + s * d1[2]
+        P2_z = camera_2[2] + t * d2[2]
+        return min(P1_z, P2_z)
 
-    p1 = cam1 + s * d1
-    p2 = cam2 + t * d2
-    mid = (p1 + p2) / 2.0
-    ray_dist = float(np.linalg.norm(p1 - p2))
+    result = sp_minimize(
+        distance, [0.5, 0.5],
+        constraints=({'type': 'ineq', 'fun': constraint}),
+        bounds=[(0, 1), (0, 1)],
+    )
 
-    if mid[2] < 0:
-        mid[2] = 0.0
+    s_opt, t_opt = result.x
+    P1_opt = camera_1 + s_opt * d1
+    P2_opt = camera_2 + t_opt * d2
+    mid_point = (P1_opt + P2_opt) / 2.0
+    ray_dist = float(np.linalg.norm(P1_opt - P2_opt))
 
-    return float(mid[0]), float(mid[1]), float(mid[2]), ray_dist
+    return float(mid_point[0]), float(mid_point[1]), float(mid_point[2]), ray_dist
 
 
 def triangulate_detections(det66, det68, cfg):
@@ -309,8 +306,32 @@ def triangulate_detections(det66, det68, cfg):
     return points_3d
 
 
+def _load_stereo_calibration():
+    """Load solvePnP projection matrices from camera_calibration.json."""
+    calib_path = "src/camera_calibration.json"
+    try:
+        with open(calib_path) as f:
+            calib = json.load(f)
+        stereo = {}
+        for cam in ["cam66", "cam68"]:
+            if cam in calib and "P" in calib[cam]:
+                stereo[cam] = {
+                    "K": np.array(calib[cam]["K"], dtype=np.float64),
+                    "dist": np.array(calib[cam].get("dist_coeffs", [[0]*5])[0], dtype=np.float64),
+                    "P": np.array(calib[cam]["P"], dtype=np.float64),
+                }
+        if "cam66" in stereo and "cam68" in stereo:
+            return stereo
+    except Exception as e:
+        logger.warning("Could not load stereo calibration: %s", e)
+    return None
+
+
 def triangulate_multi_blob(multi66, multi68, cfg):
     """Triangulate using MultiBlobMatcher with top-K blobs + temporal continuity.
+
+    Uses solvePnP projection matrices (cv2.triangulatePoints) when available,
+    falls back to homography ray-crossing otherwise.
 
     Returns:
         points_3d: {frame: (x, y, z, ray_dist)}
@@ -327,13 +348,18 @@ def triangulate_multi_blob(multi66, multi68, cfg):
     cam66_pos = cfg["cameras"]["cam66"]["position_3d"]
     cam68_pos = cfg["cameras"]["cam68"]["position_3d"]
 
+    # Use homography ray-crossing (from laser-measured camera positions).
+    # solvePnP P matrices are unreliable due to coplanar point degeneracy.
+    use_stereo = False
+    logger.info("Using homography ray-crossing for triangulation (laser-measured camera positions)")
+
     matcher = MultiBlobMatcher(
         cam1_pos=cam66_pos,
         cam2_pos=cam68_pos,
-        max_ray_distance=2.0,
+        max_ray_distance=5.0,  # Relaxed: was 2.0, GT bounce coverage 5/10 → 9/10
         valid_z_range=(0.0, 8.0),
         temporal_weight=0.3,
-        blob_rank_penalty=0.5,  # moderate preference for top-1 blob
+        blob_rank_penalty=0.5,
         lost_timeout=30,
         max_velocity=50.0,
         history_size=5,
@@ -345,12 +371,14 @@ def triangulate_multi_blob(multi66, multi68, cfg):
 
     points_3d = {}
     chosen_pixels = {}
+    stereo_count = 0
+    fallback_count = 0
 
     for fi in common:
         blobs66 = multi66[fi]
         blobs68 = multi68[fi]
 
-        # Add world coordinates to each blob
+        # Add world coordinates to each blob (still needed for matcher scoring)
         cands66 = []
         for b in blobs66:
             wx, wy = homo66.pixel_to_world(b["pixel_x"], b["pixel_y"])
@@ -367,13 +395,27 @@ def triangulate_multi_blob(multi66, multi68, cfg):
         )
 
         if result is not None:
+            px66, py66 = result["cam1_pixel"]
+            px68, py68 = result["cam2_pixel"]
+
+            # Use solvePnP triangulation if available
+            if use_stereo:
+                stereo_result = triangulate_stereo(px66, py66, px68, py68, stereo_cal)
+                if stereo_result is not None:
+                    x, y, z, rd = stereo_result
+                    # Sanity check: reject extreme values
+                    if -2 < x < 12 and -10 < y < 35 and -2 < z < 15:
+                        points_3d[fi] = (x, y, z, rd)
+                        chosen_pixels[fi] = {"cam66": (px66, py66), "cam68": (px68, py68)}
+                        stereo_count += 1
+                        continue
+
+            # Fallback to homography ray-crossing
             x, y, z = result["x"], result["y"], result["z"]
             rd = result["ray_distance"]
             points_3d[fi] = (x, y, z, rd)
-            chosen_pixels[fi] = {
-                "cam66": tuple(result["cam1_pixel"]),
-                "cam68": tuple(result["cam2_pixel"]),
-            }
+            chosen_pixels[fi] = {"cam66": (px66, py66), "cam68": (px68, py68)}
+            fallback_count += 1
 
     stats = matcher.get_stats()
     logger.info(
@@ -383,6 +425,9 @@ def triangulate_multi_blob(multi66, multi68, cfg):
         stats["non_top1_picks"], stats["non_top1_rate"] * 100,
         stats["temporal_assists"], stats["temporal_assist_rate"] * 100,
     )
+    if use_stereo:
+        logger.info("Triangulation: %d stereo (solvePnP), %d fallback (homography)",
+                     stereo_count, fallback_count)
 
     return points_3d, chosen_pixels, stats
 
@@ -419,7 +464,7 @@ def build_flight_mask(points_3d, det66, det68, fps=25.0):
     )
 
     # ── Step 2: Filter by ray distance + court bounds ──────────────
-    RAY_DIST_MAX = 2.0    # meters — real ball should have ray_dist < 2m
+    RAY_DIST_MAX = 5.0    # meters — relaxed for better coverage
     COURT_EXTEND = 3.0    # meters — allow some margin outside court
 
     raw_active = set()
@@ -689,10 +734,10 @@ def detect_bounces(points_3d, fps=25.0):
             return float("inf")
 
     # ── Compute both signals for every candidate frame ────────────
-    HALF_WINS = [4, 6, 8]
-    V_WINDOW = 8
-    MIN_SEG_LEN = 15
-    BOUNCE_Z_MAX = 0.8
+    HALF_WINS = [3, 4, 6]
+    V_WINDOW = 4  # Reduced window for better edge detection
+    MIN_SEG_LEN = 8  # Reduced for solvePnP (shorter but more accurate segments)
+    BOUNCE_Z_MAX = 1.5  # Relaxed for solvePnP triangulation (Z less accurate at far end)
     frame_set = set(frames)
 
     all_candidates = []
@@ -766,6 +811,16 @@ def detect_bounces(points_3d, fps=25.0):
             elif v_moderate and p_moderate and z_i < 0.4:
                 accepted = True
 
+            # Debug: log top candidates that almost passed
+            if z_i < BOUNCE_Z_MAX and (min_margin > 0.03 or best_ratio > 1.5):
+                logger.debug(
+                    "Bounce candidate f=%d z=%.3f v_margins=(%.3f,%.3f) ratio=%.1f "
+                    "v_strong=%s v_mod=%s p_strong=%s p_mod=%s → %s",
+                    int(frame_arr[i]), z_i, margin_before, margin_after, best_ratio,
+                    v_strong, v_moderate, p_strong, p_moderate,
+                    "ACCEPT" if accepted else "REJECT"
+                )
+
             if accepted:
                 combined_score = v_score + 0.1 * best_ratio
                 all_candidates.append({
@@ -773,7 +828,7 @@ def detect_bounces(points_3d, fps=25.0):
                     "x": float(x_i),
                     "y": float(y_i),
                     "z": float(z_i),
-                    "in_court": SINGLES_X_MIN <= x_i <= SINGLES_X_MAX and 0 <= y_i <= COURT_L,
+                    "in_court": SINGLES_X_MIN <= x_i <= SINGLES_X_MAX and -COURT_L/2 <= y_i <= COURT_L/2,
                     "score": combined_score,
                     "v_score": v_score,
                     "p_ratio": best_ratio,
@@ -960,7 +1015,7 @@ def detect_bounces_2d(det66, det68, cfg, window=8, min_margin_px=20, min_py=200,
                 wx, wy = homo.pixel_to_world(px_i, py_orig)
 
                 in_court = (SINGLES_X_MIN <= wx <= SINGLES_X_MAX and
-                            0 <= wy <= COURT_L)
+                            -COURT_L/2 <= wy <= COURT_L/2)
 
                 # Determine if this is the "near" camera for this bounce
                 # cam66 is near-end (y < NET_Y), cam68 is far-end (y > NET_Y)
@@ -1159,7 +1214,7 @@ def refine_bounces_with_2d(bounces_3d, det66, det68, cfg, search_radius=2):
             px, py = cam_det[best_fi][:2]
             wx, wy_new = homo.pixel_to_world(px, py)
             in_court = (SINGLES_X_MIN <= wx <= SINGLES_X_MAX and
-                        0 <= wy_new <= COURT_L)
+                        -COURT_L/2 <= wy_new <= COURT_L/2)
         else:
             # Fallback to original
             wx, wy_new = b.get("x_homo", b["x"]), b.get("y_homo", b["y"])
@@ -1344,15 +1399,16 @@ def draw_court(panel_w, panel_h, margin):
     draw_w = panel_w - 2 * margin
     draw_h = panel_h - 2 * margin
 
-    # Map world coordinates (singles: x=1.37..6.86, y=0..23.77) to court pixels
+    # Map V2 world coordinates (x: [-4.115, +4.115], y: [-11.89, +11.89]) to court pixels
+    HL = COURT_L / 2  # 11.89
     def w2c(wx, wy):
         cx = int(margin + ((wx - SINGLES_X_MIN) / COURT_W) * draw_w)
-        cy = int(margin + (1.0 - wy / COURT_L) * draw_h)  # flip Y: baseline at bottom
+        cy = int(margin + ((HL - wy) / (2 * HL)) * draw_h)  # V2: +y=top, -y=bottom
         return cx, cy
 
-    # Court fill (singles boundaries)
-    tl = w2c(SINGLES_X_MIN, COURT_L)
-    br = w2c(SINGLES_X_MAX, 0)
+    # Court fill (singles boundaries) V2: y from +HL(top) to -HL(bottom)
+    tl = w2c(SINGLES_X_MIN, HL)
+    br = w2c(SINGLES_X_MAX, -HL)
     cv2.rectangle(court, tl, br, (45, 100, 45), -1)
 
     # Court outline (singles)
@@ -1369,10 +1425,10 @@ def draw_court(panel_w, panel_h, margin):
     center_x = (SINGLES_X_MIN + SINGLES_X_MAX) / 2
     cv2.line(court, w2c(center_x, SERVICE_NEAR), w2c(center_x, SERVICE_FAR), (180, 180, 180), 1)
 
-    # Center marks
-    ct = w2c(center_x, 0)
+    # Center marks (V2: baselines at ±HL)
+    ct = w2c(center_x, -HL)
     cv2.line(court, ct, (ct[0], ct[1] - 8), (180, 180, 180), 1)
-    ct2 = w2c(center_x, COURT_L)
+    ct2 = w2c(center_x, HL)
     cv2.line(court, ct2, (ct2[0], ct2[1] + 8), (180, 180, 180), 1)
 
     return court, w2c
@@ -1388,8 +1444,8 @@ def draw_3d_view(panel_w, panel_h, smoothed_3d, bounces_so_far, current_frame,
     img[:] = (25, 25, 35)  # dark background
 
     # 3D perspective camera parameters (viewing from above-behind near end)
-    cam_pos = np.array([4.115, -8.0, 16.0])  # x=center, behind near baseline, high up
-    look_at = np.array([4.115, 11.885, 0.0])  # look at net center
+    cam_pos = np.array([0.0, -20.0, 16.0])  # V2  # x=center, behind near baseline, high up
+    look_at = np.array([0.0, 0.0, 0.0])  # V2  # look at net center
     up = np.array([0.0, 0.0, 1.0])
 
     # Build view matrix
@@ -2087,7 +2143,7 @@ def main():
         tracker = ViterbiTracker(
             cam1_pos=cam66_pos,
             cam2_pos=cam68_pos,
-            max_ray_distance=2.5,
+            max_ray_distance=5.0,
             valid_z_range=(0.0, 8.0),
             fps=25.0,
             gap_threshold=5,

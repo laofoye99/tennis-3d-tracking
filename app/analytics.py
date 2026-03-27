@@ -26,21 +26,21 @@ logger = logging.getLogger(__name__)
 
 # Court dimensions (meters)
 DOUBLES_WIDTH = 8.23
-COURT_Y = 23.77
-NET_Y = 11.885
+COURT_Y = 11.89  # V2: half court length
+NET_Y = 0.0  # V2: net at origin
 NET_HEIGHT = 0.914
 
 # Singles court boundaries (labeled keypoints are on singles lines)
-SINGLES_X_MIN = 1.37
-SINGLES_X_MAX = 6.86
+SINGLES_X_MIN = -4.115  # V2
+SINGLES_X_MAX = 4.115  # V2
 COURT_X_MIN = SINGLES_X_MIN
 COURT_X_MAX = SINGLES_X_MAX
 COURT_Y_MIN = 0.0
 COURT_Y_MAX = COURT_Y
 
 # Service box boundaries
-SERVICE_LINE_NEAR = 5.485
-SERVICE_LINE_FAR = 18.285
+SERVICE_LINE_NEAR = -6.4  # V2
+SERVICE_LINE_FAR = 6.4  # V2
 
 # Baseline zones for serve detection
 BASELINE_NEAR_MAX = 5.0   # y < 5m = near baseline zone
@@ -375,7 +375,7 @@ class BounceDetector:
 class RallyTracker:
     """State machine for rally tracking based on net crossings.
 
-    Tracks when the ball crosses the net line (``Y = 11.885 m``) and
+    Tracks when the ball crosses the net line (``Y = 0 m (V2)``) and
     maintains rally state:
 
         ``idle`` → ``rally`` (on first net crossing) → ``idle`` (on timeout)

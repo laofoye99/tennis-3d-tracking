@@ -19,53 +19,46 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Standard ITF singles court dimensions (meters)
-# Reused from src/compute_homography.py, extended to 3D (z=0 ground plane)
+# Court dimensions — V2 coordinate system: origin at court center (net)
+# X: [-2.745, +2.745], Y: [-11.885, +11.885], Net at y=0
 # ---------------------------------------------------------------------------
-
-COURT_LENGTH = 23.77
-DOUBLES_WIDTH = 8.23
-NET_Y = COURT_LENGTH / 2  # 11.885
-SERVICE_DIST = 6.40
-SERVICE_NEAR_Y = NET_Y - SERVICE_DIST  # 5.485
-SERVICE_FAR_Y = NET_Y + SERVICE_DIST  # 18.285
-
-# Singles court lines — the labeled keypoints are on SINGLES sidelines
-SINGLES_LEFT = 1.37        # singles left sideline
-SINGLES_RIGHT = 6.86       # singles right sideline
-CENTER_X = (SINGLES_LEFT + SINGLES_RIGHT) / 2  # 4.115
+from src.compute_homography import (
+    COURT_HALF_LENGTH, COURT_HALF_WIDTH, SERVICE_DIST, NET_Y,
+    BASELINE_NEAR, BASELINE_FAR, SERVICE_NEAR, SERVICE_FAR,
+    SIDELINE_LEFT, SIDELINE_RIGHT, COURT_LENGTH, DOUBLES_WIDTH,
+)
 
 # 3D world coordinates for 12 labeled keypoints (z=0 on ground plane)
-# IMPORTANT: left/right labels correspond to SINGLES sidelines, not doubles.
-# Camera 66: near baseline at y=0, looking toward y=23.77
+# Camera 66: sits at y≈+17 (far end), looks toward y=-11.885
 WORLD_COORDS_CAM66 = {
-    "left_top": (SINGLES_LEFT, COURT_LENGTH, 0.0),
-    "left_top_serve": (SINGLES_LEFT, SERVICE_FAR_Y, 0.0),
-    "left_bottom_serve": (SINGLES_LEFT, SERVICE_NEAR_Y, 0.0),
-    "left_bottom": (SINGLES_LEFT, 0.0, 0.0),
-    "center_top": (CENTER_X, COURT_LENGTH, 0.0),
-    "center_top_serve": (CENTER_X, SERVICE_FAR_Y, 0.0),
-    "center_bottom_serve": (CENTER_X, SERVICE_NEAR_Y, 0.0),
-    "center_bottom": (CENTER_X, 0.0, 0.0),
-    "right_top": (SINGLES_RIGHT, COURT_LENGTH, 0.0),
-    "right_top_serve": (SINGLES_RIGHT, SERVICE_FAR_Y, 0.0),
-    "right_bottom_serve": (SINGLES_RIGHT, SERVICE_NEAR_Y, 0.0),
-    "right_bottom": (SINGLES_RIGHT, 0.0, 0.0),
+    "left_top": (SIDELINE_LEFT, BASELINE_NEAR, 0.0),
+    "left_top_serve": (SIDELINE_LEFT, SERVICE_NEAR, 0.0),
+    "left_bottom_serve": (SIDELINE_LEFT, SERVICE_FAR, 0.0),
+    "left_bottom": (SIDELINE_LEFT, BASELINE_FAR, 0.0),
+    "center_top": (0.0, BASELINE_NEAR, 0.0),
+    "center_top_serve": (0.0, SERVICE_NEAR, 0.0),
+    "center_bottom_serve": (0.0, SERVICE_FAR, 0.0),
+    "center_bottom": (0.0, BASELINE_FAR, 0.0),
+    "right_top": (SIDELINE_RIGHT, BASELINE_NEAR, 0.0),
+    "right_top_serve": (SIDELINE_RIGHT, SERVICE_NEAR, 0.0),
+    "right_bottom_serve": (SIDELINE_RIGHT, SERVICE_FAR, 0.0),
+    "right_bottom": (SIDELINE_RIGHT, BASELINE_FAR, 0.0),
 }
 
-# Camera 68: opposite end, facing toward y=0
-# Its "left" = cam66's "right" (x=6.86), its "right" = cam66's "left" (x=1.37)
+# Camera 68: opposite end, facing toward y=+11.885
 WORLD_COORDS_CAM68 = {
-    "left_top": (SINGLES_RIGHT, 0.0, 0.0),
-    "left_top_serve": (SINGLES_RIGHT, SERVICE_NEAR_Y, 0.0),
-    "left_bottom_serve": (SINGLES_RIGHT, SERVICE_FAR_Y, 0.0),
-    "left_bottom": (SINGLES_RIGHT, COURT_LENGTH, 0.0),
-    "center_top": (CENTER_X, 0.0, 0.0),
-    "center_top_serve": (CENTER_X, SERVICE_NEAR_Y, 0.0),
-    "center_bottom_serve": (CENTER_X, SERVICE_FAR_Y, 0.0),
-    "center_bottom": (CENTER_X, COURT_LENGTH, 0.0),
-    "right_top": (SINGLES_LEFT, 0.0, 0.0),
-    "right_top_serve": (SINGLES_LEFT, SERVICE_NEAR_Y, 0.0),
+    "left_top": (SIDELINE_RIGHT, BASELINE_FAR, 0.0),
+    "left_top_serve": (SIDELINE_RIGHT, SERVICE_FAR, 0.0),
+    "left_bottom_serve": (SIDELINE_RIGHT, SERVICE_NEAR, 0.0),
+    "left_bottom": (SIDELINE_RIGHT, BASELINE_NEAR, 0.0),
+    "center_top": (0.0, BASELINE_FAR, 0.0),
+    "center_top_serve": (0.0, SERVICE_FAR, 0.0),
+    "center_bottom_serve": (0.0, SERVICE_NEAR, 0.0),
+    "center_bottom": (0.0, BASELINE_NEAR, 0.0),
+    "right_top": (SIDELINE_LEFT, BASELINE_FAR, 0.0),
+    "right_top_serve": (SIDELINE_LEFT, SERVICE_FAR, 0.0),
+    "right_bottom_serve": (SIDELINE_LEFT, SERVICE_NEAR, 0.0),
+    "right_bottom": (SIDELINE_LEFT, BASELINE_NEAR, 0.0),
     "right_bottom_serve": (SINGLES_LEFT, SERVICE_FAR_Y, 0.0),
     "right_bottom": (SINGLES_LEFT, COURT_LENGTH, 0.0),
 }

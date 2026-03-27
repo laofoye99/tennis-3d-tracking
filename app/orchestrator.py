@@ -98,7 +98,7 @@ class Orchestrator:
         self._prev_3d: Optional[dict] = None  # previous 3D point for speed calc
         self._latest_net_crossing: Optional[dict] = None
         self._net_crossings: list[dict] = []
-        NET_Y = 11.885  # net position
+        NET_Y = 0.0  # V2: net at origin  # net position
         self._NET_Y = NET_Y
 
         # 3D display WebSocket push
@@ -375,8 +375,8 @@ class Orchestrator:
                                 if self._ws_enabled:
                                     bx, by = bounce.x, bounce.y
                                     self._ws_bounce_queue.append({
-                                        "x": (bx - 1.37) / 5.49,  # singles normalized
-                                        "y": 1.0 - (by / 23.77),  # 0=far, 1=near
+                                        "x": (bx + 4.115) / 8.23,  # singles normalized
+                                        "y": (11.89 - by) / 23.78,  # 0=far, 1=near
                                         "speed": self._latest_net_crossing["speed_kmh"] if self._latest_net_crossing else 0,
                                         "timestamp": int(now * 1000),
                                     })
@@ -1490,7 +1490,7 @@ class Orchestrator:
             next_z = points[i + 1]["z"]
             if curr_z < prev_z and curr_z < next_z and curr_z < 0.3:
                 bx, by = points[i]["x"], points[i]["y"]
-                in_court = 1.37 <= bx <= 6.86 and 0 <= by <= 23.77
+                in_court = -4.115 <= bx <= 4.115 and -11.89 <= by <= 11.89
                 bounces.append({
                     "frame": points[i]["frame_index"],
                     "x": bx, "y": by, "z": curr_z,

@@ -1,21 +1,23 @@
 calibration:
   path: src/camera_calibration.json
-  use_calibrated_positions: false
+  use_calibrated_positions: True
 cameras:
   cam66:
     homography_key: cam66
     position_3d:
-    - 4.36
-    - 28.93
-    - 6.92
-    rtsp_url: rtsp://admin:motion168@192.168.1.66:554/Streaming/Channels/101
+    - 0.165      # 4.36 - 4.115
+    - -17.042     # 28.93 - 11.885
+    - 6.217
+    rtsp_url: rtsp://localhost:8554/cam66
+    # rtsp_url: rtsp://admin:motion168@192.168.1.66:554/Streaming/Channels/101
   cam68:
     homography_key: cam68
     position_3d:
-    - 4.431
-    - -5.28
-    - 6.10
-    rtsp_url: rtsp://admin:motion168@192.168.1.68:554/Streaming/Channels/101
+    - 0.211      # 4.431 - 4.115
+    - 17.156    # -5.28 - 11.885
+    - 5.286
+    rtsp_url: rtsp://localhost:8554/cam68
+    # rtsp_url: rtsp://admin:motion168@192.168.1.68:554/Streaming/Channels/101
 homography:
   path: src/homography_matrices.json
 model:
