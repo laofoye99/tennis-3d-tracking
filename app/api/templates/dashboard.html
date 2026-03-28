@@ -1137,12 +1137,17 @@ function drawCourt(canvas,bounces,liveBall){
       ctx.fillText(num,bx,by+1);
       ctx.textAlign='start';ctx.textBaseline='alphabetic';
 
-      // IN/OUT + speed label
+      // IN/OUT + speed + delay label
       ctx.fillStyle=color;ctx.font='bold 8px Lato';
       ctx.fillText(isIn?'IN':'OUT',bx+r+4,by+3);
       if(b.speed_kmh){
         ctx.fillStyle='#ffd700';ctx.font='bold 9px Lato';
         ctx.fillText(Math.round(b.speed_kmh)+'km/h',bx+r+4,by+14);
+      }
+      // Show detection delay on newest bounce
+      if(age===0 && b.detect_delay){
+        ctx.fillStyle='#888';ctx.font='9px Lato';
+        ctx.fillText(b.detect_delay.toFixed(1)+'s ago',bx+r+4,by+24);
       }
 
       ctx.globalAlpha=1.0;

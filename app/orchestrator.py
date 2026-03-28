@@ -335,7 +335,12 @@ class Orchestrator:
 
                         # --- Net crossing speed detection ---
                         now = time.time()
-                        pt = {"x": x, "y": y, "z": z, "timestamp": now}
+                        capture_ts = min(
+                            d1.get("capture_ts", d1["timestamp"]),
+                            d2.get("capture_ts", d2["timestamp"]),
+                        )
+                        pt = {"x": x, "y": y, "z": z, "timestamp": now,
+                              "capture_ts": capture_ts}
                         if self._prev_3d is not None:
                             prev_y = self._prev_3d["y"]
                             curr_y = y
@@ -396,6 +401,8 @@ class Orchestrator:
                             rally_result = self._rally_sm.update(pt, ebounce)
                             if ebounce is not None:
                                 bd = ebounce.to_dict()
+                                bd["capture_ts"] = capture_ts  # when the frame was actually captured
+                                bd["detect_delay"] = round(now - capture_ts, 2)  # detection pipeline delay
                                 # Attach most recent net crossing speed (within 3s)
                                 if self._latest_net_crossing and (now - self._latest_net_crossing["timestamp"]) < 3.0:
                                     bd["speed_kmh"] = self._latest_net_crossing["speed_kmh"]
