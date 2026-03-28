@@ -137,18 +137,30 @@ def run_pipeline(
                 frame_id_buffer.clear()
                 continue
 
-            # Post-process each output frame
+            # Post-process each output frame — extract top-K blobs (matches offline)
             for i in range(min(frames_out, len(heatmaps))):
-                result = tracker.process_heatmap(heatmaps[i])
-                if result is None:
+                blobs = tracker.process_heatmap_multi(heatmaps[i], max_blobs=2)
+                if not blobs:
                     continue
 
-                px, py, conf = result
+                # Top-1 blob as primary detection
+                top = blobs[0]
+                px, py, conf = top["pixel_x"], top["pixel_y"], top["blob_sum"]
                 wx, wy = homography.pixel_to_world(px, py)
 
-                # Filter: skip detections outside court X range
                 if not (homography.court_x_min <= wx <= homography.court_x_max):
                     continue
+
+                # Build candidates list with world coords for MultiBlobMatcher
+                candidates = []
+                for b in blobs:
+                    bwx, bwy = homography.pixel_to_world(b["pixel_x"], b["pixel_y"])
+                    candidates.append({
+                        "x": bwx, "y": bwy,
+                        "world_x": bwx, "world_y": bwy,
+                        "pixel_x": b["pixel_x"], "pixel_y": b["pixel_y"],
+                        "blob_sum": b["blob_sum"],
+                    })
 
                 detection = {
                     "camera_name": name,
@@ -157,14 +169,16 @@ def run_pipeline(
                     "pixel_x": px,
                     "pixel_y": py,
                     "confidence": conf,
+                    "blob_sum": conf,
                     "timestamp": time.time(),
-                    "capture_ts": capture_ts_buffer[0],  # oldest frame = action time
+                    "capture_ts": capture_ts_buffer[0],
+                    "candidates": candidates,  # top-K for MultiBlobMatcher
                 }
 
                 try:
                     result_queue.put_nowait(detection)
                 except Exception:
-                    pass  # Queue full, skip
+                    pass
 
                 status_dict["last_detection_time"] = time.time()
 
