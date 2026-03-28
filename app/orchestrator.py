@@ -312,6 +312,8 @@ class Orchestrator:
 
                     try:
                         x, y, z = None, None, None
+                        _tri_smoothed = None
+                        _tri_bounce = None
 
                         # Try multi-blob matching first
                         if (live_matcher
@@ -410,6 +412,7 @@ class Orchestrator:
                                     })
                             # Smooth trajectory (matches offline SG filter)
                             smoothed_pt = self._smooth_latest(pt)
+                            _tri_smoothed = smoothed_pt
 
                             # Hybrid bounce detection (matches offline detect_bounces)
                             hbounce = self._hybrid_bounce.update(
@@ -419,6 +422,7 @@ class Orchestrator:
                             ebounce = self._enhanced_bounce.update(pt, cam_dets)
                             # Use hybrid bounce if available, fall back to enhanced
                             best_bounce = hbounce or ebounce
+                            _tri_bounce = best_bounce
                             rally_result = self._rally_sm.update(pt, best_bounce)
                             if best_bounce is not None:
                                 bd = best_bounce.to_dict()
@@ -438,11 +442,11 @@ class Orchestrator:
                             self._write_tracking_frame(
                                 d1, d2, cam_names,
                                 x, y, z,
-                                smoothed_pt, best_bounce,
+                                _tri_smoothed, _tri_bounce,
                                 now, capture_ts,
                             )
                     except Exception as e:
-                        logger.error("Triangulation error: %s", e)
+                        logger.error("Triangulation/analytics error: %s", e, exc_info=True)
 
             if not got_any:
                 time.sleep(0.005)
