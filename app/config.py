@@ -9,8 +9,9 @@ from pydantic import BaseModel
 
 class CameraConfig(BaseModel):
     rtsp_url: str
-    position_3d: list[float]
-    homography_key: str
+    position_3d: list[float] = [0, 0, 0]
+    homography_key: str = ""
+    record_only: bool = False
 
 
 class ModelConfig(BaseModel):

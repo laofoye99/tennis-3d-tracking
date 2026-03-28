@@ -166,8 +166,9 @@ class Orchestrator:
 
         cam_cfg = self.config.cameras[name]
         model_cfg = self.config.model
+        is_record_only = getattr(cam_cfg, 'record_only', False)
 
-        handle.result_queue = mp.Queue(maxsize=64)
+        handle.result_queue = mp.Queue(maxsize=64) if not is_record_only else None
         handle.frame_queue = mp.Queue(maxsize=128)
         handle.stop_event = mp.Event()
         handle.status_dict = self._manager.dict(
@@ -176,9 +177,28 @@ class Orchestrator:
                 "fps": 0.0,
                 "last_detection_time": None,
                 "error_msg": "",
-                "inference_enabled": self._inference_enabled,
+                "inference_enabled": not is_record_only and self._inference_enabled,
+                "record_only": is_record_only,
             }
         )
+
+        if is_record_only:
+            # Record-only camera: just stream video, no inference
+            from app.pipeline.camera_stream import CameraStream
+            handle.process = mp.Process(
+                target=self._run_record_only_pipeline,
+                kwargs={
+                    "name": name,
+                    "rtsp_url": cam_cfg.rtsp_url,
+                    "frame_queue": handle.frame_queue,
+                    "stop_event": handle.stop_event,
+                    "status_dict": handle.status_dict,
+                },
+                daemon=True,
+            )
+            handle.process.start()
+            logger.info("[%s] Record-only pipeline started (no inference)", name)
+            return
 
         handle.process = mp.Process(
             target=run_pipeline,
@@ -192,7 +212,7 @@ class Orchestrator:
                 "threshold": model_cfg.threshold,
                 "device": model_cfg.device,
                 "homography_path": self.config.homography.path,
-                "homography_key": cam_cfg.homography_key,
+                "homography_key": getattr(cam_cfg, 'homography_key', None),
                 "result_queue": handle.result_queue,
                 "frame_queue": handle.frame_queue,
                 "stop_event": handle.stop_event,
@@ -208,6 +228,41 @@ class Orchestrator:
             self._stopped.clear()
             self._consumer_thread = threading.Thread(target=self._consume_loop, daemon=True)
             self._consumer_thread.start()
+
+    @staticmethod
+    def _run_record_only_pipeline(name, rtsp_url, frame_queue, stop_event, status_dict):
+        """Minimal pipeline: read RTSP stream and push JPEG frames for recording/preview."""
+        import cv2, time, logging
+        log = logging.getLogger(name)
+        log.info("Record-only pipeline starting: %s", rtsp_url)
+        status_dict["state"] = "running"
+
+        while not stop_event.is_set():
+            try:
+                cap = cv2.VideoCapture(rtsp_url)
+                if not cap.isOpened():
+                    log.warning("Cannot open %s, retrying in 3s...", rtsp_url)
+                    time.sleep(3)
+                    continue
+                log.info("Connected to %s", rtsp_url)
+                while not stop_event.is_set():
+                    ret, frame = cap.read()
+                    if not ret:
+                        log.warning("Frame read failed, reconnecting...")
+                        break
+                    _, jpeg = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+                    if frame_queue is not None:
+                        try:
+                            frame_queue.put_nowait(jpeg.tobytes())
+                        except Exception:
+                            pass  # queue full, skip frame
+                cap.release()
+            except Exception as e:
+                log.error("Record-only error: %s", e)
+                time.sleep(3)
+
+        status_dict["state"] = "stopped"
+        log.info("Record-only pipeline stopped")
 
     def stop_pipeline(self, name: str) -> None:
         if name not in self._handles:
@@ -239,7 +294,8 @@ class Orchestrator:
         logger.info("Consumer thread started")
         self._triangulation_active = True
 
-        cam_names = list(self.config.cameras.keys())
+        # Only inference-capable cameras (exclude record_only like pickleball)
+        cam_names = [n for n, c in self.config.cameras.items() if not getattr(c, 'record_only', False)]
         cam_positions = self._get_camera_positions()
 
         # Initialize multi-blob matcher for live mode
@@ -276,6 +332,74 @@ class Orchestrator:
                             self._write_recording_frame(name, new_jpeg)
                     except Exception:
                         pass
+
+            # --- Per-camera pixel bounce + net crossing (independent of triangulation) ---
+            # Only process NEW detections (track last processed timestamp per camera)
+            if not hasattr(self, '_last_processed_ts'):
+                self._last_processed_ts = {}
+                self._frame_counter = 0
+                self._px_debug_count = 0
+            for cname in cam_names:
+                if cname not in self._latest_detections:
+                    continue
+                det = self._latest_detections[cname]
+                det_ts = det.get("timestamp", 0)
+                if det_ts <= self._last_processed_ts.get(cname, 0):
+                    continue  # already processed this detection
+                self._last_processed_ts[cname] = det_ts
+                self._frame_counter += 1
+                if self._frame_counter <= 10 or self._frame_counter % 50 == 0:
+                    logger.info("NEW_DET(%s) #%d: py=%.0f wx=%.2f wy=%.2f",
+                                cname, self._frame_counter,
+                                det.get("pixel_y", 0), det.get("x", 0), det.get("y", 0))
+                py = det.get("pixel_y")
+                wx = det.get("x")  # homography world_x
+                wy = det.get("y")  # homography world_y
+                fi = det.get("frame_index", 0)
+                now_t = time.time()
+
+                fi = self._frame_counter  # use monotonic counter as frame_index
+                if py is not None and wx is not None and self._bounce_detection_enabled:
+                    pxd = self._pixel_bounce_66 if "66" in cname else self._pixel_bounce_68
+                    pb = pxd.update({
+                        "pixel_y": py, "world_x": wx, "world_y": wy,
+                        "frame_index": fi, "timestamp": now_t, "camera": cname,
+                    })
+                    if pb is not None:
+                        pbd = pb.to_dict()
+                        with self._analytics_lock:
+                            self._live_bounces.append(pbd)
+                            if len(self._live_bounces) > 50:
+                                self._live_bounces = self._live_bounces[-50:]
+                        logger.info("PX_BOUNCE(%s) f%d: (%.2f, %.2f) %s",
+                                    cname, fi, pbd.get("x", 0), pbd.get("y", 0),
+                                    "IN" if pbd.get("in_court") else "OUT")
+
+                # Net crossing from single camera homography world_y
+                if wy is not None and self._net_crossing_enabled:
+                    key = f"_prev_wy_{cname}"
+                    prev = getattr(self, key, None)
+                    if prev is not None:
+                        prev_wy, prev_wx, prev_t = prev
+                        crossed = (prev_wy < -1.5 and wy > 1.5) or (prev_wy > 1.5 and wy < -1.5)
+                        dt = now_t - prev_t
+                        if crossed and 0.05 < dt < 3.0:
+                            dx = wx - prev_wx
+                            dy = wy - prev_wy
+                            spd = min(np.sqrt(dx**2 + dy**2) / dt * 3.6, 150)
+                            if spd >= 15:
+                                direction = "near_to_far" if wy > prev_wy else "far_to_near"
+                                crossing = {
+                                    "speed_kmh": round(spd, 1),
+                                    "direction": direction,
+                                    "timestamp": now_t,
+                                }
+                                self._latest_net_crossing = crossing
+                                self._net_crossings.append(crossing)
+                                if len(self._net_crossings) > 100:
+                                    self._net_crossings = self._net_crossings[-100:]
+                                logger.info("NET_CROSSING(%s) f%d: %.0f km/h %s", cname, fi, spd, direction)
+                    setattr(self, key, (wy, wx, now_t))
 
             # Attempt triangulation when both cameras have recent data.
             if len(cam_names) == 2 and all(c in self._latest_detections for c in cam_names):
