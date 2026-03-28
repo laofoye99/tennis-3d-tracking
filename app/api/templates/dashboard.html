@@ -1172,23 +1172,23 @@ function drawCourt(canvas,bounces,liveBall){
   const ctx=canvas.getContext('2d'),W=canvas.width,H=canvas.height;
   const margin=12,cw=W-2*margin,ch=H-2*margin;
   const sx=cw/COURT_W,sy=ch/COURT_L;
-  // cam68 perspective: near baseline (y=0) at top, far baseline at bottom
-  function tx(x){return margin+x*sx}
+  // cam68 perspective: near baseline (y=0) at top, X mirrored
+  function tx(x){return margin+(COURT_W-x)*sx}
   function ty(y){return margin+y*sy}
 
   ctx.clearRect(0,0,W,H);
   ctx.fillStyle='#1a2e1a';ctx.fillRect(0,0,W,H);
   ctx.fillStyle='#2d5a3d';
-  ctx.fillRect(tx(0),ty(0),COURT_W*sx,COURT_L*sy);
+  ctx.fillRect(tx(COURT_W),ty(0),COURT_W*sx,COURT_L*sy);
   ctx.fillStyle='#346845';
-  ctx.fillRect(tx(0),ty(SRV_N),COURT_W*sx,(SRV_F-SRV_N)*sy);
+  ctx.fillRect(tx(COURT_W),ty(SRV_N),COURT_W*sx,(SRV_F-SRV_N)*sy);
 
   ctx.strokeStyle='#fff';ctx.lineWidth=1.5;
-  ctx.strokeRect(tx(0),ty(0),COURT_W*sx,COURT_L*sy);
-  ctx.beginPath();ctx.moveTo(tx(0),ty(NET_Y));ctx.lineTo(tx(COURT_W),ty(NET_Y));
+  ctx.strokeRect(tx(COURT_W),ty(0),COURT_W*sx,COURT_L*sy);
+  ctx.beginPath();ctx.moveTo(tx(COURT_W),ty(NET_Y));ctx.lineTo(tx(0),ty(NET_Y));
   ctx.strokeStyle='#ccc';ctx.lineWidth=2.5;ctx.stroke();
   ctx.strokeStyle='#fff';ctx.lineWidth=1.5;
-  [SRV_N,SRV_F].forEach(y=>{ctx.beginPath();ctx.moveTo(tx(0),ty(y));ctx.lineTo(tx(COURT_W),ty(y));ctx.stroke()});
+  [SRV_N,SRV_F].forEach(y=>{ctx.beginPath();ctx.moveTo(tx(COURT_W),ty(y));ctx.lineTo(tx(0),ty(y));ctx.stroke()});
   ctx.beginPath();ctx.moveTo(tx(CX),ty(SRV_N));ctx.lineTo(tx(CX),ty(SRV_F));ctx.stroke();
   ctx.beginPath();ctx.moveTo(tx(CX),ty(0));ctx.lineTo(tx(CX),ty(0.4));ctx.stroke();
   ctx.beginPath();ctx.moveTo(tx(CX),ty(COURT_L));ctx.lineTo(tx(CX),ty(COURT_L-0.4));ctx.stroke();
@@ -1693,21 +1693,21 @@ function showRallyReplay(rally){
   const ctx=canvas.getContext('2d'),W=canvas.width,H=canvas.height;
   const margin=10,cw=W-2*margin,ch=H-2*margin;
   const sx=cw/COURT_W,sy=ch/COURT_L;
-  // cam68 perspective: near baseline (y=0) at top
-  function tx(x){return margin+x*sx}
+  // cam68 perspective: near baseline (y=0) at top, X mirrored
+  function tx(x){return margin+(COURT_W-x)*sx}
   function ty(y){return margin+y*sy}
 
   ctx.clearRect(0,0,W,H);
   // Court
   ctx.fillStyle='#1a2e1a';ctx.fillRect(0,0,W,H);
-  ctx.fillStyle='#2d5a3d';ctx.fillRect(tx(0),ty(0),COURT_W*sx,COURT_L*sy);
-  ctx.fillStyle='#346845';ctx.fillRect(tx(0),ty(SRV_N),COURT_W*sx,(SRV_F-SRV_N)*sy);
+  ctx.fillStyle='#2d5a3d';ctx.fillRect(tx(COURT_W),ty(0),COURT_W*sx,COURT_L*sy);
+  ctx.fillStyle='#346845';ctx.fillRect(tx(COURT_W),ty(SRV_N),COURT_W*sx,(SRV_F-SRV_N)*sy);
   ctx.strokeStyle='#fff';ctx.lineWidth=1;
-  ctx.strokeRect(tx(0),ty(0),COURT_W*sx,COURT_L*sy);
-  ctx.beginPath();ctx.moveTo(tx(0),ty(NET_Y));ctx.lineTo(tx(COURT_W),ty(NET_Y));
+  ctx.strokeRect(tx(COURT_W),ty(0),COURT_W*sx,COURT_L*sy);
+  ctx.beginPath();ctx.moveTo(tx(COURT_W),ty(NET_Y));ctx.lineTo(tx(0),ty(NET_Y));
   ctx.strokeStyle='#ccc';ctx.lineWidth=2;ctx.stroke();
   ctx.strokeStyle='#fff';ctx.lineWidth=1;
-  [SRV_N,SRV_F].forEach(y=>{ctx.beginPath();ctx.moveTo(tx(0),ty(y));ctx.lineTo(tx(COURT_W),ty(y));ctx.stroke()});
+  [SRV_N,SRV_F].forEach(y=>{ctx.beginPath();ctx.moveTo(tx(COURT_W),ty(y));ctx.lineTo(tx(0),ty(y));ctx.stroke()});
   ctx.beginPath();ctx.moveTo(tx(CX),ty(SRV_N));ctx.lineTo(tx(CX),ty(SRV_F));ctx.stroke();
 
   // Draw all bounces in this rally with connecting arrows
