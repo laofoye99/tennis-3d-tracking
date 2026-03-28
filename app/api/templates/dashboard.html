@@ -97,8 +97,7 @@ body{font-family:'Lato',sans-serif;background:var(--bg);color:var(--text);height
 .video-expand{position:absolute;bottom:12px;right:12px;width:34px;height:34px;border-radius:50%;display:flex;align-items:center;justify-content:center;cursor:pointer;backdrop-filter:blur(20px);background:rgba(255,255,255,.15)}
 .video-expand svg{width:16px;height:16px;fill:var(--text)}
 
-.map3d-panel{background:var(--card-bg);border-radius:6px;overflow:hidden;position:relative;min-height:0}
-#threejs-container canvas{width:100%!important;height:100%!important}
+.map3d-panel{background:var(--card-bg);border-radius:6px;overflow:hidden;position:relative;height:100%;min-height:0}
 .map3d-panel .panel-title{font-size:13px;font-weight:600;padding:6px 14px}
 .map3d-canvas{width:100%;height:calc(100% - 30px);display:flex;align-items:center;justify-content:center}
 .map3d-canvas canvas{height:100%;width:auto;max-width:100%;display:block}
@@ -118,7 +117,6 @@ body{font-family:'Lato',sans-serif;background:var(--bg);color:var(--text);height
 #video-container.mode-3,#video-container.mode-4{grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr}
 .vid-cell{position:relative;overflow:hidden;background:#111;cursor:pointer;min-height:0}
 .vid-cell img{width:100%;height:100%;object-fit:contain;display:block;background:#000}
-.vid-overlay{position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none}
 .vid-label{position:absolute;top:6px;left:8px;font-size:9px;font-weight:700;background:rgba(0,0,0,.6);color:#fff;padding:2px 8px;border-radius:3px;pointer-events:none;z-index:1}
 .vid-cell:hover .vid-label{color:var(--accent)}
 .vid-empty{display:flex;align-items:center;justify-content:center;color:var(--text-muted);font-size:14px;background:#181818;width:100%;height:100%}
@@ -431,6 +429,39 @@ body{font-family:'Lato',sans-serif;background:var(--bg);color:var(--text);height
                 <button class="btn-sm btn-stop-sm" onclick="ctrlPipeline('cam68','stop')">Stop</button>
               </div>
             </div>
+
+            <!-- Pickleball cameras (record-only) -->
+            <div class="cam-item" data-color="green" data-cam="cam67" onclick="toggleCamDetail(this);selectCamera('cam67')">
+              <span class="cam-name">3. Pickleball 1 <span class="state-badge stopped" id="badge-cam67">stopped</span></span>
+              <div class="cam-toggle" onclick="event.stopPropagation();ctrlPipeline('cam67','start')">
+                <span style="font-size:11px;opacity:.7">&#9654;</span>
+              </div>
+            </div>
+            <div class="cam-detail" id="detail-cam67">
+              <span class="info highlight" id="codec-cam67">record-only</span>
+              <span class="info">fps: <span id="fps-cam67">0</span></span>
+              <span class="info">1920x1080</span>
+              <div style="margin-top:6px">
+                <button class="btn-sm btn-start-sm" onclick="ctrlPipeline('cam67','start')">Start</button>
+                <button class="btn-sm btn-stop-sm" onclick="ctrlPipeline('cam67','stop')">Stop</button>
+              </div>
+            </div>
+
+            <div class="cam-item" data-color="orange" data-cam="cam65" onclick="toggleCamDetail(this);selectCamera('cam65')">
+              <span class="cam-name">4. Pickleball 2 <span class="state-badge stopped" id="badge-cam65">stopped</span></span>
+              <div class="cam-toggle" onclick="event.stopPropagation();ctrlPipeline('cam65','start')">
+                <span style="font-size:11px;opacity:.7">&#9654;</span>
+              </div>
+            </div>
+            <div class="cam-detail" id="detail-cam65">
+              <span class="info highlight" id="codec-cam65">record-only</span>
+              <span class="info">fps: <span id="fps-cam65">0</span></span>
+              <span class="info">1920x1080</span>
+              <div style="margin-top:6px">
+                <button class="btn-sm btn-start-sm" onclick="ctrlPipeline('cam65','start')">Start</button>
+                <button class="btn-sm btn-stop-sm" onclick="ctrlPipeline('cam65','stop')">Stop</button>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -449,15 +480,13 @@ body{font-family:'Lato',sans-serif;background:var(--bg);color:var(--text);height
         </div>
 
         <!-- Mini Map -->
-        <div class="minimap-section" style="position:relative">
+        <div class="minimap-section">
           <div class="section-title">Mini Map</div>
           <canvas id="minimap" width="300" height="500"></canvas>
           <div class="minimap-footer" style="flex-direction:column;align-items:stretch;gap:6px">
             <div style="display:flex;align-items:center;gap:8px">
               <span class="speed-label">球速:</span>
               <span class="speed-value" id="ball-speed">- km/h</span>
-              <span class="speed-label" style="margin-left:auto">延迟:</span>
-              <span class="speed-value" id="latency-display">- ms</span>
             </div>
             <div style="display:flex;align-items:center;gap:12px">
               <span class="speed-label">Rally:</span>
@@ -469,18 +498,6 @@ body{font-family:'Lato',sans-serif;background:var(--bg);color:var(--text);height
             </div>
           </div>
         </div>
-
-        <!-- Rally Replay Overlay -->
-        <div id="rally-replay" style="display:none;position:absolute;top:0;left:0;right:0;bottom:0;
-          background:rgba(0,0,0,0.85);z-index:50;border-radius:12px;
-          flex-direction:column;align-items:center;justify-content:center;padding:12px;cursor:pointer"
-          onclick="this.style.display='none'">
-          <div style="color:#ffd700;font-size:14px;font-weight:700;margin-bottom:8px">RALLY REPLAY</div>
-          <canvas id="rally-replay-canvas" width="260" height="440"></canvas>
-          <div id="rally-replay-info" style="color:#94a3b8;font-size:11px;margin-top:6px;text-align:center"></div>
-          <div style="color:#555;font-size:10px;margin-top:4px">click to dismiss</div>
-        </div>
-      </div>
       </div>
 
       <!-- Right top: Video -->
@@ -964,16 +981,7 @@ body{font-family:'Lato',sans-serif;background:var(--bg);color:var(--text);height
 // ============================================================
 // Dashboard JS (original)
 // ============================================================
-// Court constants — matches render_tracking_video.py draw_court() (verified offline)
-const SX_MIN=1.37,SX_MAX=6.86,SW=5.49,CL=23.77;
-const NET_Y=11.885,SRV_N=5.485,SRV_F=18.285,CX_LINE=(SX_MIN+SX_MAX)/2;
-// View area with padding so out-of-court bounces are visible
-const PAD_X=2.0,PAD_Y=3.0;
-const VIEW_X_MIN=SX_MIN-PAD_X,VIEW_X_MAX=SX_MAX+PAD_X;
-const VIEW_Y_MIN=0-PAD_Y,VIEW_Y_MAX=CL+PAD_Y;
-const VIEW_W=VIEW_X_MAX-VIEW_X_MIN,VIEW_H=VIEW_Y_MAX-VIEW_Y_MIN;
-// Legacy aliases (used by 3D map, Three.js etc)
-const COURT_W=8.23,COURT_L=23.77,CX=4.115;
+const COURT_W=8.23,COURT_L=23.78,NET_Y=0.0,SRV_N=-6.4,SRV_F=6.4,CX=0.0,HL=11.89,HW=4.115;
 
 const TEST_BALLS=[
   {label:'B1',x:6.809,y:1.816, z:0.177,color:'#4f88fa'},
@@ -1047,7 +1055,6 @@ function _renderSingle(cam){
   }
   c.innerHTML=`<div class="vid-cell">
     <img src="/api/camera/${cam}/stream" alt="${cam}">
-    <canvas class="vid-overlay" data-cam="${cam}"></canvas>
     <span class="vid-label">${cam}</span>
   </div>`;
   document.getElementById('active-cam').textContent=cam;
@@ -1064,142 +1071,51 @@ function _renderGrid(cams){
   c.innerHTML=cams.map(cam=>`
     <div class="vid-cell" onclick="selectCamera('${cam}');setViewMode('single')" title="点击全屏">
       <img src="/api/camera/${cam}/stream" alt="${cam}">
-      <canvas class="vid-overlay" data-cam="${cam}"></canvas>
       <span class="vid-label">${cam}</span>
     </div>`).join('');
   document.getElementById('active-cam').textContent=cams.join(' / ');
 }
 
-// ---- Bounce overlay on video (lightweight, no frame buffering) ----
-let _activeBounceOverlays=[]; // [{cam, px, py, startTs, duration, inCourt}]
-
-function _onNewBounce(b){
-  if(!b.cam_pixels) return;
-  for(const[cam,pxpy] of Object.entries(b.cam_pixels)){
-    _activeBounceOverlays.push({
-      cam, px:pxpy[0], py:pxpy[1],
-      startTs:Date.now(), duration:3000,
-      inCourt:b.in_court,
-      speedKmh:b.speed_kmh||null
-    });
-  }
-}
-
-function _renderBounceOverlays(){
-  const now=Date.now();
-  _activeBounceOverlays=_activeBounceOverlays.filter(o=>now-o.startTs<o.duration);
-  document.querySelectorAll('.vid-overlay').forEach(cv=>{
-    const cam=cv.dataset.cam;
-    const img=cv.previousElementSibling; // the <img>
-    if(!img) return;
-    // Match overlay canvas size to displayed image
-    const rect=img.getBoundingClientRect();
-    if(rect.width<10) return;
-    cv.width=rect.width; cv.height=rect.height;
-    const ctx=cv.getContext('2d');
-    ctx.clearRect(0,0,cv.width,cv.height);
-
-    for(const o of _activeBounceOverlays){
-      if(o.cam!==cam) continue;
-      const age=(now-o.startTs)/o.duration;
-      // Scale pixel coords (1920x1080 original) to overlay size
-      const sx=cv.width/1920, sy=cv.height/1080;
-      const cx=o.px*sx, cy=o.py*sy;
-      const r=18+age*20;
-      // Expanding circle
-      ctx.beginPath();ctx.arc(cx,cy,r,0,Math.PI*2);
-      const alpha=Math.max(0,1-age*0.9);
-      ctx.strokeStyle=o.inCourt?`rgba(76,175,80,${alpha})`:`rgba(244,67,54,${alpha})`;
-      ctx.lineWidth=3;ctx.stroke();
-      // Center dot (first 0.5s)
-      if(age<0.5){
-        ctx.beginPath();ctx.arc(cx,cy,5,0,Math.PI*2);
-        ctx.fillStyle=o.inCourt?'#4caf50':'#f44336';ctx.globalAlpha=alpha;ctx.fill();ctx.globalAlpha=1;
-      }
-      // Label
-      ctx.globalAlpha=alpha;ctx.fillStyle='#fff';ctx.font='bold 13px Lato';
-      let label=o.inCourt?'IN':'OUT';
-      if(o.speedKmh) label+=' '+Math.round(o.speedKmh)+'km/h';
-      ctx.fillText(label,cx+r+4,cy+5);
-      ctx.globalAlpha=1;
-    }
-  });
-  requestAnimationFrame(_renderBounceOverlays);
-}
-requestAnimationFrame(_renderBounceOverlays);
-
 // ---- Mini Map ----
-// Ball trail buffer for minimap
-let _ballTrail=[];
-const _TRAIL_MAX=30;
-
-function drawCourt(canvas,bounces,liveBall){
+function drawCourt(canvas,bounces){
   const ctx=canvas.getContext('2d'),W=canvas.width,H=canvas.height;
-  const margin=8,dw=W-2*margin,dh=H-2*margin;
-
-  // Coordinate transform — identical to render_tracking_video.py draw_court() w2c()
-  // with padding so out-of-court bounces are visible
-  function w2cx(wx){return margin+((wx-VIEW_X_MIN)/VIEW_W)*dw}
-  function w2cy(wy){return margin+(1.0-(wy-VIEW_Y_MIN)/VIEW_H)*dh}  // Y=0 at bottom
+  // V2 coords with padding so out-of-court bounces are visible
+  const PAD_X=2.0, PAD_Y=3.0;
+  const VW=2*HW+2*PAD_X, VH=2*HL+2*PAD_Y;  // view range in meters
+  const margin=4, dw=W-2*margin, dh=H-2*margin;
+  function tx(x){return margin+((HW+PAD_X-x)/VW)*dw}  // mirror X
+  function ty(y){return margin+((HL+PAD_Y-y)/VH)*dh}   // +y=top
 
   ctx.clearRect(0,0,W,H);
   ctx.fillStyle='#1a2e1a';ctx.fillRect(0,0,W,H);
-
-  // Court fill (singles area)
-  const cl=w2cx(SX_MIN),ct=w2cy(CL),cr=w2cx(SX_MAX),cb=w2cy(0);
   ctx.fillStyle='#2d5a3d';
-  ctx.fillRect(cl,ct,cr-cl,cb-ct);
-  // Service box fill
-  const st=w2cy(SRV_F),sb=w2cy(SRV_N);
+  ctx.fillRect(tx(HW),ty(HL),(2*HW/VW)*dw,(2*HL/VH)*dh);
   ctx.fillStyle='#346845';
-  ctx.fillRect(cl,st,cr-cl,sb-st);
+  ctx.fillRect(tx(HW),ty(SRV_F),(2*HW/VW)*dw,((SRV_F-SRV_N)/VH)*dh);
 
-  // Court outline
   ctx.strokeStyle='#fff';ctx.lineWidth=1.5;
-  ctx.strokeRect(cl,ct,cr-cl,cb-ct);
-  // Net
-  ctx.beginPath();ctx.moveTo(cl,w2cy(NET_Y));ctx.lineTo(cr,w2cy(NET_Y));
+  ctx.strokeRect(tx(HW),ty(HL),(2*HW/VW)*dw,(2*HL/VH)*dh);
+  ctx.beginPath();ctx.moveTo(tx(HW),ty(NET_Y));ctx.lineTo(tx(-HW),ty(NET_Y));
   ctx.strokeStyle='#ccc';ctx.lineWidth=2.5;ctx.stroke();
-  // Service lines
-  ctx.strokeStyle='#fff';ctx.lineWidth=1;
-  [SRV_N,SRV_F].forEach(y=>{ctx.beginPath();ctx.moveTo(cl,w2cy(y));ctx.lineTo(cr,w2cy(y));ctx.stroke()});
-  // Center service line
-  const cmx=w2cx(CX_LINE);
-  ctx.beginPath();ctx.moveTo(cmx,w2cy(SRV_N));ctx.lineTo(cmx,w2cy(SRV_F));ctx.stroke();
-  // Center marks
-  ctx.beginPath();ctx.moveTo(cmx,w2cy(0));ctx.lineTo(cmx,w2cy(0.4));ctx.stroke();
-  ctx.beginPath();ctx.moveTo(cmx,w2cy(CL));ctx.lineTo(cmx,w2cy(CL-0.4));ctx.stroke();
+  ctx.strokeStyle='#fff';ctx.lineWidth=1.5;
+  [SRV_N,SRV_F].forEach(y=>{ctx.beginPath();ctx.moveTo(tx(HW),ty(y));ctx.lineTo(tx(-HW),ty(y));ctx.stroke()});
+  ctx.beginPath();ctx.moveTo(tx(CX),ty(SRV_N));ctx.lineTo(tx(CX),ty(SRV_F));ctx.stroke();
+  ctx.beginPath();ctx.moveTo(tx(CX),ty(-HL));ctx.lineTo(tx(CX),ty(-HL+0.4));ctx.stroke();
+  ctx.beginPath();ctx.moveTo(tx(CX),ty(HL));ctx.lineTo(tx(CX),ty(HL-0.4));ctx.stroke();
 
-  // ── Live ball trail ──
-  if(liveBall && liveBall.x!=null && liveBall.y!=null){
-    _ballTrail.push({x:liveBall.x, y:liveBall.y, t:Date.now()});
-    if(_ballTrail.length>_TRAIL_MAX) _ballTrail.shift();
-  }
-  if(_ballTrail.length>1){
-    ctx.beginPath();
-    for(let i=0;i<_ballTrail.length;i++){
-      const p=_ballTrail[i];
-      if(i===0){ctx.moveTo(w2cx(p.x),w2cy(p.y))}
-      else{ctx.lineTo(w2cx(p.x),w2cy(p.y))}
-    }
-    ctx.strokeStyle='rgba(255,215,0,0.5)';ctx.lineWidth=2;ctx.stroke();
-    const last=_ballTrail[_ballTrail.length-1];
-    ctx.beginPath();ctx.arc(w2cx(last.x),w2cy(last.y),4,0,Math.PI*2);
-    ctx.fillStyle='#ffd700';ctx.fill();
-    ctx.strokeStyle='#fff';ctx.lineWidth=1;ctx.stroke();
-  }
-
-  // ── Bounce markers — latest 5, numbered 1=newest ──
+  // Draw bounce markers — show LATEST 5 only, numbered 1=newest
+  // Green = IN, Red = OUT, fading opacity for older points
   if(bounces&&bounces.length){
     const last5 = bounces.slice(-5);
     last5.forEach((b,i)=>{
-      const bx=w2cx(b.x),by=w2cy(b.y);
+      const bx=tx(b.x),by=ty(b.y);
       const isIn = b.in_court;
       const color = isIn ? '#4caf50' : '#f44336';
-      const age = last5.length - 1 - i;
-      const num = age + 1;
-      const r = age === 0 ? 8 : 6;
+      const age = last5.length - 1 - i;  // 0=newest, 4=oldest
+      const num = age + 1;  // 1=newest, 5=oldest
+      const r = age === 0 ? 8 : 6;  // newest is larger
 
+      // Fade older: newest=full, older=progressively dimmer
       ctx.globalAlpha = age === 0 ? 1.0 : age === 1 ? 0.8 : age === 2 ? 0.6 : age === 3 ? 0.4 : 0.25;
 
       if(isIn){
@@ -1211,23 +1127,18 @@ function drawCourt(canvas,bounces,liveBall){
         ctx.strokeStyle=color;ctx.lineWidth=2.5;ctx.stroke();
       }
 
-      // Number label
+      // Number label (1=newest)
       ctx.font='bold 9px Lato';ctx.fillStyle='#fff';
       ctx.textAlign='center';ctx.textBaseline='middle';
       ctx.fillText(num,bx,by+1);
       ctx.textAlign='start';ctx.textBaseline='alphabetic';
 
-      // IN/OUT + speed + delay label
+      // IN/OUT + speed label
       ctx.fillStyle=color;ctx.font='bold 8px Lato';
       ctx.fillText(isIn?'IN':'OUT',bx+r+4,by+3);
       if(b.speed_kmh){
         ctx.fillStyle='#ffd700';ctx.font='bold 9px Lato';
         ctx.fillText(Math.round(b.speed_kmh)+'km/h',bx+r+4,by+14);
-      }
-      // Show detection delay on newest bounce
-      if(age===0 && b.detect_delay){
-        ctx.fillStyle='#888';ctx.font='9px Lato';
-        ctx.fillText(b.detect_delay.toFixed(1)+'s ago',bx+r+4,by+24);
       }
 
       ctx.globalAlpha=1.0;
@@ -1254,12 +1165,13 @@ function draw3DMap(canvas,ball){
   ctx.fillText('X (m)',W/2,H-5);
   ctx.save();ctx.translate(10,H/2);ctx.rotate(-Math.PI/2);ctx.fillText('Y (m)',0,0);ctx.restore();
 
-  const sx=cw/12,sy=ch/26;
-  function px(x){return margin+(x+1.5)*sx}
-  function py(y){return margin+(y+1)*sy}  // cam68: y=0 at top
+  // V2: x=[-HW,+HW], y=[-HL,+HL]
+  const sx=cw/(2*HW+3),sy=ch/(2*HL+4);
+  function px(x){return margin+(x+HW+1.5)*sx}
+  function py(y){return H-margin-(y+HL+2)*sy}
   ctx.strokeStyle='rgba(255,255,255,.3)';ctx.lineWidth=1;
-  ctx.strokeRect(px(0),py(COURT_L),COURT_W*sx,-COURT_L*sy);
-  ctx.beginPath();ctx.moveTo(px(0),py(NET_Y));ctx.lineTo(px(COURT_W),py(NET_Y));ctx.strokeStyle='rgba(255,255,255,.5)';ctx.stroke();
+  ctx.strokeRect(px(-HW),py(HL),(2*HW)*sx,-(2*HL)*sy);
+  ctx.beginPath();ctx.moveTo(px(-HW),py(NET_Y));ctx.lineTo(px(HW),py(NET_Y));ctx.strokeStyle='rgba(255,255,255,.5)';ctx.stroke();
 
   const hScale=ch/10;
 
@@ -1282,7 +1194,7 @@ function draw3DMap(canvas,ball){
   });
 
   if(ball){
-    const bx=px(COURT_W-ball.x),by=py(ball.y);
+    const bx=px(-ball.x),by=py(ball.y);
     const hz=ball.z*hScale;
     ctx.beginPath();ctx.moveTo(bx,by);ctx.lineTo(bx,by-hz);
     ctx.strokeStyle='rgba(250,166,78,.6)';ctx.lineWidth=2;ctx.setLineDash([3,2]);ctx.stroke();ctx.setLineDash([]);
@@ -1290,7 +1202,7 @@ function draw3DMap(canvas,ball){
     ctx.beginPath();ctx.arc(bx,by-hz,5,0,Math.PI*2);ctx.fillStyle='#fa4e4e';ctx.fill();
     ctx.strokeStyle='#fff';ctx.lineWidth=1;ctx.stroke();
     ctx.fillStyle='#fff';ctx.font='bold 10px Lato';
-    ctx.fillText(`(${(COURT_W-ball.x).toFixed(1)}, ${ball.y.toFixed(1)}, ${ball.z.toFixed(1)})`,bx+10,by-hz);
+    ctx.fillText(`(${(-ball.x).toFixed(1)}, ${ball.y.toFixed(1)}, ${ball.z.toFixed(1)})`,bx+10,by-hz);
   }
 }
 
@@ -1309,9 +1221,8 @@ function init3DCourt(){
 
   // Camera: look from above and to the side
   _3dCamera=new THREE.PerspectiveCamera(45, container.clientWidth/Math.max(container.clientHeight,1), 0.1, 200);
-  // cam68 perspective: viewing from near side (y=-5) toward far side
-  _3dCamera.position.set(4.1, -8, 18);
-  _3dCamera.lookAt(4.1, 11.9, 0);
+  _3dCamera.position.set(0, -20, 18);
+  _3dCamera.lookAt(0, 0, 0);
 
   _3dRenderer=new THREE.WebGLRenderer({antialias:true});
   _3dRenderer.setSize(container.clientWidth, container.clientHeight);
@@ -1321,7 +1232,7 @@ function init3DCourt(){
   // OrbitControls
   if(THREE.OrbitControls){
     _3dControls=new THREE.OrbitControls(_3dCamera, _3dRenderer.domElement);
-    _3dControls.target.set(4.1, 11.9, 0);
+    _3dControls.target.set(0, 0, 0);
     _3dControls.enableDamping=true;
     _3dControls.dampingFactor=0.1;
     _3dControls.maxPolarAngle=Math.PI/2-0.05;
@@ -1335,54 +1246,54 @@ function init3DCourt(){
   _3dScene.add(dirLight);
 
   // Court surface (green)
-  const courtGeo=new THREE.PlaneGeometry(COURT_W, COURT_L);
+  const courtGeo=new THREE.PlaneGeometry(2*HW, 2*HL);
   const courtMat=new THREE.MeshLambertMaterial({color:0x2d6a3f, side:THREE.DoubleSide});
   const courtMesh=new THREE.Mesh(courtGeo, courtMat);
-  courtMesh.position.set(COURT_W/2, COURT_L/2, 0);
+  courtMesh.position.set(0, 0, 0);  // V2: center at origin
   _3dScene.add(courtMesh);
 
   // Surrounding ground
   const groundGeo=new THREE.PlaneGeometry(20, 35);
   const groundMat=new THREE.MeshLambertMaterial({color:0x1a2e1a, side:THREE.DoubleSide});
   const groundMesh=new THREE.Mesh(groundGeo, groundMat);
-  groundMesh.position.set(COURT_W/2, COURT_L/2, -0.01);
+  groundMesh.position.set(0, 0, -0.01);  // V2
   _3dScene.add(groundMesh);
 
-  // Court lines (white)
+  // Court lines (white) — V2: x=[-HW,+HW], y=[-HL,+HL]
   const lineMat=new THREE.LineBasicMaterial({color:0xffffff, linewidth:1});
   function addLine(pts){
     const geo=new THREE.BufferGeometry().setFromPoints(pts.map(p=>new THREE.Vector3(p[0],p[1],0.01)));
     _3dScene.add(new THREE.Line(geo, lineMat));
   }
   // Outer rectangle (singles)
-  addLine([[0,0],[COURT_W,0],[COURT_W,COURT_L],[0,COURT_L],[0,0]]);
+  addLine([[-HW,-HL],[HW,-HL],[HW,HL],[-HW,HL],[-HW,-HL]]);
   // Net line
-  addLine([[0,NET_Y],[COURT_W,NET_Y]]);
+  addLine([[-HW,NET_Y],[HW,NET_Y]]);
   // Service lines
-  addLine([[0,SRV_N],[COURT_W,SRV_N]]);
-  addLine([[0,SRV_F],[COURT_W,SRV_F]]);
+  addLine([[-HW,SRV_N],[HW,SRV_N]]);
+  addLine([[-HW,SRV_F],[HW,SRV_F]]);
   // Center service line
   addLine([[CX,SRV_N],[CX,SRV_F]]);
   // Center marks
-  addLine([[CX,0],[CX,0.4]]);
-  addLine([[CX,COURT_L],[CX,COURT_L-0.4]]);
+  addLine([[CX,-HL],[CX,-HL+0.4]]);
+  addLine([[CX,HL],[CX,HL-0.4]]);
 
   // Net mesh (semi-transparent)
-  const netGeo=new THREE.PlaneGeometry(COURT_W+0.4, 0.914);
+  const netGeo=new THREE.PlaneGeometry(2*HW+0.4, 0.914);
   const netMat=new THREE.MeshBasicMaterial({color:0xcccccc, transparent:true, opacity:0.35, side:THREE.DoubleSide});
   const netMesh=new THREE.Mesh(netGeo, netMat);
-  netMesh.position.set(COURT_W/2, NET_Y, 0.914/2);
+  netMesh.position.set(0, NET_Y, 0.914/2);  // V2
   netMesh.rotation.x=Math.PI/2;
   _3dScene.add(netMesh);
   // Net top line (cable)
   const netTopGeo=new THREE.BufferGeometry().setFromPoints([
-    new THREE.Vector3(-0.2, NET_Y, 0.914+0.03),
-    new THREE.Vector3(COURT_W+0.2, NET_Y, 0.914+0.03)
+    new THREE.Vector3(-HW-0.2, NET_Y, 0.914+0.03),
+    new THREE.Vector3(HW+0.2, NET_Y, 0.914+0.03)
   ]);
   _3dScene.add(new THREE.Line(netTopGeo, new THREE.LineBasicMaterial({color:0xffffff})));
   // Net posts (vertical boxes)
   const postMat=new THREE.MeshLambertMaterial({color:0x888888});
-  [-0.2, COURT_W+0.2].forEach(x=>{
+  [-HW-0.2, HW+0.2].forEach(x=>{
     const p=new THREE.Mesh(new THREE.BoxGeometry(0.08,0.08,1.07), postMat);
     p.position.set(x, NET_Y, 1.07/2);
     _3dScene.add(p);
@@ -1437,10 +1348,10 @@ function update3DCourt(ball, bounces){
   // Update ball position
   if(ball){
     _3dBallMesh.visible=true;
-    _3dBallMesh.position.set(COURT_W-ball.x, ball.y, ball.z);
+    _3dBallMesh.position.set(-ball.x, ball.y, ball.z);
 
     // Add to trail
-    _3dTrailPoints.push(new THREE.Vector3(COURT_W-ball.x, ball.y, ball.z));
+    _3dTrailPoints.push(new THREE.Vector3(-ball.x, ball.y, ball.z));
     if(_3dTrailPoints.length>MAX_TRAIL) _3dTrailPoints.shift();
 
     // Update trail geometry with color gradient (newest=bright, oldest=dim)
@@ -1471,7 +1382,7 @@ function update3DCourt(ball, bounces){
       const b=last5[i];
       const age=last5.length-1-i; // 0=newest
       mesh.visible=true;
-      mesh.position.set(COURT_W-b.x, b.y, 0.12);
+      mesh.position.set(-b.x, b.y, 0.12);
       // Scale: newest bigger
       const s=age===0?1.3:1.0;
       mesh.scale.set(s,s,s);
@@ -1652,88 +1563,6 @@ function _updateRecAVDuration(){
   if(txt)txt.textContent='🎤'+m+':'+ss;
 }
 
-// ── Rally replay ──
-let _lastRallyCount=0;
-let _lastBounceTs=0;  // timestamp-based dedup (not length-based)
-let _rallyReplayTimer=null;
-
-function showRallyReplay(rally){
-  const panel=document.getElementById('rally-replay');
-  const canvas=document.getElementById('rally-replay-canvas');
-  const info=document.getElementById('rally-replay-info');
-  if(!panel||!canvas) return;
-
-  const ctx=canvas.getContext('2d'),W=canvas.width,H=canvas.height;
-  const margin=6,dw=W-2*margin,dh=H-2*margin;
-
-  // Same coordinate transform as drawCourt / offline renderer
-  function w2cx(wx){return margin+((wx-VIEW_X_MIN)/VIEW_W)*dw}
-  function w2cy(wy){return margin+(1.0-(wy-VIEW_Y_MIN)/VIEW_H)*dh}
-
-  ctx.clearRect(0,0,W,H);
-  ctx.fillStyle='#1a2e1a';ctx.fillRect(0,0,W,H);
-  const cl=w2cx(SX_MIN),ct=w2cy(CL),cr=w2cx(SX_MAX),cb=w2cy(0);
-  ctx.fillStyle='#2d5a3d';ctx.fillRect(cl,ct,cr-cl,cb-ct);
-  const st=w2cy(SRV_F),sb=w2cy(SRV_N);
-  ctx.fillStyle='#346845';ctx.fillRect(cl,st,cr-cl,sb-st);
-  ctx.strokeStyle='#fff';ctx.lineWidth=1;
-  ctx.strokeRect(cl,ct,cr-cl,cb-ct);
-  ctx.beginPath();ctx.moveTo(cl,w2cy(NET_Y));ctx.lineTo(cr,w2cy(NET_Y));
-  ctx.strokeStyle='#ccc';ctx.lineWidth=2;ctx.stroke();
-  ctx.strokeStyle='#fff';ctx.lineWidth=1;
-  [SRV_N,SRV_F].forEach(y=>{ctx.beginPath();ctx.moveTo(cl,w2cy(y));ctx.lineTo(cr,w2cy(y));ctx.stroke()});
-  ctx.beginPath();ctx.moveTo(w2cx(CX_LINE),w2cy(SRV_N));ctx.lineTo(w2cx(CX_LINE),w2cy(SRV_F));ctx.stroke();
-
-  // Draw all bounces in this rally with connecting arrows
-  const bounces=rally.bounces||[];
-  if(bounces.length>0){
-    // Connecting lines
-    ctx.beginPath();
-    ctx.strokeStyle='rgba(255,215,0,0.4)';ctx.lineWidth=1.5;ctx.setLineDash([4,3]);
-    for(let i=0;i<bounces.length;i++){
-      const bx=w2cx(bounces[i].x),by=w2cy(bounces[i].y);
-      if(i===0) ctx.moveTo(bx,by); else ctx.lineTo(bx,by);
-    }
-    ctx.stroke();ctx.setLineDash([]);
-
-    // Bounce markers
-    bounces.forEach((b,i)=>{
-      const bx=w2cx(b.x),by=w2cy(b.y);
-      const isIn=b.in_court;
-      const color=isIn?'#4caf50':'#f44336';
-      const r=6;
-
-      ctx.beginPath();ctx.arc(bx,by,r,0,Math.PI*2);
-      if(isIn){ctx.fillStyle=color;ctx.fill();ctx.strokeStyle='#fff';ctx.lineWidth=1;ctx.stroke()}
-      else{ctx.strokeStyle=color;ctx.lineWidth=2;ctx.stroke()}
-
-      // Number
-      ctx.font='bold 8px Lato';ctx.fillStyle='#fff';ctx.textAlign='center';ctx.textBaseline='middle';
-      ctx.fillText(i+1,bx,by+1);
-      ctx.textAlign='start';ctx.textBaseline='alphabetic';
-
-      // Speed
-      if(b.speed_kmh){
-        ctx.fillStyle='#ffd700';ctx.font='bold 8px Lato';
-        ctx.fillText(Math.round(b.speed_kmh)+'km/h',bx+r+3,by+3);
-      }
-      // IN/OUT
-      ctx.fillStyle=color;ctx.font='bold 7px Lato';
-      ctx.fillText(isIn?'IN':'OUT',bx+r+3,by-5);
-    });
-  }
-
-  // Info text
-  const dur=rally.duration?rally.duration.toFixed(1)+'s':'?';
-  const strokes=rally.stroke_count||bounces.length;
-  const reason=rally.end_reason||'?';
-  info.textContent=`${strokes} strokes · ${dur} · ended: ${reason}`;
-
-  panel.style.display='flex';
-  if(_rallyReplayTimer) clearTimeout(_rallyReplayTimer);
-  _rallyReplayTimer=setTimeout(()=>{panel.style.display='none'},8000);
-}
-
 async function poll(){
   try{
     const r=await fetch('/api/status');
@@ -1752,33 +1581,9 @@ async function poll(){
     const recentBounces=analytics.recent_bounces||[];
     const rallyState=analytics.rally_state||{};
 
-    // Detect new bounces by timestamp (not length — rolling list can stay same size)
-    for(const b of recentBounces){
-      if(b.timestamp>_lastBounceTs){
-        _onNewBounce(b);
-        _lastBounceTs=b.timestamp;
-      }
-    }
-
     const b=d.latest_ball_3d;
-    drawCourt(document.getElementById('minimap'),recentBounces,b);
+    drawCourt(document.getElementById('minimap'),recentBounces);
     update3DCourt(b, recentBounces);
-
-    // Update ball speed from latest net crossing
-    try{
-      const ncr=await fetch('/api/net-crossing');
-      const nc=await ncr.json();
-      const speedEl=document.getElementById('ball-speed');
-      if(speedEl && nc.detected) speedEl.textContent=Math.round(nc.speed_kmh)+' km/h';
-    }catch(e){}
-
-    // Update latency display
-    try{
-      const lr=await fetch('/api/latency');
-      const lat=await lr.json();
-      const latEl=document.getElementById('latency-display');
-      if(latEl && lat.count>0) latEl.textContent=lat.p95_ms+'ms';
-    }catch(e){}
 
     // Update rally state display
     const stateEl=document.getElementById('rally-state');
@@ -1791,19 +1596,11 @@ async function poll(){
     }
     if(strokeEl) strokeEl.textContent=rallyState.stroke_count||0;
     if(bounceEl) bounceEl.textContent=recentBounces.length||0;
-
-    // Rally replay detection
-    const enhancedRallies=analytics.enhanced_rallies||[];
-    if(enhancedRallies.length>_lastRallyCount && enhancedRallies.length>0){
-      const latestRally=enhancedRallies[enhancedRallies.length-1];
-      showRallyReplay(latestRally);
-    }
-    _lastRallyCount=enhancedRallies.length;
   }catch(e){console.error(e)}
 }
 
 // Init
-drawCourt(document.getElementById('minimap'),[],null);
+drawCourt(document.getElementById('minimap'),[]);
 init3DCourt();
 setInterval(poll,500);
 
@@ -1891,8 +1688,8 @@ function vtBuildStatsSummary(stats){
     }
     if(t.landing_point){
       const lp=t.landing_point;
-      const inCourt=lp.x>=0&&lp.x<=COURT_W&&lp.y>=0&&lp.y<=COURT_L;
-      msg+='\nLanding: ('+(COURT_W-lp.x).toFixed(2)+', '+lp.y.toFixed(2)+') '+(inCourt?'IN':'OUT');
+      const inCourt=lp.x>=-HW&&lp.x<=HW&&lp.y>=-HL&&lp.y<=HL;
+      msg+='\nLanding: ('+(-lp.x).toFixed(2)+', '+lp.y.toFixed(2)+') '+(inCourt?'IN':'OUT');
     }
     if(t.strokes&&t.strokes.length>0){
       msg+='\nStrokes: '+t.strokes.length+' ('+t.n_bounces+' bounces)';
@@ -1900,7 +1697,7 @@ function vtBuildStatsSummary(stats){
         msg+='\n  S'+(i+1)+': '+s.speed_kmh.toFixed(0)+'km/h';
         if(s.landing_point){
           const lp=s.landing_point;
-          const inC=lp.x>=0&&lp.x<=COURT_W&&lp.y>=0&&lp.y<=COURT_L;
+          const inC=lp.x>=-HW&&lp.x<=HW&&lp.y>=-HL&&lp.y<=HL;
           msg+=' → '+(inC?'IN':'OUT');
         }
       });
@@ -1927,8 +1724,8 @@ function vtUpdatePlaybackStats(){
   const ctx=canvas.getContext('2d');
   const W=canvas.width, H=canvas.height;
   const pad=8, cw=W-2*pad, ch=H-2*pad;
-  const sx=cw/COURT_W, sy=ch/COURT_L;
-  function mx(x){return pad+(COURT_W-x)*sx}  // mirror X
+  const sx=cw/(2*HW), sy=ch/(2*HL);
+  function mx(x){return pad+(HW-x)*sx}  // V2 mirror X
   function my(y){return H-pad-y*sy}
 
   ctx.clearRect(0,0,W,H);
@@ -1937,25 +1734,25 @@ function vtUpdatePlaybackStats(){
   ctx.fillStyle='#1a3a22';
   ctx.fillRect(0,0,W,H);
   ctx.fillStyle='#295e38';
-  ctx.fillRect(mx(COURT_W),my(COURT_L),COURT_W*sx,COURT_L*sy);
+  ctx.fillRect(mx(HW),my(HL),(2*HW)*sx,(2*HL)*sy);
   // Service boxes
   ctx.fillStyle='#2f6b40';
-  ctx.fillRect(mx(COURT_W),my(SRV_F),COURT_W*sx,(SRV_F-SRV_N)*sy);
+  ctx.fillRect(mx(HW),my(SRV_F),(2*HW)*sx,(SRV_F-SRV_N)*sy);
 
   // Court lines
   ctx.strokeStyle='rgba(255,255,255,.7)';ctx.lineWidth=1;
-  ctx.strokeRect(mx(COURT_W),my(COURT_L),COURT_W*sx,COURT_L*sy);
+  ctx.strokeRect(mx(HW),my(HL),(2*HW)*sx,(2*HL)*sy);
   // Net
-  ctx.beginPath();ctx.moveTo(mx(COURT_W),my(NET_Y));ctx.lineTo(mx(0),my(NET_Y));
+  ctx.beginPath();ctx.moveTo(mx(HW),my(NET_Y));ctx.lineTo(mx(-HW),my(NET_Y));
   ctx.strokeStyle='rgba(255,255,255,.85)';ctx.lineWidth=2;ctx.stroke();
   // Service lines
   ctx.strokeStyle='rgba(255,255,255,.6)';ctx.lineWidth=1;
-  [SRV_N,SRV_F].forEach(y=>{ctx.beginPath();ctx.moveTo(mx(COURT_W),my(y));ctx.lineTo(mx(0),my(y));ctx.stroke()});
+  [SRV_N,SRV_F].forEach(y=>{ctx.beginPath();ctx.moveTo(mx(HW),my(y));ctx.lineTo(mx(-HW),my(y));ctx.stroke()});
   // Center service line
   ctx.beginPath();ctx.moveTo(mx(CX),my(SRV_N));ctx.lineTo(mx(CX),my(SRV_F));ctx.stroke();
   // Center marks
-  ctx.beginPath();ctx.moveTo(mx(CX),my(0));ctx.lineTo(mx(CX),my(0.4));ctx.stroke();
-  ctx.beginPath();ctx.moveTo(mx(CX),my(COURT_L));ctx.lineTo(mx(CX),my(COURT_L-0.4));ctx.stroke();
+  ctx.beginPath();ctx.moveTo(mx(CX),my(-HL));ctx.lineTo(mx(CX),my(0.4));ctx.stroke();
+  ctx.beginPath();ctx.moveTo(mx(CX),my(HL));ctx.lineTo(mx(CX),my(HL-0.4));ctx.stroke();
 
   // --- Landing point(s) on minimap ---
   // Draw all stroke landing points if cycles detected, else single landing point
@@ -1972,7 +1769,7 @@ function vtUpdatePlaybackStats(){
   });
   uniqueLPs.forEach(lp=>{
     const lx=mx(lp.x),ly=my(lp.y);
-    const inCourt=lp.x>=0&&lp.x<=COURT_W&&lp.y>=0&&lp.y<=COURT_L;
+    const inCourt=lp.x>=-HW&&lp.x<=HW&&lp.y>=-HL&&lp.y<=HL;
     const color=inCourt?'#4caf50':'#f44336';
     // Outer ring
     ctx.beginPath();ctx.arc(lx,ly,8,0,Math.PI*2);
@@ -2025,7 +1822,7 @@ function vtUpdatePlaybackStats(){
 
   if(t.landing_point){
     const lp=t.landing_point;
-    const inCourt=lp.x>=0&&lp.x<=COURT_W&&lp.y>=0&&lp.y<=COURT_L;
+    const inCourt=lp.x>=-HW&&lp.x<=HW&&lp.y>=-HL&&lp.y<=HL;
     shotLabel=(inCourt?'IN':'OUT');
     if(t.net_crossing&&t.net_crossing.clears_net) shotLabel='Net Clear / '+shotLabel;
   }
@@ -2117,7 +1914,7 @@ function vtInit3D(){
   // (0,0) at top-left from cam68 view, x:0→8.23 (singles width), y:0→23.77 (length)
   // Net at y=11.885, service lines at y=5.485 and y=18.285
   // Three.js mapping: court_x → three_x, court_z(height) → three_y, court_y → three_z
-  const CX=4.115, CW=8.23, CL=23.77, NET_Y=11.885, SRV_N=5.485, SRV_F=18.285;
+  const CX=0.0, CW=8.23, CL=23.78, NET_Y=0.0, SRV_N=-6.4, SRV_F=6.4, HL=11.89, HW=4.115;
   // Doubles alley: 1.3715m per side
   const DW_HALF=1.3715, DX_MIN=-DW_HALF, DX_MAX=CW+DW_HALF;
 
@@ -2321,14 +2118,14 @@ function vtUpdate3DBalls(points, highlightIdx){
     const geom=isHighlight?bigGeom:smallGeom;
     const mat=new THREE.MeshBasicMaterial({color:isHighlight?0xffff00:color});
     const sphere=new THREE.Mesh(geom,mat);
-    sphere.position.set(COURT_W-p.x,p.z,p.y);
+    sphere.position.set(-p.x,p.z,p.y);
     _vt3dBallGroup.add(sphere);
   }
 
   // Step 4: Draw trajectory lines for valid segments
   const lineMat=new THREE.LineBasicMaterial({color:0xff6600});
   for(const seg of validSegs){
-    const lp=seg.map(idx=>new THREE.Vector3(COURT_W-points[idx].x,points[idx].z,points[idx].y));
+    const lp=seg.map(idx=>new THREE.Vector3(-points[idx].x,points[idx].z,points[idx].y));
     const lg=new THREE.BufferGeometry().setFromPoints(lp);
     _vt3dBallGroup.add(new THREE.Line(lg,lineMat));
   }
@@ -2347,14 +2144,14 @@ function vtUpdate3DBalls(points, highlightIdx){
         _vtLiveBounces.push({
           idx:idx, frame:pCur.frame_index,
           x:pCur.x, y:pCur.y, z:pCur.z,
-          type:(pCur.x>=0&&pCur.x<=COURT_W&&pCur.y>=0&&pCur.y<=COURT_L)?'IN':'OUT'
+          type:(pCur.x>=-HW&&pCur.x<=HW&&pCur.y>=-HL&&pCur.y<=HL)?'IN':'OUT'
         });
         // Draw landing marker: red ring on ground
         const ringGeom=new THREE.RingGeometry(0.15,0.25,16);
-        const ringMat=new THREE.MeshBasicMaterial({color:pCur.x>=0&&pCur.x<=COURT_W&&pCur.y>=0&&pCur.y<=COURT_L?0x00ff00:0xff0000, side:THREE.DoubleSide});
+        const ringMat=new THREE.MeshBasicMaterial({color:pCur.x>=-HW&&pCur.x<=HW&&pCur.y>=-HL&&pCur.y<=HL?0x00ff00:0xff0000, side:THREE.DoubleSide});
         const ring=new THREE.Mesh(ringGeom,ringMat);
         ring.rotation.x=-Math.PI/2;
-        ring.position.set(COURT_W-pCur.x,0.02,pCur.y);
+        ring.position.set(-pCur.x,0.02,pCur.y);
         _vt3dBallGroup.add(ring);
       }
     }
@@ -2366,7 +2163,7 @@ function vtDrawTrajectoryCurve(traj){
   const curve=traj.smooth_curve;
   if(!curve||!curve.length) return;
   // Draw smooth fitted trajectory as a thicker yellow line
-  const pts=curve.map(p=>new THREE.Vector3(COURT_W-p.x,p.z,p.y));
+  const pts=curve.map(p=>new THREE.Vector3(-p.x,p.z,p.y));
   const geom=new THREE.BufferGeometry().setFromPoints(pts);
   const mat=new THREE.LineBasicMaterial({color:0xffff00,linewidth:2});
   _vt3dBallGroup.add(new THREE.Line(geom,mat));
@@ -2376,7 +2173,7 @@ function vtDrawTrajectoryCurve(traj){
     const bounceGeom=new THREE.SphereGeometry(0.14,12,12);
     const bounceMat=new THREE.MeshBasicMaterial({color:0xff0000});
     const bounceSphere=new THREE.Mesh(bounceGeom,bounceMat);
-    bounceSphere.position.set(COURT_W-bp.x,bp.z,bp.y);
+    bounceSphere.position.set(-bp.x,bp.z,bp.y);
     _vt3dBallGroup.add(bounceSphere);
   }
   // Mark net crossing (green sphere + speed label)
@@ -2386,7 +2183,7 @@ function vtDrawTrajectoryCurve(traj){
     const netColor=nc.clears_net?0x00ff88:0xff4444;
     const netMat=new THREE.MeshBasicMaterial({color:netColor,transparent:true,opacity:0.7});
     const netSphere=new THREE.Mesh(netGeom,netMat);
-    netSphere.position.set(COURT_W-nc.x,nc.z,nc.y);
+    netSphere.position.set(-nc.x,nc.z,nc.y);
     _vt3dBallGroup.add(netSphere);
     // Speed label at net
     if(nc.speed_kmh){
@@ -2396,7 +2193,7 @@ function vtDrawTrajectoryCurve(traj){
       ctx.fillText(nc.speed_kmh.toFixed(0)+' km/h',4,20);
       const tex=new THREE.CanvasTexture(c);
       const spr=new THREE.Sprite(new THREE.SpriteMaterial({map:tex,transparent:true}));
-      spr.position.set(COURT_W-nc.x,nc.z+0.5,nc.y);
+      spr.position.set(-nc.x,nc.z+0.5,nc.y);
       spr.scale.set(2,0.5,1);
       _vt3dBallGroup.add(spr);
     }
@@ -2405,17 +2202,17 @@ function vtDrawTrajectoryCurve(traj){
   if(traj.landing_point){
     const lp=traj.landing_point;
     const landGeom=new THREE.SphereGeometry(0.12,6,6);
-    const inCourt=lp.x>=0&&lp.x<=COURT_W&&lp.y>=0&&lp.y<=COURT_L;
+    const inCourt=lp.x>=-HW&&lp.x<=HW&&lp.y>=-HL&&lp.y<=HL;
     const landMat=new THREE.MeshBasicMaterial({color:inCourt?0xffaa00:0xff4444});
     const landSphere=new THREE.Mesh(landGeom,landMat);
-    landSphere.position.set(COURT_W-lp.x,0.02,lp.y);
+    landSphere.position.set(-lp.x,0.02,lp.y);
     _vt3dBallGroup.add(landSphere);
     // Ring around landing point for visibility
     const ringGeom=new THREE.RingGeometry(0.2,0.3,16);
     const ringMat=new THREE.MeshBasicMaterial({color:inCourt?0xffaa00:0xff4444,side:THREE.DoubleSide});
     const ring=new THREE.Mesh(ringGeom,ringMat);
     ring.rotation.x=-Math.PI/2;
-    ring.position.set(COURT_W-lp.x,0.03,lp.y);
+    ring.position.set(-lp.x,0.03,lp.y);
     _vt3dBallGroup.add(ring);
     // Label
     const c=document.createElement('canvas');c.width=128;c.height=32;
@@ -2424,7 +2221,7 @@ function vtDrawTrajectoryCurve(traj){
     ctx.fillText(inCourt?'IN':'OUT',4,20);
     const tex=new THREE.CanvasTexture(c);
     const spr=new THREE.Sprite(new THREE.SpriteMaterial({map:tex,transparent:true}));
-    spr.position.set(COURT_W-lp.x,0.5,lp.y);
+    spr.position.set(-lp.x,0.5,lp.y);
     spr.scale.set(1.5,0.4,1);
     _vt3dBallGroup.add(spr);
   }
@@ -4205,7 +4002,7 @@ function vtRender3DTable(){
     }
     return `<tr onclick="vtSeekTo3D(${i})" data-idx="${i}">
       <td style="text-align:left">${frameId}</td>
-      <td style="text-align:right">${(COURT_W-p.x).toFixed(2)}</td>
+      <td style="text-align:right">${(-p.x).toFixed(2)}</td>
       <td style="text-align:right">${p.y.toFixed(2)}</td>
       <td style="text-align:right">${p.z.toFixed(2)}</td>
       ${extra}
@@ -4597,7 +4394,7 @@ function vtBuildTimelineMarkers(){
     m.className='pb-marker';
     m.style.left=pct+'%';
     m.style.background='#ff9800';
-    const inC=lp.x>=0&&lp.x<=COURT_W&&lp.y>=0&&lp.y<=COURT_L;
+    const inC=lp.x>=-HW&&lp.x<=HW&&lp.y>=-HL&&lp.y<=HL;
     m.dataset.tip='Landing '+(inC?'IN':'OUT');
     m.onclick=()=>{vtPlaybackPause();vtRenderPlaybackFrameAtTime(t)};
     container.appendChild(m);
@@ -4611,8 +4408,8 @@ function vtDrawPlaybackMinimapTime(time){
   const ctx=canvas.getContext('2d');
   const W=canvas.width, H=canvas.height;
   const pad=10, cw=W-2*pad, ch=H-2*pad;
-  const sx=cw/COURT_W, sy=ch/COURT_L;
-  function mx(x){return pad+(COURT_W-x)*sx}
+  const sx=cw/(2*HW), sy=ch/(2*HL);
+  function mx(x){return pad+(HW-x)*sx}  // V2
   function my(y){return H-pad-y*sy}
 
   ctx.clearRect(0,0,W,H);
@@ -4620,24 +4417,24 @@ function vtDrawPlaybackMinimapTime(time){
   // Court surface
   ctx.fillStyle='#1a3a22';ctx.fillRect(0,0,W,H);
   ctx.fillStyle='#295e38';
-  ctx.fillRect(mx(COURT_W),my(COURT_L),COURT_W*sx,COURT_L*sy);
+  ctx.fillRect(mx(HW),my(HL),(2*HW)*sx,(2*HL)*sy);
   ctx.fillStyle='#2f6b40';
-  ctx.fillRect(mx(COURT_W),my(SRV_F),COURT_W*sx,(SRV_F-SRV_N)*sy);
+  ctx.fillRect(mx(HW),my(SRV_F),(2*HW)*sx,(SRV_F-SRV_N)*sy);
 
   // Court lines
   ctx.strokeStyle='rgba(255,255,255,.7)';ctx.lineWidth=1;
-  ctx.strokeRect(mx(COURT_W),my(COURT_L),COURT_W*sx,COURT_L*sy);
+  ctx.strokeRect(mx(HW),my(HL),(2*HW)*sx,(2*HL)*sy);
   // Net
-  ctx.beginPath();ctx.moveTo(mx(COURT_W),my(NET_Y));ctx.lineTo(mx(0),my(NET_Y));
+  ctx.beginPath();ctx.moveTo(mx(HW),my(NET_Y));ctx.lineTo(mx(-HW),my(NET_Y));
   ctx.strokeStyle='rgba(255,255,255,.85)';ctx.lineWidth=2;ctx.stroke();
   // Service lines
   ctx.strokeStyle='rgba(255,255,255,.6)';ctx.lineWidth=1;
-  [SRV_N,SRV_F].forEach(y=>{ctx.beginPath();ctx.moveTo(mx(COURT_W),my(y));ctx.lineTo(mx(0),my(y));ctx.stroke()});
+  [SRV_N,SRV_F].forEach(y=>{ctx.beginPath();ctx.moveTo(mx(HW),my(y));ctx.lineTo(mx(-HW),my(y));ctx.stroke()});
   // Center service line
   ctx.beginPath();ctx.moveTo(mx(CX),my(SRV_N));ctx.lineTo(mx(CX),my(SRV_F));ctx.stroke();
   // Center marks
-  ctx.beginPath();ctx.moveTo(mx(CX),my(0));ctx.lineTo(mx(CX),my(0.4));ctx.stroke();
-  ctx.beginPath();ctx.moveTo(mx(CX),my(COURT_L));ctx.lineTo(mx(CX),my(COURT_L-0.4));ctx.stroke();
+  ctx.beginPath();ctx.moveTo(mx(CX),my(-HL));ctx.lineTo(mx(CX),my(0.4));ctx.stroke();
+  ctx.beginPath();ctx.moveTo(mx(CX),my(HL));ctx.lineTo(mx(CX),my(HL-0.4));ctx.stroke();
 
   // Find points up to current time
   const nPts=vtPointsUpToTime(time);
@@ -4697,7 +4494,7 @@ function vtDrawPlaybackMinimapTime(time){
     _vt3dPoints.forEach(p=>{const d=Math.hypot(p.x-lp.x,p.y-lp.y);if(d<bestD){bestD=d;nearestPt=p}});
     if(nearestPt&&nearestPt.t<=time+0.001){
       const lx=mx(lp.x),ly=my(lp.y);
-      const inCourt=lp.x>=0&&lp.x<=COURT_W&&lp.y>=0&&lp.y<=COURT_L;
+      const inCourt=lp.x>=-HW&&lp.x<=HW&&lp.y>=-HL&&lp.y<=HL;
       // Target circle
       ctx.beginPath();ctx.arc(lx,ly,10,0,Math.PI*2);
       ctx.strokeStyle=inCourt?'#4caf50':'#f44336';ctx.lineWidth=2;ctx.stroke();
@@ -4705,7 +4502,7 @@ function vtDrawPlaybackMinimapTime(time){
       ctx.fillStyle=inCourt?'#4caf50':'#f44336';ctx.fill();
       // Distance from nearest line
       const distBaseline=Math.min(lp.y, Math.abs(COURT_L-lp.y));
-      const distSideline=Math.min(lp.x, Math.abs(COURT_W-lp.x));
+      const distSideline=Math.min(lp.x, Math.abs(-lp.x));
       const distLine=Math.min(distBaseline,distSideline);
       ctx.font='bold 8px Lato';ctx.fillStyle='#fff';
       ctx.fillText((inCourt?'IN':'OUT')+' '+Math.round(distLine*100)+'cm',lx+13,ly+3);
@@ -4790,7 +4587,7 @@ function vtUpdatePerFrameStatsTime(time){
   const height=pt.z;
 
   // Position (mirrored X)
-  const posX=COURT_W-pt.x;
+  const posX=-pt.x;  // V2
   const posY=pt.y;
 
   // Rally info: find which rally we're in
@@ -4811,7 +4608,7 @@ function vtUpdatePerFrameStatsTime(time){
     }
     if(_vtTrajectory.landing_point){
       const lp=_vtTrajectory.landing_point;
-      const inC=lp.x>=0&&lp.x<=COURT_W&&lp.y>=0&&lp.y<=COURT_L;
+      const inC=lp.x>=-HW&&lp.x<=HW&&lp.y>=-HL&&lp.y<=HL;
       rallyLabel+=(rallyLabel?' / ':'')+(inC?'IN':'OUT');
     }
   }
@@ -4832,7 +4629,7 @@ function vtUpdatePerFrameStatsTime(time){
   if(totalBounces>0&&bounceCount>0){
     const lastBounce=_vtBatchBounces[bounceCount-1];
     const distBaseline=Math.min(lastBounce.y,Math.abs(COURT_L-lastBounce.y));
-    const distSideline=Math.min(lastBounce.x,Math.abs(COURT_W-lastBounce.x));
+    const distSideline=Math.min(lastBounce.x,Math.abs(HW-Math.abs(lastBounce.x)));
     const distLine=Math.min(distBaseline,distSideline);
     landingInfo=bounceCount+'/'+totalBounces+' ('+Math.round(distLine*100)+'cm)';
   } else {
