@@ -246,14 +246,16 @@ class Orchestrator:
         logger.info("Consumer thread started")
         self._triangulation_active = True
 
-        cam_names = list(self.config.cameras.keys())
+        # Only cameras with position_3d can do triangulation
         cam_positions = self._get_camera_positions()
+        cam_names = [n for n in self.config.cameras if n in cam_positions]
+        tri_cams = cam_names[:2]  # first 2 positioned cameras for triangulation
 
         # Initialize multi-blob matcher for live mode
         live_matcher = None
         if len(cam_names) == 2:
-            pos1 = cam_positions.get(cam_names[0])
-            pos2 = cam_positions.get(cam_names[1])
+            pos1 = cam_positions.get(tri_cams[0])
+            pos2 = cam_positions.get(tri_cams[1])
             if pos1 and pos2:
                 live_matcher = MultiBlobMatcher(pos1, pos2, valid_z_range=(0.0, 8.0))
 
@@ -284,17 +286,24 @@ class Orchestrator:
                     except Exception:
                         pass
 
-            # Attempt triangulation when both cameras have recent data.
-            if len(cam_names) == 2 and all(c in self._latest_detections for c in cam_names):
-                d1 = self._latest_detections[cam_names[0]]
-                d2 = self._latest_detections[cam_names[1]]
+            # Attempt triangulation when both positioned cameras have recent data.
+            if len(tri_cams) == 2 and all(c in self._latest_detections for c in tri_cams):
+                d1 = self._latest_detections[tri_cams[0]]
+                d2 = self._latest_detections[tri_cams[1]]
                 # Skip if we already triangulated this exact pair (by pixel coords)
                 pair_id = (d1.get("pixel_x"), d1.get("pixel_y"),
                            d2.get("pixel_x"), d2.get("pixel_y"))
+                dt_pair = abs(d1["timestamp"] - d2["timestamp"])
                 if pair_id == self._last_tri_pair:
                     pass  # already processed
-                elif abs(d1["timestamp"] - d2["timestamp"]) >= _MATCH_WINDOW:
-                    pass  # too far apart
+                elif dt_pair >= _MATCH_WINDOW:
+                    # Log first few skips to diagnose timing issues
+                    if not hasattr(self, '_dt_skip_count'):
+                        self._dt_skip_count = 0
+                    self._dt_skip_count += 1
+                    if self._dt_skip_count <= 5:
+                        logger.warning("Pair skipped: dt=%.3fs (>%.1fs), cam1_ts=%.3f cam2_ts=%.3f",
+                                       dt_pair, _MATCH_WINDOW, d1["timestamp"], d2["timestamp"])
                 else:
                     # --- Confidence filtering (top1_conf20) ---
                     blob_sum1 = d1.get("blob_sum", d1.get("confidence", 1.0))
@@ -328,8 +337,8 @@ class Orchestrator:
                             x, y, z = triangulate(
                                 (d1["x"], d1["y"]),
                                 (d2["x"], d2["y"]),
-                                cam_positions[cam_names[0]],
-                                cam_positions[cam_names[1]],
+                                cam_positions[tri_cams[0]],
+                                cam_positions[tri_cams[1]],
                             )
 
                         self._latest_3d = BallPosition3D(
@@ -385,7 +394,7 @@ class Orchestrator:
 
                         # Feed live analytics
                         cam_dets = {}
-                        for cname, det in [(cam_names[0], d1), (cam_names[1], d2)]:
+                        for cname, det in [(tri_cams[0], d1), (tri_cams[1], d2)]:
                             cam_dets[cname] = {
                                 "world_x": det.get("x"),
                                 "world_y": det.get("y"),
@@ -440,11 +449,14 @@ class Orchestrator:
                         # ── Write per-frame tracking data (JSONL) ──
                         if self._recording and self._data_file is not None:
                             self._write_tracking_frame(
-                                d1, d2, cam_names,
+                                d1, d2, tri_cams,
                                 x, y, z,
                                 _tri_smoothed, _tri_bounce,
                                 now, capture_ts,
                             )
+                            if self._data_frame_counter <= 3:
+                                logger.info("JSONL write #%d: 3d=%s", self._data_frame_counter,
+                                            "yes" if x is not None else "no")
                     except Exception as e:
                         logger.error("Triangulation/analytics error: %s", e, exc_info=True)
 
