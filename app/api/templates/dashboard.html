@@ -429,6 +429,39 @@ body{font-family:'Lato',sans-serif;background:var(--bg);color:var(--text);height
                 <button class="btn-sm btn-stop-sm" onclick="ctrlPipeline('cam68','stop')">Stop</button>
               </div>
             </div>
+
+            <!-- Pickleball cameras (record-only) -->
+            <div class="cam-item" data-color="green" data-cam="cam67" onclick="toggleCamDetail(this);selectCamera('cam67')">
+              <span class="cam-name">3. Pickleball 1 <span class="state-badge stopped" id="badge-cam67">stopped</span></span>
+              <div class="cam-toggle" onclick="event.stopPropagation();ctrlPipeline('cam67','start')">
+                <span style="font-size:11px;opacity:.7">&#9654;</span>
+              </div>
+            </div>
+            <div class="cam-detail" id="detail-cam67">
+              <span class="info highlight" id="codec-cam67">record-only</span>
+              <span class="info">fps: <span id="fps-cam67">0</span></span>
+              <span class="info">1920x1080</span>
+              <div style="margin-top:6px">
+                <button class="btn-sm btn-start-sm" onclick="ctrlPipeline('cam67','start')">Start</button>
+                <button class="btn-sm btn-stop-sm" onclick="ctrlPipeline('cam67','stop')">Stop</button>
+              </div>
+            </div>
+
+            <div class="cam-item" data-color="orange" data-cam="cam65" onclick="toggleCamDetail(this);selectCamera('cam65')">
+              <span class="cam-name">4. Pickleball 2 <span class="state-badge stopped" id="badge-cam65">stopped</span></span>
+              <div class="cam-toggle" onclick="event.stopPropagation();ctrlPipeline('cam65','start')">
+                <span style="font-size:11px;opacity:.7">&#9654;</span>
+              </div>
+            </div>
+            <div class="cam-detail" id="detail-cam65">
+              <span class="info highlight" id="codec-cam65">record-only</span>
+              <span class="info">fps: <span id="fps-cam65">0</span></span>
+              <span class="info">1920x1080</span>
+              <div style="margin-top:6px">
+                <button class="btn-sm btn-start-sm" onclick="ctrlPipeline('cam65','start')">Start</button>
+                <button class="btn-sm btn-stop-sm" onclick="ctrlPipeline('cam65','stop')">Stop</button>
+              </div>
+            </div>
           </div>
         </div>
 
