@@ -91,8 +91,8 @@ class Orchestrator:
 
         # Pixel bounce detectors (per camera, no 3D Z dependency)
         from app.analytics import PixelBounceDetector
-        self._pixel_bounce_66 = PixelBounceDetector(window_size=15, min_margin_px=25, cooldown_frames=12)
-        self._pixel_bounce_68 = PixelBounceDetector(window_size=15, min_margin_px=25, cooldown_frames=12)
+        self._pixel_bounce_66 = PixelBounceDetector(window_size=15, min_margin_px=40, cooldown_frames=25)
+        self._pixel_bounce_68 = PixelBounceDetector(window_size=15, min_margin_px=40, cooldown_frames=25)
         self._pixel_bounces: list[dict] = []
 
         # Robust net crossing tracking
@@ -367,13 +367,18 @@ class Orchestrator:
                     })
                     if pb is not None:
                         pbd = pb.to_dict()
-                        with self._analytics_lock:
-                            self._live_bounces.append(pbd)
-                            if len(self._live_bounces) > 50:
-                                self._live_bounces = self._live_bounces[-50:]
-                        logger.info("PX_BOUNCE(%s) f%d: (%.2f, %.2f) %s",
-                                    cname, fi, pbd.get("x", 0), pbd.get("y", 0),
-                                    "IN" if pbd.get("in_court") else "OUT")
+                        bx, by = pbd.get("x", 0), pbd.get("y", 0)
+                        # Court bounds filter: reject bounces far outside court
+                        if -6 <= bx <= 6 and -14 <= by <= 14:
+                            with self._analytics_lock:
+                                self._live_bounces.append(pbd)
+                                if len(self._live_bounces) > 50:
+                                    self._live_bounces = self._live_bounces[-50:]
+                            logger.info("PX_BOUNCE(%s) f%d: (%.2f, %.2f) %s",
+                                        cname, fi, bx, by,
+                                        "IN" if pbd.get("in_court") else "OUT")
+                        else:
+                            logger.debug("PX_BOUNCE rejected (out of bounds): (%.2f, %.2f)", bx, by)
 
                 # Net crossing from single camera homography world_y
                 if wy is not None and self._net_crossing_enabled:

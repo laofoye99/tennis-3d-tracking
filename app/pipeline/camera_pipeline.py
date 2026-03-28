@@ -76,9 +76,10 @@ def run_pipeline(
         log.info("Pipeline running")
 
         # Internal queue for passing frames to inference thread
-        infer_q: queue.Queue = queue.Queue(maxsize=2)
+        # maxsize=16: buffer up to 2 batches (16 frames) to absorb timing jitter
+        infer_q: queue.Queue = queue.Queue(maxsize=16)
 
-        # --- Inference thread (runs in background, never blocks preview) ---
+        # --- Inference thread (batch: process every frames_in frames) ---
         def inference_loop():
             frame_buffer: list = []
             fps_counter = 0
@@ -94,22 +95,21 @@ def run_pipeline(
 
                 frame_buffer.append(det_frame)
                 if len(frame_buffer) < frames_in:
-                    log.debug("Buffer: %d/%d frames", len(frame_buffer), frames_in)
                     continue
 
-                # Run inference
+                # Run inference on batch
                 try:
                     heatmaps = detector.infer(frame_buffer)
                     infer_count += 1
                     if infer_count <= 3 or infer_count % 50 == 0:
-                        log.info("Inference #%d: got %d heatmaps from %d frames",
+                        log.info("Inference #%d: %d heatmaps from %d frames",
                                  infer_count, len(heatmaps), len(frame_buffer))
                 except Exception as e:
                     log.error("Inference error: %s", e)
                     frame_buffer.clear()
                     continue
 
-                # Post-process
+                # Post-process all heatmaps
                 for i in range(min(frames_out, len(heatmaps))):
                     result = tracker.process_heatmap(heatmaps[i])
                     if result is None:
@@ -118,8 +118,9 @@ def run_pipeline(
                     det_count += 1
                     px, py, conf = result
                     wx, wy = homography.pixel_to_world(px, py)
-                    log.info("Detection #%d: px=(%.0f,%.0f) conf=%.1f world=(%.2f,%.2f)",
-                             det_count, px, py, conf, wx, wy)
+                    if det_count <= 5 or det_count % 50 == 0:
+                        log.info("Detection #%d: px=(%.0f,%.0f) conf=%.1f world=(%.2f,%.2f)",
+                                 det_count, px, py, conf, wx, wy)
 
                     if not (homography.court_x_min <= wx <= homography.court_x_max):
                         continue
@@ -132,13 +133,12 @@ def run_pipeline(
                         "pixel_y": py,
                         "confidence": conf,
                         "timestamp": time.time(),
+                        "frame_index": det_count,
                     }
-
                     try:
                         result_queue.put_nowait(detection)
                     except Exception:
                         pass
-
                     status_dict["last_detection_time"] = time.time()
 
                 fps_counter += frames_out

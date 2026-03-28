@@ -136,31 +136,57 @@ class TrackNetDetector:
                 logger.warning("CUDA not available, falling back to CPU")
             self.device = torch.device("cpu")
 
-        # Load model (author's original architecture: TrackNet(in_dim, out_dim))
+        # Load model — prefer ONNX if available (much faster on RTX 50xx)
         logger.info("Loading TrackNet model: %s (device=%s)", model_path, self.device)
         if bg_mode == "concat":
             in_dim = (frames_in + 1) * 3  # 27 for seq_len=8
         else:
             in_dim = frames_in * 3
-        self.model = TrackNet(in_dim=in_dim, out_dim=frames_in)
-        ckpt = torch.load(model_path, map_location="cpu", weights_only=False)
-        self.model.load_state_dict(ckpt["model"])
-        self.model.eval()
-        self.model.to(self.device)
+
+        onnx_path = model_path.replace('.pt', '.onnx')
+        self._use_onnx = False
+        self.model = None
+
+        import os
+        if os.path.exists(onnx_path):
+            try:
+                import onnxruntime as ort
+                providers = ['CUDAExecutionProvider', 'CPUExecutionProvider'] if device == 'cuda' else ['CPUExecutionProvider']
+                self._ort_session = ort.InferenceSession(onnx_path, providers=providers)
+                self._ort_input_name = self._ort_session.get_inputs()[0].name
+                self._use_onnx = True
+                actual = self._ort_session.get_providers()
+                logger.info("TrackNet using ONNX Runtime (%s): %s", actual[0], onnx_path)
+            except Exception as e:
+                logger.warning("ONNX Runtime failed, falling back to PyTorch: %s", e)
+
+        if not self._use_onnx:
+            # PyTorch fallback
+            self.model = TrackNet(in_dim=in_dim, out_dim=frames_in)
+            ckpt = torch.load(model_path, map_location="cpu", weights_only=False)
+            self.model.load_state_dict(ckpt["model"])
+            self.model.eval()
+            self.model.to(self.device)
 
         # Background (median) frame — (3, H, W) float32 in [0, 1]
         self._bg_frame: Optional[np.ndarray] = None
         self._video_median_computed = False
 
-        # Running median buffer for live camera use
+        # Running median buffer for live camera use (keep small for speed)
         self._bg_buffer: list[np.ndarray] = []
-        self._bg_max_frames: int = 50
+        self._bg_max_frames: int = 20  # smaller = faster median computation
 
-        n_params = sum(p.numel() for p in self.model.parameters())
-        logger.info(
-            "TrackNetDetector ready (CUDA=%s, params=%s, seq_len=%d, bg=%s)",
-            self.device.type == "cuda", f"{n_params:,}", frames_in, bg_mode,
-        )
+        if self.model is not None:
+            n_params = sum(p.numel() for p in self.model.parameters())
+            logger.info(
+                "TrackNetDetector ready (PyTorch, CUDA=%s, params=%s, seq_len=%d, bg=%s)",
+                self.device.type == "cuda", f"{n_params:,}", frames_in, bg_mode,
+            )
+        else:
+            logger.info(
+                "TrackNetDetector ready (ONNX Runtime, seq_len=%d, bg=%s)",
+                frames_in, bg_mode,
+            )
 
     def preprocess_frame(self, frame: np.ndarray) -> np.ndarray:
         """Resize, BGR→RGB, HWC→CHW, /255.  Returns float32 (3, H, W) in [0, 1].
@@ -230,7 +256,7 @@ class TrackNetDetector:
         if len(self._bg_buffer) > self._bg_max_frames:
             self._bg_buffer.pop(0)
         # Recompute median every 10 frames (or on first frame)
-        if self._bg_frame is None or len(self._bg_buffer) % 10 == 0:
+        if self._bg_frame is None or len(self._bg_buffer) % 20 == 0:
             self._bg_frame = np.median(self._bg_buffer, axis=0).astype(np.float32)
 
     def infer(self, frames: list[np.ndarray]) -> np.ndarray:
@@ -259,13 +285,17 @@ class TrackNetDetector:
 
         # Stack: ((seq_len+1)*3, H, W) for concat, (seq_len*3, H, W) otherwise
         stacked = np.concatenate(all_channels, axis=0)
-        input_tensor = torch.from_numpy(stacked[np.newaxis]).to(self.device)
 
-        with torch.no_grad():
-            output = self.model(input_tensor)  # (1, seq_len, H, W) — sigmoid included
-            output = output[0].cpu().numpy()   # (seq_len, H, W)
-
-        return output
+        if self._use_onnx:
+            input_np = stacked[np.newaxis].astype(np.float32)
+            outputs = self._ort_session.run(None, {self._ort_input_name: input_np})
+            return outputs[0][0]  # (seq_len, H, W)
+        else:
+            input_tensor = torch.from_numpy(stacked[np.newaxis]).to(self.device)
+            with torch.no_grad():
+                output = self.model(input_tensor)
+                output = output[0].cpu().numpy()
+            return output
 
 
 # ---------------------------------------------------------------------------
