@@ -47,7 +47,8 @@ def detect_bounces(trajectory, z_max=0.5, prominence=0.10, min_distance=5, smoot
 
     bounces = []
     for pi in peaks:
-        if zs_smooth[pi] <= z_max:
+        # z must be positive (z=0 means triangulation failed, not a real bounce)
+        if 0.02 < zs_smooth[pi] <= z_max:
             bx = float(trajectory[pi][1])
             by = float(trajectory[pi][2])
             bounces.append({

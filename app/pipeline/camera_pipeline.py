@@ -61,6 +61,9 @@ def run_pipeline(
                 model_path, input_size, frames_in, frames_out, device,
                 detector_type=detector_type,
             )
+            # Load per-camera static median background if available
+            if hasattr(detector, "load_static_median"):
+                detector.load_static_median(name)
             # MedianBGDetector returns blobs directly; no BallTracker needed.
             tracker = None
             if not getattr(detector, "returns_blobs", False):

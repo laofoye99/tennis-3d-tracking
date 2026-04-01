@@ -173,6 +173,9 @@ class TrackNetDetector:
         self._bg_frame: Optional[np.ndarray] = None
         self._video_median_computed = False
 
+        # Try loading pre-computed median from src/bg_median_{camera}.png
+        self._try_load_static_median()
+
         # Running median buffer for live camera use (keep small for speed)
         self._bg_buffer: list[np.ndarray] = []
         self._bg_max_frames: int = 20  # smaller = faster median computation
@@ -188,6 +191,41 @@ class TrackNetDetector:
                 "TrackNetDetector ready (ONNX Runtime, seq_len=%d, bg=%s)",
                 frames_in, bg_mode,
             )
+
+    def _try_load_static_median(self):
+        """Load pre-computed median background from src/bg_median_*.png if available.
+
+        Tries all matching files. In multi-camera setups, call
+        ``load_static_median(camera_name)`` after construction to load
+        the correct per-camera median.
+        """
+        import glob
+        for path in sorted(glob.glob("src/bg_median_*.png")):
+            self._load_median_file(path)
+            return  # load first match as default
+
+    def load_static_median(self, camera_name: str) -> bool:
+        """Load median for a specific camera: src/bg_median_{camera_name}.png"""
+        path = f"src/bg_median_{camera_name}.png"
+        return self._load_median_file(path)
+
+    def _load_median_file(self, path: str) -> bool:
+        import os
+        if not os.path.exists(path):
+            return False
+        try:
+            img = cv2.imread(path)
+            if img is None:
+                return False
+            img = cv2.resize(img, (self.input_w, self.input_h))
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            self._bg_frame = img.astype(np.float32).transpose(2, 0, 1) / 255.0
+            self._video_median_computed = True
+            logger.info("Loaded static median background: %s", path)
+            return True
+        except Exception as e:
+            logger.warning("Failed to load median from %s: %s", path, e)
+            return False
 
     def preprocess_frame(self, frame: np.ndarray) -> np.ndarray:
         """Resize, BGR→RGB, HWC→CHW, /255.  Returns float32 (3, H, W) in [0, 1].
