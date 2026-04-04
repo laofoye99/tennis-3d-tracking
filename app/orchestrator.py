@@ -387,10 +387,10 @@ class Orchestrator:
                 self._conf_history.append(avg_conf)
                 if len(self._conf_history) > 500:
                     self._conf_history = self._conf_history[-500:]
-                if len(self._conf_history) >= 50:
+                # Update threshold every 50 new pairs (not every pair)
+                if len(self._conf_history) >= 50 and len(self._conf_history) % 50 == 0:
                     sorted_h = sorted(self._conf_history)
-                    idx = int(len(sorted_h) * self._conf_percentile / 100)
-                    self._conf_threshold = sorted_h[idx]
+                    self._conf_threshold = sorted_h[int(len(sorted_h) * self._conf_percentile / 100)]
                 if avg_conf < self._conf_threshold:
                     continue
 
@@ -544,7 +544,7 @@ class Orchestrator:
                     logger.error("Triangulation/analytics error: %s", e, exc_info=True)
 
             if not got_any:
-                time.sleep(0.005)
+                time.sleep(0.001)  # 1ms — fast response to new detections
 
         self._triangulation_active = False
         logger.info("Consumer thread stopped")

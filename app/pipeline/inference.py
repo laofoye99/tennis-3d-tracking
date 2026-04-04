@@ -176,9 +176,12 @@ class TrackNetDetector:
         # Try loading pre-computed median from src/bg_median_{camera}.png
         self._try_load_static_median()
 
-        # Running median buffer for live camera use (keep small for speed)
+        # Running median: large buffer, background thread updates every 5 min
         self._bg_buffer: list[np.ndarray] = []
-        self._bg_max_frames: int = 20  # smaller = faster median computation
+        self._bg_max_frames: int = 200
+        self._bg_update_interval: int = 300  # seconds
+        self._bg_last_update: float = 0
+        self._bg_thread = None
 
         if self.model is not None:
             n_params = sum(p.numel() for p in self.model.parameters())
@@ -290,13 +293,35 @@ class TrackNetDetector:
         logger.info("Video median computed from %d sampled frames", len(frame_list))
 
     def _update_running_median(self, preprocessed: np.ndarray) -> None:
-        """Update running background median for live camera use."""
+        """Accumulate frames for background median. Recompute in background thread every N seconds."""
+        import time as _time
+        import threading
+
         self._bg_buffer.append(preprocessed)
         if len(self._bg_buffer) > self._bg_max_frames:
             self._bg_buffer.pop(0)
-        # Recompute median every 10 frames (or on first frame)
-        if self._bg_frame is None or len(self._bg_buffer) % 20 == 0:
+
+        now = _time.time()
+
+        # First call: compute immediately (need BG before first inference)
+        if self._bg_frame is None and len(self._bg_buffer) >= 2:
             self._bg_frame = np.median(self._bg_buffer, axis=0).astype(np.float32)
+            self._bg_last_update = now
+            return
+
+        # Periodic update in background thread (every _bg_update_interval seconds)
+        if now - self._bg_last_update >= self._bg_update_interval:
+            if self._bg_thread is None or not self._bg_thread.is_alive():
+                buf_copy = list(self._bg_buffer)  # snapshot
+                def _compute():
+                    if len(buf_copy) < 10:
+                        return
+                    new_bg = np.median(buf_copy, axis=0).astype(np.float32)
+                    self._bg_frame = new_bg  # atomic replace
+                    logger.info("Background median updated from %d frames", len(buf_copy))
+                self._bg_thread = threading.Thread(target=_compute, daemon=True)
+                self._bg_thread.start()
+                self._bg_last_update = now
 
     def infer(self, frames: list[np.ndarray]) -> np.ndarray:
         """Run inference on a list of BGR frames.

@@ -78,10 +78,48 @@ def run_pipeline(
 
         frame_buffer: list = []
         frame_id_buffer: list[int] = []
-        capture_ts_buffer: list[float] = []  # wall-clock per frame
+        capture_ts_buffer: list[float] = []
         last_frame_id = -1
         fps_counter = 0
         fps_time = time.time()
+
+        # JPEG encoding in background thread (don't block inference)
+        import threading, queue as _queue
+        _jpeg_q: _queue.Queue = _queue.Queue(maxsize=2)
+
+        def _jpeg_worker():
+            while not stop_event.is_set():
+                try:
+                    item = _jpeg_q.get(timeout=1.0)
+                except _queue.Empty:
+                    continue
+                if item is None:
+                    break
+                raw_frame, is_rec = item
+                try:
+                    h, w = raw_frame.shape[:2]
+                    if is_rec:
+                        _, jpeg = cv2.imencode(".jpg", raw_frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
+                        try:
+                            frame_queue.put(jpeg.tobytes(), timeout=0.5)
+                        except Exception:
+                            pass
+                    else:
+                        preview = cv2.resize(raw_frame, (960, int(h * 960 / w))) if w > 960 else raw_frame
+                        _, jpeg = cv2.imencode(".jpg", preview, [cv2.IMWRITE_JPEG_QUALITY, 75])
+                        # Replace latest preview (non-blocking)
+                        while not frame_queue.empty():
+                            try:
+                                frame_queue.get_nowait()
+                            except Exception:
+                                break
+                        frame_queue.put_nowait(jpeg.tobytes())
+                except Exception:
+                    pass
+
+        if frame_queue is not None:
+            _jpeg_thread = threading.Thread(target=_jpeg_worker, daemon=True)
+            _jpeg_thread.start()
 
         while not stop_event.is_set():
             frame, frame_id, ts = stream.read()
@@ -89,39 +127,21 @@ def run_pipeline(
                 time.sleep(0.002)
                 continue
             last_frame_id = frame_id
-            capture_ts = time.time()  # wall-clock at frame arrival
+            capture_ts = time.time()
 
-            # --- 向 frame_queue 放 JPEG（预览或录像）---
+            # One copy for inference (need to mask OSD). JPEG thread copies internally.
+            frame = frame.copy()
+
+            # Send to JPEG thread (non-blocking, thread does its own copy if needed)
             if frame_queue is not None:
                 is_recording = status_dict.get("recording_enabled", False)
                 if is_recording or frame_id % 4 == 0:
                     try:
-                        h, w = frame.shape[:2]
-                        if is_recording:
-                            # 录像模式：原画质，不缩放，JPEG quality 95
-                            _, jpeg = cv2.imencode(
-                                ".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 95]
-                            )
-                            try:
-                                frame_queue.put(jpeg.tobytes(), timeout=0.5)
-                            except Exception:
-                                pass  # 队列满超时丢帧
-                        else:
-                            # 预览模式：缩放到 960 宽，JPEG quality 75，只保留最新帧
-                            preview = cv2.resize(frame, (960, int(h * 960 / w))) if w > 960 else frame
-                            _, jpeg = cv2.imencode(
-                                ".jpg", preview, [cv2.IMWRITE_JPEG_QUALITY, 75]
-                            )
-                            while not frame_queue.empty():
-                                try:
-                                    frame_queue.get_nowait()
-                                except Exception:
-                                    break
-                            frame_queue.put_nowait(jpeg.tobytes())
-                    except Exception:
+                        _jpeg_q.put_nowait((frame, is_recording))
+                    except _queue.Full:
                         pass
 
-            # Mask out timestamp overlay (top-left corner) to avoid interfering with detection
+            # Mask OSD for inference only (after JPEG thread got clean ref)
             frame[0:41, 0:603] = 0
 
             frame_buffer.append(frame)
