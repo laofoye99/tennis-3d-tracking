@@ -15,13 +15,14 @@ class CameraConfig(BaseModel):
 
 
 class ModelConfig(BaseModel):
-    path: str
-    input_size: list[int]
-    frames_in: int
-    frames_out: int
-    threshold: float
-    device: str
+    path: str = ""  # not needed for median_bg
+    input_size: list[int] = [288, 512]
+    frames_in: int = 8
+    frames_out: int = 8
+    threshold: float = 0.3  # not needed for median_bg
+    device: str = "cuda"  # not needed for median_bg
     heatmap_mask: list[list[int]] = []
+    detector_type: str = "auto"  # "auto" | "median_bg"
 
 
 class ServerConfig(BaseModel):

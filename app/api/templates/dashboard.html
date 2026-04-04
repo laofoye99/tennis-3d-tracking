@@ -117,7 +117,8 @@ body{font-family:'Lato',sans-serif;background:var(--bg);color:var(--text);height
 #video-container.mode-3,#video-container.mode-4{grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr}
 .vid-cell{position:relative;overflow:hidden;background:#111;cursor:pointer;min-height:0}
 .vid-cell img{width:100%;height:100%;object-fit:contain;display:block;background:#000}
-.vid-label{position:absolute;top:6px;left:8px;font-size:9px;font-weight:700;background:rgba(0,0,0,.6);color:#fff;padding:2px 8px;border-radius:3px;pointer-events:none;z-index:1}
+.vid-cell canvas.ball-overlay{position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:1}
+.vid-label{position:absolute;top:6px;left:8px;font-size:9px;font-weight:700;background:rgba(0,0,0,.6);color:#fff;padding:2px 8px;border-radius:3px;pointer-events:none;z-index:2}
 .vid-cell:hover .vid-label{color:var(--accent)}
 .vid-empty{display:flex;align-items:center;justify-content:center;color:var(--text-muted);font-size:14px;background:#181818;width:100%;height:100%}
 
@@ -397,6 +398,10 @@ body{font-family:'Lato',sans-serif;background:var(--bg);color:var(--text);height
             <div class="filter">List <svg viewBox="0 0 24 24"><path d="M7 10l5 5 5-5z"/></svg></div>
             <div class="filter">All Cameras <svg viewBox="0 0 24 24"><path d="M7 10l5 5 5-5z"/></svg></div>
           </div>
+          <div style="display:flex;gap:4px;margin:4px 14px">
+            <button onclick="ctrlAllPipelines('start')" style="flex:1;font-size:10px;padding:3px 0;cursor:pointer;border-radius:3px;border:1px solid #4caf50;background:transparent;color:#4caf50">Start All</button>
+            <button onclick="ctrlAllPipelines('stop')" style="flex:1;font-size:10px;padding:3px 0;cursor:pointer;border-radius:3px;border:1px solid #f44336;background:transparent;color:#f44336">Stop All</button>
+          </div>
           <div class="cam-list">
             <div class="cam-item" data-color="blue" data-cam="cam66" onclick="toggleCamDetail(this);selectCamera('cam66')">
               <span class="cam-name">1. camera 1 <span class="state-badge stopped" id="badge-cam66">stopped</span></span>
@@ -496,6 +501,19 @@ body{font-family:'Lato',sans-serif;background:var(--bg);color:var(--text);height
               <span class="speed-label">Bounces:</span>
               <span id="bounce-count" class="speed-value">0</span>
             </div>
+            <!-- GT Overlay -->
+            <div id="gt-panel" style="display:none;margin-top:6px;padding:6px;background:rgba(0,0,0,0.4);border-radius:4px;font-size:10px">
+              <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">
+                <span style="color:#4fc3f7;font-weight:700">GT Overlay</span>
+                <button id="gt-load-btn" onclick="loadGT()" style="font-size:9px;padding:1px 8px;cursor:pointer;border-radius:3px;border:1px solid #4fc3f7;background:transparent;color:#4fc3f7">Load</button>
+                <button id="gt-clear-btn" onclick="clearGT()" style="font-size:9px;padding:1px 8px;cursor:pointer;border-radius:3px;border:1px solid #666;background:transparent;color:#999;display:none">Clear</button>
+              </div>
+              <div id="gt-stats" style="display:none;color:#aaa">
+                <div>GT: <span id="gt-total" style="color:#4fc3f7">0</span> bounces</div>
+                <div>Matched: <span id="gt-matched" style="color:#4caf50">0</span> / Missed: <span id="gt-missed" style="color:#f44336">0</span> / FP: <span id="gt-fp" style="color:#ff9800">0</span></div>
+                <div>Recall: <span id="gt-recall" style="color:#fff;font-weight:700">-</span> Precision: <span id="gt-precision" style="color:#fff;font-weight:700">-</span></div>
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -555,10 +573,11 @@ body{font-family:'Lato',sans-serif;background:var(--bg);color:var(--text);height
         </div>
       </div>
 
-      <!-- Right bottom: 3D Court (Three.js) -->
+      <!-- Right bottom: 3D Court (iframe) -->
       <div class="map3d-panel">
         <div class="panel-title">3D Court</div>
-        <div id="threejs-container" style="width:100%;height:calc(100% - 30px)"></div>
+        <iframe id="court3d-iframe" src="https://tennis.motionrivalry.com/tennisAi/"
+                style="width:100%;height:calc(100% - 30px);border:none;border-radius:4px"></iframe>
       </div>
     </div>
     </div><!-- /page-dashboard -->
@@ -984,9 +1003,9 @@ body{font-family:'Lato',sans-serif;background:var(--bg);color:var(--text);height
 const COURT_W=8.23,COURT_L=23.78,NET_Y=0.0,SRV_N=-6.4,SRV_F=6.4,CX=0.0,HL=11.89,HW=4.115;
 
 const TEST_BALLS=[
-  {label:'B1',x:6.809,y:1.816, z:0.177,color:'#4f88fa'},
-  {label:'B2',x:4.197,y:11.986,z:0.081,color:'#29cb6f'},
-  {label:'B3',x:1.760,y:18.326,z:0.074,color:'#fa9640'},
+  {label:'B1',x:2.694,y:-10.069, z:0.177,color:'#4f88fa'},
+  {label:'B2',x:0.082,y:0.101,z:0.081,color:'#29cb6f'},
+  {label:'B3',x:-2.355,y:6.441,z:0.074,color:'#fa9640'},
 ];
 
 // ---- Date/time ----
@@ -1054,7 +1073,8 @@ function _renderSingle(cam){
     return;
   }
   c.innerHTML=`<div class="vid-cell">
-    <img src="/api/camera/${cam}/stream" alt="${cam}">
+    <img src="/api/camera/${cam}/stream?delay=${_VIDEO_DELAY_S}" alt="${cam}">
+    <canvas class="ball-overlay" data-cam="${cam}"></canvas>
     <span class="vid-label">${cam}</span>
   </div>`;
   document.getElementById('active-cam').textContent=cam;
@@ -1070,51 +1090,198 @@ function _renderGrid(cams){
   c.className='mode-'+Math.min(n,4);
   c.innerHTML=cams.map(cam=>`
     <div class="vid-cell" onclick="selectCamera('${cam}');setViewMode('single')" title="点击全屏">
-      <img src="/api/camera/${cam}/stream" alt="${cam}">
+      <img src="/api/camera/${cam}/stream?delay=${_VIDEO_DELAY_S}" alt="${cam}">
+      <canvas class="ball-overlay" data-cam="${cam}"></canvas>
       <span class="vid-label">${cam}</span>
     </div>`).join('');
   document.getElementById('active-cam').textContent=cams.join(' / ');
 }
 
-// ---- Mini Map ----
-function drawCourt(canvas,bounces){
-  const ctx=canvas.getContext('2d'),W=canvas.width,H=canvas.height;
-  const margin=12,cw=W-2*margin,ch=H-2*margin;
-  const sx=cw/(2*HW),sy=ch/(2*HL);
-  // V2: x=[-HW,+HW], y=[-HL,+HL], origin at center
-  function tx(x){return margin+(HW-x)*sx}  // mirror X to match camera view
-  function ty(y){return margin+(HL-y)*sy}   // +y=top of court, -y=bottom
+// ---- Video Stream Delay ----
+// Server-side delay via ?delay=N parameter on MJPEG stream URL.
+// Matches pipeline latency so bounce events appear in sync with video.
+const _VIDEO_DELAY_S = 3;
 
+// ---- Ball Overlay on Camera Feed ----
+// Draws tracked ball position on the MJPEG stream overlay canvas.
+// Source frame is 1920x1080; canvas is CSS-scaled to fit vid-cell.
+const _FRAME_W=1920, _FRAME_H=1080;
+const _ballTrail={}; // cam -> [{x,y,t}]
+const _TRAIL_MAX=15;
+
+function drawBallOverlays(detections){
+  document.querySelectorAll('canvas.ball-overlay').forEach(cvs=>{
+    const cam=cvs.dataset.cam;
+    const cell=cvs.parentElement;
+    const img=cell.querySelector('img');
+    if(!img) return;
+
+    // Size canvas to match cell pixel size
+    const cw=cell.clientWidth, ch=cell.clientHeight;
+    if(cvs.width!==cw||cvs.height!==ch){cvs.width=cw;cvs.height=ch;}
+
+    const ctx=cvs.getContext('2d');
+    ctx.clearRect(0,0,cw,ch);
+
+    // Compute scale: img uses object-fit:contain inside cell
+    const imgRatio=_FRAME_W/_FRAME_H;
+    const cellRatio=cw/ch;
+    let sx,sy,ox,oy;
+    if(cellRatio>imgRatio){
+      // cell wider than image: letterbox left/right
+      sy=ch/_FRAME_H; sx=sy;
+      ox=(cw-_FRAME_W*sx)/2; oy=0;
+    } else {
+      // cell taller: letterbox top/bottom
+      sx=cw/_FRAME_W; sy=sx;
+      ox=0; oy=(ch-_FRAME_H*sy)/2;
+    }
+
+    function px(x){return ox+x*sx;}
+    function py(y){return oy+y*sy;}
+
+    const det=detections&&detections[cam];
+    if(!det||det.pixel_x==null) return;
+
+    const bx=px(det.pixel_x), by=py(det.pixel_y);
+
+    // Update trail
+    if(!_ballTrail[cam]) _ballTrail[cam]=[];
+    const trail=_ballTrail[cam];
+    trail.push({x:bx,y:by,t:Date.now()});
+    if(trail.length>_TRAIL_MAX) trail.shift();
+
+    // Draw trail (fading)
+    if(trail.length>1){
+      for(let i=1;i<trail.length;i++){
+        const alpha=i/trail.length*0.6;
+        const r=1+i/trail.length*2;
+        ctx.beginPath();ctx.arc(trail[i].x,trail[i].y,r,0,Math.PI*2);
+        ctx.fillStyle=`rgba(0,255,0,${alpha})`;ctx.fill();
+      }
+    }
+
+    // Draw ball marker — green circle + crosshair
+    ctx.beginPath();ctx.arc(bx,by,10,0,Math.PI*2);
+    ctx.strokeStyle='#0f0';ctx.lineWidth=2;ctx.stroke();
+    ctx.beginPath();ctx.arc(bx,by,3,0,Math.PI*2);
+    ctx.fillStyle='#0f0';ctx.fill();
+    // Crosshair
+    ctx.beginPath();ctx.moveTo(bx-15,by);ctx.lineTo(bx-6,by);ctx.stroke();
+    ctx.beginPath();ctx.moveTo(bx+6,by);ctx.lineTo(bx+15,by);ctx.stroke();
+    ctx.beginPath();ctx.moveTo(bx,by-15);ctx.lineTo(bx,by-6);ctx.stroke();
+    ctx.beginPath();ctx.moveTo(bx,by+6);ctx.lineTo(bx,by+15);ctx.stroke();
+  });
+}
+
+
+// ---- GT Overlay ----
+let _gtBounces = [];   // [{frame, x, y, z, in_court}]
+let _gtLoaded = false;
+const GT_MATCH_TOLERANCE = 1.5; // meters for position matching
+
+document.getElementById('gt-panel').style.display = 'block';
+
+async function loadGT() {
+  try {
+    const r = await fetch('/api/debug/load-gt', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'});
+    const d = await r.json();
+    _gtBounces = d.bounces || [];
+    _gtLoaded = true;
+    document.getElementById('gt-load-btn').style.display = 'none';
+    document.getElementById('gt-clear-btn').style.display = '';
+    document.getElementById('gt-stats').style.display = '';
+    document.getElementById('gt-total').textContent = _gtBounces.length;
+    updateGTStats([]);
+  } catch(e) { console.error('GT load failed:', e); }
+}
+
+function clearGT() {
+  _gtBounces = [];
+  _gtLoaded = false;
+  document.getElementById('gt-load-btn').style.display = '';
+  document.getElementById('gt-clear-btn').style.display = 'none';
+  document.getElementById('gt-stats').style.display = 'none';
+}
+
+function updateGTStats(liveBounces) {
+  if (!_gtLoaded) return;
+  // Match live bounces to GT by position proximity
+  const usedGt = new Set();
+  const usedLive = new Set();
+  let matched = 0;
+  for (let i = 0; i < liveBounces.length; i++) {
+    const lb = liveBounces[i];
+    let bestJ = -1, bestDist = GT_MATCH_TOLERANCE;
+    for (let j = 0; j < _gtBounces.length; j++) {
+      if (usedGt.has(j)) continue;
+      const gb = _gtBounces[j];
+      const d = Math.sqrt(Math.pow(lb.x - gb.x, 2) + Math.pow(lb.y - gb.y, 2));
+      if (d < bestDist) { bestDist = d; bestJ = j; }
+    }
+    if (bestJ >= 0) { usedGt.add(bestJ); usedLive.add(i); matched++; }
+  }
+  const missed = _gtBounces.length - matched;
+  const fp = liveBounces.length - matched;
+  const recall = _gtBounces.length ? (matched / _gtBounces.length) : 0;
+  const precision = liveBounces.length ? (matched / liveBounces.length) : 0;
+  document.getElementById('gt-matched').textContent = matched;
+  document.getElementById('gt-missed').textContent = missed;
+  document.getElementById('gt-fp').textContent = fp;
+  document.getElementById('gt-recall').textContent = (recall * 100).toFixed(1) + '%';
+  document.getElementById('gt-precision').textContent = (precision * 100).toFixed(1) + '%';
+  document.getElementById('gt-recall').style.color = recall >= 0.9 ? '#4caf50' : recall >= 0.5 ? '#ff9800' : '#f44336';
+}
+
+// ---- Mini Map ----
+function drawCourt(canvas, bounces){
+  const ctx=canvas.getContext('2d'),W=canvas.width,H=canvas.height;
+  // V2 coords with padding so out-of-court bounces are visible
+  const PAD_X=2.0, PAD_Y=3.0;
+  const VW=2*HW+2*PAD_X, VH=2*HL+2*PAD_Y;
+  const margin=4, dw=W-2*margin, dh=H-2*margin;
+  function tx(x){return margin+((HW+PAD_X+x)/VW)*dw}
+  function ty(y){return margin+((HL+PAD_Y-y)/VH)*dh}
+
+  const SHW=HW;  // singles = full court width for this project
   ctx.clearRect(0,0,W,H);
   ctx.fillStyle='#1a2e1a';ctx.fillRect(0,0,W,H);
+  // Doubles area (dim)
+  ctx.fillStyle='#243d24';
+  ctx.fillRect(tx(-HW),ty(HL),(2*HW/VW)*dw,(2*HL/VH)*dh);
+  // Singles area (brighter — this is the IN/OUT boundary)
   ctx.fillStyle='#2d5a3d';
-  ctx.fillRect(tx(HW),ty(HL),(2*HW)*sx,(2*HL)*sy);
+  ctx.fillRect(tx(-SHW),ty(HL),(2*SHW/VW)*dw,(2*HL/VH)*dh);
+  // Service boxes
   ctx.fillStyle='#346845';
-  ctx.fillRect(tx(HW),ty(SRV_F),(2*HW)*sx,(SRV_F-SRV_N)*sy);
+  ctx.fillRect(tx(-SHW),ty(SRV_F),(2*SHW/VW)*dw,((SRV_F-SRV_N)/VH)*dh);
 
+  // Doubles outline (thin)
+  ctx.strokeStyle='rgba(255,255,255,0.3)';ctx.lineWidth=0.5;
+  ctx.strokeRect(tx(-HW),ty(HL),(2*HW/VW)*dw,(2*HL/VH)*dh);
+  // Singles outline (bright — IN/OUT boundary)
   ctx.strokeStyle='#fff';ctx.lineWidth=1.5;
-  ctx.strokeRect(tx(HW),ty(HL),(2*HW)*sx,(2*HL)*sy);
-  ctx.beginPath();ctx.moveTo(tx(HW),ty(NET_Y));ctx.lineTo(tx(-HW),ty(NET_Y));
+  ctx.strokeRect(tx(-SHW),ty(HL),(2*SHW/VW)*dw,(2*HL/VH)*dh);
+  // Net
+  ctx.beginPath();ctx.moveTo(tx(-HW),ty(NET_Y));ctx.lineTo(tx(HW),ty(NET_Y));
   ctx.strokeStyle='#ccc';ctx.lineWidth=2.5;ctx.stroke();
+  // Service lines + center
   ctx.strokeStyle='#fff';ctx.lineWidth=1.5;
-  [SRV_N,SRV_F].forEach(y=>{ctx.beginPath();ctx.moveTo(tx(HW),ty(y));ctx.lineTo(tx(-HW),ty(y));ctx.stroke()});
+  [SRV_N,SRV_F].forEach(y=>{ctx.beginPath();ctx.moveTo(tx(-SHW),ty(y));ctx.lineTo(tx(SHW),ty(y));ctx.stroke()});
   ctx.beginPath();ctx.moveTo(tx(CX),ty(SRV_N));ctx.lineTo(tx(CX),ty(SRV_F));ctx.stroke();
   ctx.beginPath();ctx.moveTo(tx(CX),ty(-HL));ctx.lineTo(tx(CX),ty(-HL+0.4));ctx.stroke();
   ctx.beginPath();ctx.moveTo(tx(CX),ty(HL));ctx.lineTo(tx(CX),ty(HL-0.4));ctx.stroke();
 
-  // Draw bounce markers — show LATEST 5 only, numbered 1=newest
-  // Green = IN, Red = OUT, fading opacity for older points
+  // --- Bounce markers: LATEST 5, green=IN red=OUT ---
   if(bounces&&bounces.length){
     const last5 = bounces.slice(-5);
     last5.forEach((b,i)=>{
       const bx=tx(b.x),by=ty(b.y);
       const isIn = b.in_court;
       const color = isIn ? '#4caf50' : '#f44336';
-      const age = last5.length - 1 - i;  // 0=newest, 4=oldest
-      const num = age + 1;  // 1=newest, 5=oldest
-      const r = age === 0 ? 8 : 6;  // newest is larger
-
-      // Fade older: newest=full, older=progressively dimmer
+      const age = last5.length - 1 - i;
+      const num = age + 1;
+      const r = age === 0 ? 8 : 6;
       ctx.globalAlpha = age === 0 ? 1.0 : age === 1 ? 0.8 : age === 2 ? 0.6 : age === 3 ? 0.4 : 0.25;
 
       if(isIn){
@@ -1125,18 +1292,51 @@ function drawCourt(canvas,bounces){
         ctx.beginPath();ctx.arc(bx,by,r,0,Math.PI*2);
         ctx.strokeStyle=color;ctx.lineWidth=2.5;ctx.stroke();
       }
-
-      // Number label (1=newest)
       ctx.font='bold 9px Lato';ctx.fillStyle='#fff';
       ctx.textAlign='center';ctx.textBaseline='middle';
       ctx.fillText(num,bx,by+1);
       ctx.textAlign='start';ctx.textBaseline='alphabetic';
-
-      // IN/OUT label
       ctx.fillStyle=color;ctx.font='bold 8px Lato';
       ctx.fillText(isIn?'IN':'OUT',bx+r+4,by+3);
-
+      if(b.speed_kmh){
+        ctx.fillStyle='#ffd700';ctx.font='bold 9px Lato';
+        ctx.fillText(Math.round(b.speed_kmh)+'km/h',bx+r+4,by+14);
+      }
       ctx.globalAlpha=1.0;
+    });
+  }
+
+  // --- GT bounces: blue diamonds (drawn underneath live bounces) ---
+  if(_gtLoaded && _gtBounces.length){
+    _gtBounces.forEach((gb,i)=>{
+      const gx=tx(gb.x), gy=ty(gb.y);
+      const r=5;
+      // Check if matched by any live bounce
+      let isMatched = false;
+      if(bounces&&bounces.length){
+        isMatched = bounces.some(lb => {
+          const d = Math.sqrt(Math.pow(lb.x-gb.x,2)+Math.pow(lb.y-gb.y,2));
+          return d < GT_MATCH_TOLERANCE;
+        });
+      }
+      // Diamond shape
+      ctx.beginPath();
+      ctx.moveTo(gx, gy-r); ctx.lineTo(gx+r, gy);
+      ctx.lineTo(gx, gy+r); ctx.lineTo(gx-r, gy);
+      ctx.closePath();
+      if(isMatched){
+        ctx.fillStyle='rgba(76,175,80,0.5)'; ctx.fill();
+        ctx.strokeStyle='#4caf50';
+      } else {
+        ctx.fillStyle='rgba(79,195,247,0.3)'; ctx.fill();
+        ctx.strokeStyle='#4fc3f7';
+      }
+      ctx.lineWidth=1.5; ctx.stroke();
+      // GT label
+      ctx.font='7px Lato'; ctx.fillStyle='#4fc3f7';
+      ctx.textAlign='center';
+      ctx.fillText('G'+(i+1), gx, gy-r-3);
+      ctx.textAlign='start';
     });
   }
 
@@ -1189,7 +1389,7 @@ function draw3DMap(canvas,ball){
   });
 
   if(ball){
-    const bx=px(-ball.x),by=py(ball.y);
+    const bx=px(ball.x),by=py(ball.y);
     const hz=ball.z*hScale;
     ctx.beginPath();ctx.moveTo(bx,by);ctx.lineTo(bx,by-hz);
     ctx.strokeStyle='rgba(250,166,78,.6)';ctx.lineWidth=2;ctx.setLineDash([3,2]);ctx.stroke();ctx.setLineDash([]);
@@ -1197,7 +1397,7 @@ function draw3DMap(canvas,ball){
     ctx.beginPath();ctx.arc(bx,by-hz,5,0,Math.PI*2);ctx.fillStyle='#fa4e4e';ctx.fill();
     ctx.strokeStyle='#fff';ctx.lineWidth=1;ctx.stroke();
     ctx.fillStyle='#fff';ctx.font='bold 10px Lato';
-    ctx.fillText(`(${(-ball.x).toFixed(1)}, ${ball.y.toFixed(1)}, ${ball.z.toFixed(1)})`,bx+10,by-hz);
+    ctx.fillText(`(${ball.x.toFixed(1)}, ${ball.y.toFixed(1)}, ${ball.z.toFixed(1)})`,bx+10,by-hz);
   }
 }
 
@@ -1317,6 +1517,7 @@ function init3DCourt(){
     _3dBounceMeshes.push(bMesh);
   }
 
+
   // Responsive resize
   const ro=new ResizeObserver(()=>{
     const w=container.clientWidth, h=container.clientHeight;
@@ -1354,10 +1555,10 @@ function update3DCourt(ball, bounces){
       const geo=new THREE.BufferGeometry().setFromPoints(_3dTrailPoints);
       const colors=new Float32Array(_3dTrailPoints.length*3);
       _3dTrailPoints.forEach((p,i)=>{
-        const t=i/(_3dTrailPoints.length-1); // 0=oldest, 1=newest
-        colors[i*3]=1.0;       // R
-        colors[i*3+1]=0.5+t*0.5; // G (fade from orange to yellow)
-        colors[i*3+2]=t*0.3;  // B
+        const t=i/(_3dTrailPoints.length-1);
+        colors[i*3]=1.0;
+        colors[i*3+1]=0.5+t*0.5;
+        colors[i*3+2]=t*0.3;
       });
       geo.setAttribute('color',new THREE.BufferAttribute(colors,3));
       _3dTrailLine.geometry.dispose();
@@ -1375,16 +1576,13 @@ function update3DCourt(ball, bounces){
     const mesh=_3dBounceMeshes[i];
     if(i<last5.length){
       const b=last5[i];
-      const age=last5.length-1-i; // 0=newest
+      const age=last5.length-1-i;
       mesh.visible=true;
       mesh.position.set(-b.x, b.y, 0.12);
-      // Scale: newest bigger
       const s=age===0?1.3:1.0;
       mesh.scale.set(s,s,s);
-      // Color: green=IN, red=OUT
       const isIn=b.in_court;
       mesh.material.color.setHex(isIn?0x4caf50:0xf44336);
-      // Opacity fading
       mesh.material.opacity=age===0?1.0:age===1?0.8:age===2?0.6:age===3?0.4:0.25;
     } else {
       mesh.visible=false;
@@ -1395,6 +1593,9 @@ function update3DCourt(ball, bounces){
 // ---- API ----
 async function ctrlPipeline(name,action){
   try{await fetch(`/api/pipeline/${name}/${action}`,{method:'POST'})}catch(e){console.error(e)}
+}
+async function ctrlAllPipelines(action){
+  try{await fetch(`/api/pipeline/${action}-all`,{method:'POST'})}catch(e){console.error(e)}
 }
 
 async function toggleTrackBall(el){
@@ -1577,8 +1778,9 @@ async function poll(){
     const rallyState=analytics.rally_state||{};
 
     const b=d.latest_ball_3d;
+    const latestDets=d.latest_detections||null;
     drawCourt(document.getElementById('minimap'),recentBounces);
-    update3DCourt(b, recentBounces);
+    updateGTStats(recentBounces);
 
     // Update rally state display
     const stateEl=document.getElementById('rally-state');
@@ -1596,7 +1798,6 @@ async function poll(){
 
 // Init
 drawCourt(document.getElementById('minimap'),[]);
-init3DCourt();
 setInterval(poll,500);
 
 // Sync toggle states from server on load
@@ -1905,17 +2106,14 @@ function vtInit3D(){
   _vtScene=new THREE.Scene();
   _vtScene.background=new THREE.Color(0x1a1a2e);
 
-  // Court coordinate system (from homography_matrices.json):
-  // (0,0) at top-left from cam68 view, x:0→8.23 (singles width), y:0→23.77 (length)
-  // Net at y=11.885, service lines at y=5.485 and y=18.285
-  // Three.js mapping: court_x → three_x, court_z(height) → three_y, court_y → three_z
-  const CX=0.0, CW=8.23, CL=23.78, NET_Y=0.0, SRV_N=-6.4, SRV_F=6.4, HL=11.89, HW=4.115;
-  // Doubles alley: 1.3715m per side
-  const DW_HALF=1.3715, DX_MIN=-DW_HALF, DX_MAX=CW+DW_HALF;
+  // V2 coordinate system: origin at court center, net at y=0
+  // x: [-HW, +HW], y: [-HL, +HL], service lines at SRV_N/SRV_F
+  // Three.js mapping: V2_x → three_x (negated), V2_z(height) → three_y, V2_y → three_z
+  const DW_HALF=1.3715;
 
   _vtCamera3d=new THREE.PerspectiveCamera(50,W/H,0.1,200);
-  _vtCamera3d.position.set(CX+16,14,CL/2-12);
-  _vtCamera3d.lookAt(CX,0,CL/2);
+  _vtCamera3d.position.set(16,14,-12);
+  _vtCamera3d.lookAt(0,0,0);
 
   _vtRenderer=new THREE.WebGLRenderer({antialias:true});
   _vtRenderer.setSize(W,H);
@@ -1923,14 +2121,14 @@ function vtInit3D(){
   container.appendChild(_vtRenderer.domElement);
 
   _vtControls=new THREE.OrbitControls(_vtCamera3d,_vtRenderer.domElement);
-  _vtControls.target.set(CX,0.5,CL/2);
+  _vtControls.target.set(0,0.5,0);
   _vtControls.enableDamping=true;
   _vtControls.dampingFactor=0.1;
   _vtControls.update();
 
   _vtScene.add(new THREE.AmbientLight(0xffffff,0.8));
   const dirLight=new THREE.DirectionalLight(0xffffff,0.5);
-  dirLight.position.set(CX+10,20,CL/2);
+  dirLight.position.set(10,20,0);
   _vtScene.add(dirLight);
 
   // Ground
@@ -1938,78 +2136,78 @@ function vtInit3D(){
   const groundMat=new THREE.MeshBasicMaterial({color:0x1a2e1a,side:THREE.DoubleSide});
   const ground=new THREE.Mesh(groundGeom,groundMat);
   ground.rotation.x=-Math.PI/2;
-  ground.position.set(CX,-0.01,CL/2);
+  ground.position.set(0,-0.01,0);
   _vtScene.add(ground);
 
   // Court surface (doubles area)
-  const courtGeom=new THREE.PlaneGeometry(CW+2*DW_HALF,CL);
+  const courtGeom=new THREE.PlaneGeometry(2*HW+2*DW_HALF,2*HL);
   const courtMat=new THREE.MeshBasicMaterial({color:0x2d5a3d,side:THREE.DoubleSide});
   const courtMesh=new THREE.Mesh(courtGeom,courtMat);
   courtMesh.rotation.x=-Math.PI/2;
-  courtMesh.position.set(CX,0,CL/2);
+  courtMesh.position.set(0,0,0);
   _vtScene.add(courtMesh);
 
-  // Court lines
+  // Court lines — V2: x=[-HW,+HW], y=[-HL,+HL] mapped to three (x, 0.01, z)
   const positions=[];
   function seg(x1,z1,x2,z2){positions.push(x1,0.01,z1, x2,0.01,z2)}
   // Outer boundary (doubles)
-  seg(DX_MIN,0, DX_MAX,0);
-  seg(DX_MAX,0, DX_MAX,CL);
-  seg(DX_MAX,CL, DX_MIN,CL);
-  seg(DX_MIN,CL, DX_MIN,0);
+  seg(-HW-DW_HALF,-HL, HW+DW_HALF,-HL);
+  seg(HW+DW_HALF,-HL, HW+DW_HALF,HL);
+  seg(HW+DW_HALF,HL, -HW-DW_HALF,HL);
+  seg(-HW-DW_HALF,HL, -HW-DW_HALF,-HL);
   // Singles lines
-  seg(0,0, 0,CL);
-  seg(CW,0, CW,CL);
+  seg(-HW,-HL, -HW,HL);
+  seg(HW,-HL, HW,HL);
   // Service lines
-  seg(0,SRV_N, CW,SRV_N);
-  seg(0,SRV_F, CW,SRV_F);
+  seg(-HW,SRV_N, HW,SRV_N);
+  seg(-HW,SRV_F, HW,SRV_F);
   // Center service line
   seg(CX,SRV_N, CX,SRV_F);
   // Center marks
-  seg(CX,0, CX,0.4);
-  seg(CX,CL, CX,CL-0.4);
+  seg(CX,-HL, CX,-HL+0.4);
+  seg(CX,HL, CX,HL-0.4);
 
   const lineGeom=new THREE.BufferGeometry();
   lineGeom.setAttribute('position',new THREE.Float32BufferAttribute(positions,3));
   _vtScene.add(new THREE.LineSegments(lineGeom,new THREE.LineBasicMaterial({color:0xffffff})));
 
-  // Net (semi-transparent plane at y=NET_Y)
-  const netGeom=new THREE.PlaneGeometry(CW+2*DW_HALF,1.07);
+  // Net (semi-transparent plane at z=0 in V2)
+  const netGeom=new THREE.PlaneGeometry(2*HW+2*DW_HALF,1.07);
   const netMat=new THREE.MeshBasicMaterial({color:0x888888,side:THREE.DoubleSide,transparent:true,opacity:0.3});
   const netMesh=new THREE.Mesh(netGeom,netMat);
-  netMesh.position.set(CX,1.07/2,NET_Y);
+  netMesh.position.set(0,1.07/2,0);
   _vtScene.add(netMesh);
 
   // Net top line
   const ntGeom=new THREE.BufferGeometry().setFromPoints([
-    new THREE.Vector3(DX_MIN,1.07,NET_Y),new THREE.Vector3(DX_MAX,1.07,NET_Y)
+    new THREE.Vector3(-HW-DW_HALF,1.07,0),new THREE.Vector3(HW+DW_HALF,1.07,0)
   ]);
   _vtScene.add(new THREE.Line(ntGeom,new THREE.LineBasicMaterial({color:0x333333})));
 
   // Net posts
   const ppGeom=new THREE.BufferGeometry();
   ppGeom.setAttribute('position',new THREE.Float32BufferAttribute([
-    DX_MIN,0,NET_Y, DX_MIN,1.07,NET_Y, DX_MAX,0,NET_Y, DX_MAX,1.07,NET_Y
+    -HW-DW_HALF,0,0, -HW-DW_HALF,1.07,0, HW+DW_HALF,0,0, HW+DW_HALF,1.07,0
   ],3));
   _vtScene.add(new THREE.LineSegments(ppGeom,new THREE.LineBasicMaterial({color:0x666666})));
 
   // Grid
   const grid=new THREE.GridHelper(30,30,0x333333,0x222222);
-  grid.position.set(CX,-0.02,CL/2);
+  grid.position.set(0,-0.02,0);
   _vtScene.add(grid);
 
-  // Camera position markers (from config.yaml)
-  // cam66: [4.094, -5.21, 6.2], cam68: [4.115, 28.97, 5.2]
+  // Camera position markers — V2: cam66 at (0.165, 17.042, 6.217), cam68 at (0.211, -17.156, 5.286)
+  // Three.js mapping: V2_x→three_x (negated), V2_z→three_y, V2_y→three_z
   const camGeom=new THREE.ConeGeometry(0.3,0.6,4);
   const cam66Mat=new THREE.MeshBasicMaterial({color:0x4f88fa});
   const cam66Mesh=new THREE.Mesh(camGeom,cam66Mat);
-  cam66Mesh.position.set(4.094,6.2,-5.21);
+  cam66Mesh.position.set(-0.165,6.217,17.042);
   cam66Mesh.rotation.x=Math.PI;
   _vtScene.add(cam66Mesh);
 
   const cam68Mat=new THREE.MeshBasicMaterial({color:0xfa4e4e});
   const cam68Mesh=new THREE.Mesh(camGeom.clone(),cam68Mat);
-  cam68Mesh.position.set(4.115,5.2,28.97);
+  cam68Mesh.position.set(-0.211,5.286,-17.156);
   cam68Mesh.rotation.x=Math.PI;
   _vtScene.add(cam68Mesh);
 
@@ -2028,16 +2226,15 @@ function vtInit3D(){
     sprite.scale.set(2,0.5,1);
     return sprite;
   }
-  _vtScene.add(makeCamLabel('cam66','#4f88fa',new THREE.Vector3(4.094,6.2,-5.21)));
-  _vtScene.add(makeCamLabel('cam68','#fa4e4e',new THREE.Vector3(4.115,5.2,28.97)));
+  _vtScene.add(makeCamLabel('cam66','#4f88fa',new THREE.Vector3(-0.165,6.217,17.042)));
+  _vtScene.add(makeCamLabel('cam68','#fa4e4e',new THREE.Vector3(-0.211,5.286,-17.156)));
 
-  // Baseline labels to help orient the user
-  _vtScene.add(makeCamLabel('y=0','#88ff88',new THREE.Vector3(CX,0.5,0)));
-  _vtScene.add(makeCamLabel('y=23.77','#88ff88',new THREE.Vector3(CX,0.5,CL)));
-  // Side labels to disambiguate left/right (X axis)
-  // X axis is mirrored: world X=0 is physically the glass side, X=8.23 is curtain
-  _vtScene.add(makeCamLabel('玻璃','#ffaa44',new THREE.Vector3(-1,0.5,CL/2)));
-  _vtScene.add(makeCamLabel('窗帘','#ffaa44',new THREE.Vector3(CW+1,0.5,CL/2)));
+  // Baseline labels — V2 coords
+  _vtScene.add(makeCamLabel('y=-11.89 (near)','#88ff88',new THREE.Vector3(0,0.5,-HL)));
+  _vtScene.add(makeCamLabel('y=+11.89 (far)','#88ff88',new THREE.Vector3(0,0.5,HL)));
+  // Side labels
+  _vtScene.add(makeCamLabel('玻璃','#ffaa44',new THREE.Vector3(HW+1,0.5,0)));
+  _vtScene.add(makeCamLabel('窗帘','#ffaa44',new THREE.Vector3(-HW-1,0.5,0)));
 
   // Ball group
   _vt3dBallGroup=new THREE.Group();
@@ -2976,8 +3173,9 @@ let _vtLiveSSE=null;
 let _vtLiveDetections={};  // cam_name -> [detections]
 let _vtLiveMatches=[];     // [{frame_index, cam66:{x,y,...}, cam68:{x,y,...}, avgX, avgY}]
 let _vtLiveLastUpdate=0;
-const COURT_W_LIVE=8.23, COURT_L_LIVE=23.77, NET_Y_LIVE=11.885;
-const SINGLES_LEFT=1.37, SINGLES_RIGHT=6.86; // singles sidelines (8.23 - 2*1.37)
+// V2 coords: origin at court center, net at y=0
+const COURT_W_LIVE=2*HW, COURT_L_LIVE=2*HL, NET_Y_LIVE=0;
+const SINGLES_HW=HW; // singles = full court width for this project
 
 // Incremental analytics state
 let _vtLiveBounces=[];     // [{idx, x, y, type}] — detected bounce events
@@ -3713,24 +3911,24 @@ function vtDrawLiveMinimapScrub(idx,frame){
     ctx.clearRect(0,0,w,h);
     const pad=8;
     const courtW=w-2*pad,courtH=h-2*pad;
-    const scaleX=courtW/COURT_W_LIVE,scaleY=courtH/COURT_L_LIVE;
+    const scaleX=courtW/(2*HW),scaleY=courtH/(2*HL);
     const sc=Math.min(scaleX,scaleY);
-    const cw=COURT_W_LIVE*sc,ch=COURT_L_LIVE*sc;
+    const cw=2*HW*sc,ch=2*HL*sc;
     const ox=(w-cw)/2,oy=(h-ch)/2;
-    function toC(wx,wy){return{x:ox+(COURT_W_LIVE-wx)*sc,y:oy+(COURT_L_LIVE-wy)*sc};}
+    function toC(wx,wy){return{x:ox+(HW-wx)*sc,y:oy+(HL-wy)*sc};}
     // Court surface
     ctx.fillStyle='#1a3a1a';ctx.fillRect(ox,oy,cw,ch);
     ctx.strokeStyle='rgba(255,255,255,0.3)';ctx.lineWidth=1;
     ctx.strokeRect(ox,oy,cw,ch);
-    const si=1.37*sc;
-    ctx.strokeRect(ox+si,oy,cw-2*si,ch);
-    const sN=toC(0,6.4),sF=toC(0,17.37);
-    ctx.beginPath();ctx.moveTo(ox+si,sN.y);ctx.lineTo(ox+cw-si,sN.y);ctx.stroke();
-    ctx.beginPath();ctx.moveTo(ox+si,sF.y);ctx.lineTo(ox+cw-si,sF.y);ctx.stroke();
-    const cx=toC(COURT_W_LIVE/2,0);
-    ctx.beginPath();ctx.moveTo(cx.x,sN.y);ctx.lineTo(cx.x,sF.y);ctx.stroke();
+    const slL=toC(HW-1.37,0),slR=toC(-HW+1.37,0);
+    ctx.strokeRect(slL.x,oy,slR.x-slL.x,ch);
+    const sN=toC(0,SRV_N),sF=toC(0,SRV_F);
+    ctx.beginPath();ctx.moveTo(slL.x,sN.y);ctx.lineTo(slR.x,sN.y);ctx.stroke();
+    ctx.beginPath();ctx.moveTo(slL.x,sF.y);ctx.lineTo(slR.x,sF.y);ctx.stroke();
+    const cxP=toC(CX,0);
+    ctx.beginPath();ctx.moveTo(cxP.x,sN.y);ctx.lineTo(cxP.x,sF.y);ctx.stroke();
     ctx.strokeStyle='rgba(255,255,255,0.5)';ctx.lineWidth=2;
-    const netY=toC(0,NET_Y_LIVE).y;
+    const netY=toC(0,NET_Y).y;
     ctx.beginPath();ctx.moveTo(ox,netY);ctx.lineTo(ox+cw,netY);ctx.stroke();
     // Current ball position at scrub point
     if(idx>=0 && idx<_vtLiveMatches.length){
@@ -3893,34 +4091,37 @@ function vtDrawLiveMinimapOnCanvas(canvas){
   if(w<10||h<10) return;
   ctx.clearRect(0,0,w,h);
 
-  // Court layout (same as playback minimap)
+  // Court layout — V2 coords: origin at court center, net at y=0
   const pad=8;
   const courtW=w-2*pad, courtH=h-2*pad;
-  const scaleX=courtW/COURT_W_LIVE, scaleY=courtH/COURT_L_LIVE;
+  const scaleX=courtW/(2*HW), scaleY=courtH/(2*HL);
   const sc=Math.min(scaleX,scaleY);
-  const cw=COURT_W_LIVE*sc, ch=COURT_L_LIVE*sc;
+  const cw=2*HW*sc, ch=2*HL*sc;
   const ox=(w-cw)/2, oy=(h-ch)/2;
 
   function toC(wx,wy){
-    return {x:ox+(COURT_W_LIVE-wx)*sc, y:oy+(COURT_L_LIVE-wy)*sc};
+    return {x:ox+(HW-wx)*sc, y:oy+(HL-wy)*sc};
   }
 
   // Court surface
   ctx.fillStyle='#1a3a1a';
   ctx.fillRect(ox,oy,cw,ch);
-  // Court lines
+  // Court lines (doubles outer)
   ctx.strokeStyle='rgba(255,255,255,0.3)';ctx.lineWidth=1;
   ctx.strokeRect(ox,oy,cw,ch);
-  const si=1.37*sc;
-  ctx.strokeRect(ox+si,oy,cw-2*si,ch);
-  const sN=toC(0,6.4), sF=toC(0,17.37);
-  ctx.beginPath();ctx.moveTo(ox+si,sN.y);ctx.lineTo(ox+cw-si,sN.y);ctx.stroke();
-  ctx.beginPath();ctx.moveTo(ox+si,sF.y);ctx.lineTo(ox+cw-si,sF.y);ctx.stroke();
-  const cx=toC(COURT_W_LIVE/2,0);
-  ctx.beginPath();ctx.moveTo(cx.x,sN.y);ctx.lineTo(cx.x,sF.y);ctx.stroke();
+  // Singles lines
+  const slL=toC(HW-1.37,0), slR=toC(-HW+1.37,0);
+  ctx.strokeRect(slL.x,oy,slR.x-slL.x,ch);
+  // Service lines
+  const sN=toC(0,SRV_N), sF=toC(0,SRV_F);
+  ctx.beginPath();ctx.moveTo(slL.x,sN.y);ctx.lineTo(slR.x,sN.y);ctx.stroke();
+  ctx.beginPath();ctx.moveTo(slL.x,sF.y);ctx.lineTo(slR.x,sF.y);ctx.stroke();
+  // Center service line
+  const cxP=toC(CX,0);
+  ctx.beginPath();ctx.moveTo(cxP.x,sN.y);ctx.lineTo(cxP.x,sF.y);ctx.stroke();
   // Net
   ctx.strokeStyle='rgba(255,255,255,0.5)';ctx.lineWidth=2;
-  const netY=toC(0,NET_Y_LIVE).y;
+  const netY=toC(0,NET_Y).y;
   ctx.beginPath();ctx.moveTo(ox,netY);ctx.lineTo(ox+cw,netY);ctx.stroke();
 
   // Current ball position (small dot) — use smoothed position
@@ -3942,19 +4143,21 @@ function vtDrawLiveMinimapOnCanvas(canvas){
     ctx.beginPath();ctx.arc(p.x,p.y,5.5,0,Math.PI*2);ctx.stroke();
   }
 
-  // Bounce markers only (no trajectory — that's on 3D map)
-  _vtLiveBounces.forEach((b,i)=>{
+  // Bounce markers — only show bounces up to the latest processed frame
+  const latestFrame = mLen > 0 ? _vtLiveMatches[mLen-1].frame_index : -1;
+  let bNum=0;
+  _vtLiveBounces.forEach((b)=>{
+    if(b.frame > latestFrame) return;  // skip future bounces
+    bNum++;
     const p=toC(b.x,b.y);
     const color=b.type==='IN'?'#4caf50':'#f44336';
-    // Target circles
     ctx.strokeStyle=color;ctx.lineWidth=1.5;
     ctx.beginPath();ctx.arc(p.x,p.y,8,0,Math.PI*2);ctx.stroke();
     ctx.beginPath();ctx.arc(p.x,p.y,4,0,Math.PI*2);ctx.stroke();
     ctx.fillStyle=color;
     ctx.beginPath();ctx.arc(p.x,p.y,2,0,Math.PI*2);ctx.fill();
-    // Label
     ctx.font='bold 9px Lato';ctx.textAlign='center';
-    ctx.fillStyle='#fff';ctx.fillText('B'+(i+1),p.x,p.y-11);
+    ctx.fillStyle='#fff';ctx.fillText('B'+bNum,p.x,p.y-11);
     ctx.font='7px Lato';ctx.fillStyle=color;
     ctx.fillText(b.type,p.x,p.y+17);
   });

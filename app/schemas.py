@@ -57,3 +57,4 @@ class SystemStatus(BaseModel):
     triangulation_active: bool = False
     latest_ball_3d: Optional[BallPosition3D] = None
     analytics: Optional[dict] = None
+    latest_detections: Optional[dict] = None  # per-camera candidates for minimap

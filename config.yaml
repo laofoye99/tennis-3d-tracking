@@ -1,21 +1,21 @@
 calibration:
   path: src/camera_calibration.json
-  use_calibrated_positions: True
+  use_calibrated_positions: False
 cameras:
   cam66:
     homography_key: cam66
     position_3d:
-    - 0.165      # cam66 x: 偏右0.165m
-    - 17.042     # cam66 y: 远端底线后方 (y>0)
-    - 6.217      # cam66 z: 高度6.2m
+    - 0.165      # cam66 x
+    - -17.042    # cam66 y: 近端底线后方 (y<0)
+    - 6.217      # cam66 z
     rtsp_url: rtsp://localhost:8554/cam66
     # rtsp_url: rtsp://admin:motion168@192.168.1.66:554/Streaming/Channels/101
   cam68:
     homography_key: cam68
     position_3d:
-    - 0.211      # cam68 x: 偏右0.21m
-    - -17.156    # cam68 y: 近端底线后方 (y<0)
-    - 5.286      # cam68 z: 高度5.3m
+    - 0.211      # cam68 x
+    - 17.156     # cam68 y: 远端底线后方 (y>0)
+    - 5.286      # cam68 z
     rtsp_url: rtsp://localhost:8554/cam68
     # rtsp_url: rtsp://admin:motion168@192.168.1.68:554/Streaming/Channels/101
   # --- Pickleball court (separate court, record-only) ---
@@ -34,10 +34,12 @@ model:
   input_size:
   - 288
   - 512
-  path: model_weight/TrackNet_finetuned.pt # 
+  path: model_weight/TrackNet_finetuned.pt
   threshold: 0.3
   heatmap_mask:
   - [0, 0, 620, 40]
+  detector_type: auto
+  # detector_type: median_bg     # 切换时同时改 frames_in: 30, frames_out: 30
 blob_verifier:
   enabled: true
   model_path: model_weight/blob_verifier_yolo.pt

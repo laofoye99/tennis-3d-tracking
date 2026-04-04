@@ -26,21 +26,21 @@ logger = logging.getLogger(__name__)
 
 # Court dimensions (meters)
 DOUBLES_WIDTH = 8.23
-COURT_Y = 11.89  # V2: half court length
-NET_Y = 0.0  # V2: net at origin
+COURT_Y = 23.77
+NET_Y = 11.885
 NET_HEIGHT = 0.914
 
 # Singles court boundaries (labeled keypoints are on singles lines)
-SINGLES_X_MIN = -4.115  # V2
-SINGLES_X_MAX = 4.115  # V2
+SINGLES_X_MIN = 1.37
+SINGLES_X_MAX = 6.86
 COURT_X_MIN = SINGLES_X_MIN
 COURT_X_MAX = SINGLES_X_MAX
 COURT_Y_MIN = 0.0
 COURT_Y_MAX = COURT_Y
 
 # Service box boundaries
-SERVICE_LINE_NEAR = -6.4  # V2
-SERVICE_LINE_FAR = 6.4  # V2
+SERVICE_LINE_NEAR = 5.485
+SERVICE_LINE_FAR = 18.285
 
 # Baseline zones for serve detection
 BASELINE_NEAR_MAX = 5.0   # y < 5m = near baseline zone
@@ -65,23 +65,27 @@ class BounceEvent:
     confidence: float = 1.0
     source_camera: str = "3d"  # "cam66" | "cam68" | "interpolated" | "3d"
     side: str = ""  # "near" | "far"
+    cam_pixels: dict = field(default_factory=dict)  # {"cam66": [px, py], ...}
 
     def __post_init__(self):
         if not self.side:
             self.side = "near" if self.y < NET_Y else "far"
 
     def to_dict(self) -> dict:
-        return {
-            "x": round(self.x, 4),
-            "y": round(self.y, 4),
-            "z": round(self.z, 4),
-            "timestamp": round(self.timestamp, 4),
-            "in_court": self.in_court,
+        d = {
+            "x": round(float(self.x), 4),
+            "y": round(float(self.y), 4),
+            "z": round(float(self.z), 4),
+            "timestamp": round(float(self.timestamp), 4),
+            "in_court": bool(self.in_court),
             "frame_index": self.frame_index,
-            "confidence": round(self.confidence, 3),
+            "confidence": round(float(self.confidence), 3),
             "source_camera": self.source_camera,
             "side": self.side,
         }
+        if self.cam_pixels:
+            d["cam_pixels"] = self.cam_pixels
+        return d
 
 
 class RallyEndReason(str, Enum):
@@ -155,13 +159,15 @@ class RallyState:
 # ---------------------------------------------------------------------------
 
 
-def _is_in_court(x: float, y: float) -> bool:
-    """Check if (x, y) falls within the court boundaries (V2: origin at center)."""
-    return SINGLES_X_MIN <= x <= SINGLES_X_MAX and -COURT_Y <= y <= COURT_Y
+COURT_MARGIN = 0.15  # tolerance for calibration error (meters)
 
 
-# Alias for legacy code
-COURT_X = SINGLES_X_MAX
+def _is_in_court(x: float, y: float, margin: float = COURT_MARGIN) -> bool:
+    """Check if (x, y) falls within court boundaries (V2 coords)."""
+    # V2: origin at court center, x in [-4.115, +4.115], y in [-11.885, +11.885]
+    HW = DOUBLES_WIDTH / 2  # 4.115
+    HL = COURT_Y / 2  # 11.885
+    return abs(x) <= HW + margin and abs(y) <= HL + margin
 
 
 # ---------------------------------------------------------------------------
@@ -193,11 +199,11 @@ class BounceDetector:
 
     def __init__(
         self,
-        window_size: int = 15,
-        z_ground_threshold: float = 0.8,
-        min_descent_speed: float = 0.3,
+        window_size: int = 10,
+        z_ground_threshold: float = 0.5,
+        min_descent_speed: float = 0.5,
         cooldown_seconds: float = 0.3,
-        min_improvement_ratio: float = 0.15,
+        min_improvement_ratio: float = 0.3,
     ):
         self.window_size = window_size
         self.z_ground_threshold = z_ground_threshold
@@ -206,7 +212,6 @@ class BounceDetector:
         self.min_improvement_ratio = min_improvement_ratio
 
         self._window: deque = deque(maxlen=window_size)
-        self._z_buffer: deque = deque(maxlen=30)  # larger buffer for smoothing
         self._last_bounce_time: float = 0.0
         self._all_bounces: list[BounceEvent] = []
 
@@ -215,22 +220,17 @@ class BounceDetector:
     def update(self, point: dict) -> Optional[BounceEvent]:
         """Process a new 3D point and return BounceEvent if bounce detected.
 
-        Uses median-smoothed Z values to handle noise, then fits V-shape.
+        Fits a V-shape to the Z-time profile in the sliding window and
+        compares against a single-line fit.  Returns a BounceEvent when the
+        V-shape is a significantly better fit with the vertex near ground.
+
+        Args:
+            point: dict with keys ``x``, ``y``, ``z`` and optionally
+                   ``timestamp``, ``frame_index`` (or ``frame_a``).
         """
-        # Smooth Z with rolling median (handles ±0.5m noise)
-        self._z_buffer.append(point["z"])
-        if len(self._z_buffer) >= 5:
-            sorted_z = sorted(list(self._z_buffer)[-5:])
-            smoothed_z = sorted_z[2]  # median of last 5
-        else:
-            smoothed_z = point["z"]
+        self._window.append(point)
 
-        smoothed_point = dict(point)
-        smoothed_point["z_raw"] = point["z"]
-        smoothed_point["z"] = smoothed_z
-        self._window.append(smoothed_point)
-
-        # Need at least 6 points for V-shape
+        # Need at least 6 points for meaningful V-shape (2 left + 1 vertex + 2 right + margin)
         if len(self._window) < 6:
             return None
 
@@ -241,7 +241,7 @@ class BounceDetector:
         pts = list(self._window)
         n = len(pts)
 
-        # Extract time and smoothed Z
+        # Extract time and Z arrays
         times = np.array(
             [p.get("timestamp", i * 0.04) for i, p in enumerate(pts)],
             dtype=np.float64,
@@ -256,11 +256,14 @@ class BounceDetector:
         if best_k < 0:
             return None
 
+        # Avoid division by zero for perfectly linear data
         if null_ssr < 1e-10:
             return None
 
+        # Compute improvement ratio
         improvement = 1.0 - v_ssr / null_ssr
 
+        # Decision criteria
         vertex_z = pts[best_k]["z"]
         is_bounce = (
             improvement > self.min_improvement_ratio
@@ -268,13 +271,6 @@ class BounceDetector:
             and left_slope < 0   # was descending
             and right_slope > 0  # now ascending
         )
-
-        # Log V-shape analysis for debugging
-        if vertex_z < 2.0 and left_slope < 0 and right_slope > 0:
-            logger.debug("V-shape candidate: vertex_z=%.2f improve=%.2f "
-                        "left_slope=%.2f right_slope=%.2f -> %s",
-                        vertex_z, improvement, left_slope, right_slope,
-                        "BOUNCE" if is_bounce else "rejected")
 
         if not is_bounce:
             return None
@@ -381,116 +377,103 @@ class BounceDetector:
         return (segment[-1]["z"] - segment[0]["z"]) / dt
 
 
-# ---------------------------------------------------------------------------
-# PixelBounceDetector — uses 2D pixel Y instead of 3D Z
-# ---------------------------------------------------------------------------
+class PeakBounceDetector:
+    """Batch bounce detector wrapping ``detect_bounces()`` from bounce_detector.py.
 
-
-class PixelBounceDetector:
-    """Streaming bounce detector using pixel Y coordinate V-shape.
-
-    Works on single-camera pixel data. Ball descending = pixel_y increasing,
-    ball bouncing up = pixel_y decreasing. Bounce = local maximum of pixel_y.
-
-    Does NOT require 3D triangulation — avoids Z accuracy issues entirely.
-    Uses homography to get world (x,y) for the bounce landing position.
+    Accumulates 3D points in a buffer.  Every ``batch_size`` points, runs
+    ``detect_bounces()`` on the full buffer and emits any new bounces.
+    Same interface as ``BounceDetector`` (``update`` / ``reset`` / ``get_all_bounces``).
     """
 
     def __init__(
         self,
-        window_size: int = 15,
-        min_margin_px: float = 20.0,
-        cooldown_frames: int = 8,
-        min_py: float = 100.0,  # ignore detections near top of frame
+        batch_size: int = 30,
+        z_max: float = 0.5,
+        prominence: float = 0.10,
+        min_distance: int = 5,
+        smooth: int = 3,
+        **_kwargs,
     ):
-        self.window_size = window_size
-        self.min_margin_px = min_margin_px
-        self.cooldown_frames = cooldown_frames
-        self.min_py = min_py
+        from app.pipeline.blob_detector import BallBlobDetector  # noqa: F401 — validate import
+        self.batch_size = batch_size
+        self.z_max = z_max
+        self.prominence = prominence
+        self.min_distance = min_distance
+        self.smooth = smooth
 
-        self._window: deque = deque(maxlen=window_size)
-        self._last_bounce_frame: int = -100
+        self._buffer: list[tuple] = []  # (frame, x, y, z, 0)
+        self._point_map: dict[int, dict] = {}  # frame → original point dict
+        self._emitted_frames: set[int] = set()
         self._all_bounces: list[BounceEvent] = []
+        self._counter: int = 0
 
     def update(self, point: dict) -> Optional[BounceEvent]:
-        """Process a point with pixel_y, world_x, world_y fields.
+        """Accumulate point; run batch detect_bounces every batch_size points.
 
-        Expected point keys:
-            pixel_y: float — pixel Y coordinate (larger = lower in frame = closer to ground)
-            world_x, world_y: float — homography world coordinates
-            frame_index: int
-            timestamp: float
-            camera: str — 'cam66' or 'cam68'
+        Returns the latest new bounce (for interface compat with BounceDetector).
+        Use ``pop_pending()`` to get ALL new bounces from the last batch.
         """
-        self._window.append(point)
+        fi = point.get("frame_index") or point.get("frame_a") or self._counter
+        self._buffer.append((fi, point["x"], point["y"], point["z"], 0))
+        self._point_map[fi] = point
+        self._counter += 1
 
-        if len(self._window) < 7:
+        if self._counter % self.batch_size != 0:
             return None
 
-        fi = point.get("frame_index", 0)
-        if fi - self._last_bounce_frame < self.cooldown_frames:
-            return None
+        return self._run_batch(point)
 
-        pts = list(self._window)
-        n = len(pts)
+    def _run_batch(self, latest_point: dict) -> Optional[BounceEvent]:
+        """Run detect_bounces on full buffer, emit all new bounces."""
+        from app.pipeline.bounce_detect import detect_bounces
 
-        # Find the point with maximum pixel_y in the window (ball lowest in frame)
-        pys = [p.get("pixel_y", 0) for p in pts]
-        max_idx = int(np.argmax(pys))
-
-        # Must not be at edges (need context on both sides)
-        if max_idx < 2 or max_idx > n - 3:
-            return None
-
-        max_py = pys[max_idx]
-        if max_py < self.min_py:
-            return None
-
-        # Check V-shape margins
-        left_min = min(pys[:max_idx]) if max_idx > 0 else max_py
-        right_min = min(pys[max_idx + 1:]) if max_idx < n - 1 else max_py
-        left_margin = max_py - left_min
-        right_margin = max_py - right_min
-
-        # Asymmetric: stronger side >= min_margin, weaker >= min_margin * 0.5
-        strong = max(left_margin, right_margin)
-        weak = min(left_margin, right_margin)
-
-        if strong < self.min_margin_px or weak < self.min_margin_px * 0.4:
-            return None
-
-        vertex = pts[max_idx]
-        wx = vertex.get("world_x", 0)
-        wy = vertex.get("world_y", 0)
-
-        bounce = BounceEvent(
-            x=wx,
-            y=wy,
-            z=0.0,  # bounce is at ground level
-            timestamp=vertex.get("timestamp", 0),
-            in_court=_is_in_court(wx, wy),
-            frame_index=vertex.get("frame_index"),
-            confidence=min(1.0, strong / 100.0),
+        bounces = detect_bounces(
+            self._buffer,
+            z_max=self.z_max,
+            prominence=self.prominence,
+            min_distance=self.min_distance,
+            smooth=self.smooth,
         )
 
-        self._last_bounce_frame = fi
-        self._all_bounces.append(bounce)
+        now = latest_point.get("timestamp", time.time())
+        self._pending: list[BounceEvent] = []
+        for b in bounces:
+            bf = b["frame"]
+            if bf in self._emitted_frames:
+                continue
+            self._emitted_frames.add(bf)
+            # Use the original point's timestamp if available
+            orig = self._point_map.get(bf)
+            bounce_ts = orig.get("timestamp", now) if orig else now
+            evt = BounceEvent(
+                x=float(b["x"]),
+                y=float(b["y"]),
+                z=float(b["z"]),
+                timestamp=bounce_ts,
+                in_court=bool(b["in_court"]),
+                frame_index=bf,
+                confidence=1.0,
+            )
+            self._all_bounces.append(evt)
+            self._pending.append(evt)
 
-        # Keep only points after vertex
-        remaining = pts[max_idx + 1:]
-        self._window.clear()
-        for p in remaining:
-            self._window.append(p)
+        return self._pending[-1] if self._pending else None
 
-        return bounce
+    def pop_pending(self) -> list[BounceEvent]:
+        """Return and clear all bounces from the last batch."""
+        result = getattr(self, "_pending", [])
+        self._pending = []
+        return result
 
     def get_all_bounces(self) -> list[BounceEvent]:
         return list(self._all_bounces)
 
     def reset(self) -> None:
-        self._window.clear()
-        self._last_bounce_frame = -100
+        self._buffer.clear()
+        self._point_map.clear()
+        self._emitted_frames.clear()
         self._all_bounces.clear()
+        self._counter = 0
 
 
 # ---------------------------------------------------------------------------
@@ -501,7 +484,7 @@ class PixelBounceDetector:
 class RallyTracker:
     """State machine for rally tracking based on net crossings.
 
-    Tracks when the ball crosses the net line (``Y = 0 m (V2)``) and
+    Tracks when the ball crosses the net line (``Y = 11.885 m``) and
     maintains rally state:
 
         ``idle`` → ``rally`` (on first net crossing) → ``idle`` (on timeout)
@@ -721,6 +704,13 @@ class EnhancedBounceDetector:
             vertex_pt, cam_dets, pts, best_k
         )
 
+        # Collect per-camera pixel coordinates at bounce frame
+        cam_px = {}
+        if cam_dets:
+            for cname, det in cam_dets.items():
+                if det and det.get("pixel_x") is not None:
+                    cam_px[cname] = [det["pixel_x"], det["pixel_y"]]
+
         bounce = BounceEvent(
             x=landing_x,
             y=landing_y,
@@ -730,6 +720,7 @@ class EnhancedBounceDetector:
             frame_index=vertex_pt.get("frame_index"),
             confidence=self._compute_confidence(pts, best_k, zs),
             source_camera=source,
+            cam_pixels=cam_px,
         )
 
         self._last_bounce_frame = fi
@@ -813,6 +804,219 @@ class EnhancedBounceDetector:
         density_score = min(1.0, n / 6.0)
 
         return round(min(1.0, depth_score * 0.7 + density_score * 0.3), 3)
+
+
+# ---------------------------------------------------------------------------
+# HybridBounceDetector — streaming port of offline detect_bounces()
+# ---------------------------------------------------------------------------
+
+
+class HybridBounceDetector:
+    """Streaming version of the offline hybrid V-shape + parabolic bounce detector.
+
+    Maintains a sliding window of smoothed 3D points and applies the same
+    detection logic as ``render_tracking_video.detect_bounces()``:
+        1. V-shape margins (z dip with high sides)
+        2. Parabolic split ratio (separate fits left/right of candidate)
+        3. Combined decision (strong V alone, or both signals moderate)
+        4. Dense segment filter (enough points nearby)
+        5. Speed filter (ball must be moving ≥3 m/s)
+        6. NMS cooldown (min gap between bounces)
+    """
+
+    def __init__(
+        self,
+        buf_size: int = 60,
+        v_window: int = 8,
+        half_wins: tuple = (4, 6, 8),
+        z_max: float = 0.8,
+        min_seg_len: int = 15,
+        min_dense: int = 20,
+        dense_range: int = 20,
+        min_speed: float = 3.0,
+        speed_dt: int = 3,
+        cooldown_frames: int = 12,
+        fps: float = 25.0,
+    ):
+        self._buf: list[dict] = []
+        self._buf_size = buf_size
+        self._v_window = v_window
+        self._half_wins = half_wins
+        self._z_max = z_max
+        self._min_seg_len = min_seg_len
+        self._min_dense = min_dense
+        self._dense_range = dense_range
+        self._min_speed = min_speed
+        self._speed_dt = speed_dt
+        self._cooldown = cooldown_frames
+        self._fps = fps
+        self._last_bounce_ts: float = 0.0
+
+    def reset(self):
+        self._buf.clear()
+        self._last_bounce_ts = 0.0
+
+    def update(
+        self,
+        point_3d: dict,
+        cam_detections: Optional[dict] = None,
+    ) -> Optional[BounceEvent]:
+        """Process one smoothed 3D point. Returns BounceEvent if bounce detected."""
+        self._buf.append({"pt": point_3d, "cam": cam_detections or {}})
+        if len(self._buf) > self._buf_size:
+            self._buf = self._buf[-self._buf_size:]
+
+        n = len(self._buf)
+        margin_needed = max(max(self._half_wins), self._v_window)
+        if n < self._min_seg_len or n < 2 * margin_needed + 1:
+            return None
+
+        # Arrays for the buffer
+        xs = np.array([e["pt"]["x"] for e in self._buf])
+        ys = np.array([e["pt"]["y"] for e in self._buf])
+        zs = np.array([e["pt"]["z"] for e in self._buf])
+        ts = np.array([e["pt"]["timestamp"] for e in self._buf])
+
+        # Find continuous segment at the end of buffer (no gap > 0.2s)
+        seg_start = n - 1
+        for i in range(n - 2, -1, -1):
+            if ts[i + 1] - ts[i] > 0.2:
+                break
+            seg_start = i
+        seg_len = n - seg_start
+        if seg_len < self._min_seg_len:
+            return None
+
+        # Check candidate at position: end of segment minus margin
+        # (we check the point that has enough context on both sides)
+        check_idx = n - 1 - margin_needed
+        if check_idx < seg_start + margin_needed:
+            return None
+
+        i = check_idx
+        z_i = zs[i]
+        if z_i > self._z_max:
+            return None
+
+        # Court bounds check
+        x_i, y_i = xs[i], ys[i]
+        if x_i < SINGLES_X_MIN - 1.0 or x_i > SINGLES_X_MAX + 1.0:
+            return None
+        if y_i < -1.0 or y_i > COURT_Y + 1.0:
+            return None
+
+        # Cooldown
+        pt_ts = ts[i]
+        if pt_ts - self._last_bounce_ts < self._cooldown / self._fps:
+            return None
+
+        # ── Signal 1: V-shape margins ──
+        z_before = zs[i - self._v_window:i]
+        z_after = zs[i + 1:i + self._v_window + 1]
+        if len(z_before) < self._v_window or len(z_after) < self._v_window:
+            return None
+
+        margin_before = float(np.mean(z_before) - z_i)
+        margin_after = float(np.mean(z_after) - z_i)
+        min_margin = min(margin_before, margin_after)
+        max_margin = max(margin_before, margin_after)
+        v_score = margin_before + margin_after
+
+        v_strong = min_margin >= 0.10 and max_margin >= 0.20
+        v_moderate = min_margin >= 0.05 and max_margin >= 0.10
+
+        # ── Signal 2: Parabolic split ratio ──
+        best_ratio = 0.0
+        for hw in self._half_wins:
+            li = list(range(max(seg_start, i - hw), i + 1))
+            ri = list(range(i, min(n, i + hw + 1)))
+            if len(li) < 3 or len(ri) < 3:
+                continue
+            ji = list(range(max(seg_start, i - hw), min(n, i + hw + 1)))
+
+            def _fit_res(indices):
+                if len(indices) < 3:
+                    return float("inf")
+                t = (ts[indices] - ts[indices[0]])
+                z = zs[indices]
+                try:
+                    c = np.polyfit(t, z, 2)
+                    return float(np.mean((z - np.polyval(c, t)) ** 2))
+                except (np.linalg.LinAlgError, ValueError):
+                    return float("inf")
+
+            rl = _fit_res(np.array(li))
+            rr = _fit_res(np.array(ri))
+            rj = _fit_res(np.array(ji))
+            rs = (rl * len(li) + rr * len(ri)) / (len(li) + len(ri))
+            ratio = rj / rs if rs > 1e-8 else 0
+            if ratio > best_ratio:
+                best_ratio = ratio
+
+        p_strong = best_ratio >= 5.0
+        p_moderate = best_ratio >= 2.0
+
+        # ── Combined decision ──
+        accepted = False
+        if v_strong:
+            accepted = True
+        elif p_strong and v_moderate:
+            accepted = True
+        elif v_moderate and p_moderate and z_i < 0.4:
+            accepted = True
+
+        if not accepted:
+            return None
+
+        # ── Dense segment filter ──
+        nearby = sum(1 for j in range(max(0, i - self._dense_range),
+                                       min(n, i + self._dense_range + 1))
+                     if j >= seg_start)
+        if nearby < self._min_dense:
+            return None
+
+        # ── Speed filter ──
+        i_back = max(seg_start, i - self._speed_dt)
+        i_fwd = min(n - 1, i + self._speed_dt)
+        dt = ts[i_fwd] - ts[i_back]
+        if dt > 1e-6:
+            dx = xs[i_fwd] - xs[i_back]
+            dy = ys[i_fwd] - ys[i_back]
+            dz = zs[i_fwd] - zs[i_back]
+            speed = float(np.sqrt(dx**2 + dy**2 + dz**2) / dt)
+            if speed < self._min_speed:
+                return None
+
+        # ── Bounce accepted! ──
+        self._last_bounce_ts = pt_ts
+
+        # Get cam pixel coords at this point
+        cam_dets = self._buf[i]["cam"]
+        cam_px = {}
+        if cam_dets:
+            for cname, det in cam_dets.items():
+                if det and det.get("pixel_x") is not None:
+                    cam_px[cname] = [det["pixel_x"], det["pixel_y"]]
+
+        in_court = (SINGLES_X_MIN <= x_i <= SINGLES_X_MAX
+                    and 0 <= y_i <= COURT_Y)
+
+        bounce = BounceEvent(
+            x=float(x_i),
+            y=float(y_i),
+            z=float(z_i),
+            timestamp=float(pt_ts),
+            in_court=in_court,
+            confidence=round(min(1.0, v_score + 0.1 * best_ratio), 3),
+            source_camera="3d",
+            cam_pixels=cam_px,
+        )
+        logger.info(
+            "HybridBounce: (%.2f, %.2f, z=%.2f) %s v=%.2f p=%.1f spd=%.0f",
+            x_i, y_i, z_i, "IN" if in_court else "OUT",
+            v_score, best_ratio, speed if dt > 1e-6 else 0,
+        )
+        return bounce
 
 
 # ---------------------------------------------------------------------------

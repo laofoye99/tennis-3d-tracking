@@ -79,11 +79,15 @@ class CameraStream:
                 self._timestamp = time.time()
 
     def read(self) -> tuple[np.ndarray | None, int, float]:
-        """Return (frame, frame_id, timestamp). Thread-safe."""
+        """Return (frame, frame_id, timestamp). Thread-safe.
+
+        Returns the internal frame reference directly (no copy).
+        Callers that modify the frame MUST copy it first.
+        """
         with self._lock:
             if self._frame is None:
                 return None, 0, 0.0
-            return self._frame.copy(), self._frame_id, self._timestamp
+            return self._frame, self._frame_id, self._timestamp
 
     def stop(self) -> None:
         self._stopped.set()

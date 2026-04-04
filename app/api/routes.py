@@ -102,6 +102,13 @@ async def reset_analytics():
 
 # ---- Net Crossing Speed ----
 
+@router.get("/api/latency")
+async def latency_stats():
+    """End-to-end latency statistics (capture → 3D output)."""
+    orch = _get_orch()
+    return orch.get_latency_stats()
+
+
 @router.get("/api/net-crossing")
 async def net_crossing():
     """Get the latest net crossing event with ball speed."""
@@ -227,6 +234,68 @@ async def run_calibration_api():
         raise HTTPException(500, str(e))
 
 
+# ---- Debug output ----
+
+@router.post("/api/debug/save")
+async def debug_save():
+    """Save accumulated debug data to debug_output/ directory."""
+    orch = _get_orch()
+    path = orch.save_debug_output()
+    return {"status": "ok", "path": path}
+
+
+@router.post("/api/debug/load-gt")
+async def debug_load_gt(request: Request):
+    """Load GT bounce data for live comparison overlay.
+
+    Body: {"path": "D:/tennis/blob_frame_different/bounce_results.json"}
+    or:   {} to load default GT file.
+    """
+    body = await request.json() if request.headers.get("content-type") else {}
+    default_path = "D:/tennis/blob_frame_different/bounce_results.json"
+    gt_path = body.get("path", default_path)
+
+    try:
+        with open(gt_path, "r", encoding="utf-8") as f:
+            gt = json.load(f)
+        bounces = gt.get("bounces", [])
+        return {
+            "status": "ok",
+            "path": gt_path,
+            "bounces": bounces,
+            "trajectory_points": len(gt.get("trajectory", [])),
+            "config": gt.get("config", {}),
+        }
+    except Exception as e:
+        raise HTTPException(400, f"Failed to load GT: {e}")
+
+
+@router.get("/api/debug/list")
+async def debug_list():
+    """List saved debug output directories."""
+    debug_dir = Path("debug_output")
+    if not debug_dir.exists():
+        return {"outputs": []}
+    dirs = sorted([d.name for d in debug_dir.iterdir() if d.is_dir()], reverse=True)
+    results = []
+    for d in dirs[:20]:
+        summary_path = debug_dir / d / "summary.json"
+        summary = {}
+        if summary_path.exists():
+            summary = json.loads(summary_path.read_text())
+        results.append({"name": d, "summary": summary})
+    return {"outputs": results}
+
+
+@router.get("/api/debug/{name}/{filename}")
+async def debug_file(name: str, filename: str):
+    """Download a specific debug output file."""
+    fpath = Path("debug_output") / name / filename
+    if not fpath.exists():
+        raise HTTPException(404, f"Not found: {name}/{filename}")
+    return json.loads(fpath.read_text())
+
+
 @router.get("/api/calibration/status")
 async def calibration_status():
     """Get current calibration data if available."""
@@ -348,6 +417,36 @@ async def apply_calibration(request: Request):
 
 # ---- Pipeline control ----
 
+@router.post("/api/pipeline/start-all")
+async def start_all_pipelines():
+    """Start all non-record-only cameras simultaneously."""
+    orch = _get_orch()
+    started = []
+    for name, cam in orch.config.cameras.items():
+        if cam.record_only:
+            continue
+        try:
+            orch.start_pipeline(name)
+            started.append(name)
+        except Exception:
+            pass
+    return {"status": "ok", "started": started}
+
+
+@router.post("/api/pipeline/stop-all")
+async def stop_all_pipelines():
+    """Stop all running pipelines."""
+    orch = _get_orch()
+    stopped = []
+    for name in list(orch.config.cameras.keys()):
+        try:
+            orch.stop_pipeline(name)
+            stopped.append(name)
+        except Exception:
+            pass
+    return {"status": "ok", "stopped": stopped}
+
+
 @router.post("/api/pipeline/{name}/start")
 async def start_pipeline(name: str):
     orch = _get_orch()
@@ -453,19 +552,32 @@ async def recording_ffmpeg_stop():
 # ---- Camera MJPEG stream ----
 
 @router.get("/api/camera/{name}/stream")
-async def camera_mjpeg_stream(name: str):
-    """将摄像头最新帧以 MJPEG multipart 格式持续推送给浏览器。"""
+async def camera_mjpeg_stream(name: str, delay: float = 0):
+    """MJPEG stream with optional delay (seconds) to sync with bounce detection.
+
+    Use ``?delay=3`` to delay the video by 3 seconds, matching pipeline latency.
+    """
     orch = _get_orch()
+    from collections import deque
+    import time as _time
 
     async def frame_generator():
         _BOUNDARY = b"--frame\r\nContent-Type: image/jpeg\r\n\r\n"
-        prev: bytes | None = None
+        buf: deque = deque()
+
         while True:
             jpeg = orch.get_latest_frame(name)
-            if jpeg is not None and jpeg is not prev:
-                prev = jpeg
-                yield _BOUNDARY + jpeg + b"\r\n"
-            await asyncio.sleep(1 / 25)  # 最高 25 fps
+            if jpeg is not None:
+                now = _time.time()
+                if delay > 0:
+                    buf.append((now, jpeg))
+                    # Emit oldest frame that's at least `delay` seconds old
+                    while buf and now - buf[0][0] >= delay:
+                        _, old_jpeg = buf.popleft()
+                        yield _BOUNDARY + old_jpeg + b"\r\n"
+                else:
+                    yield _BOUNDARY + jpeg + b"\r\n"
+            await asyncio.sleep(1 / 15)
 
     return StreamingResponse(
         frame_generator(),

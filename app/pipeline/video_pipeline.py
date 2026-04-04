@@ -101,6 +101,7 @@ def run_video_pipeline(
     ensemble_config: Optional[dict] = None,
     heatmap_mask: Optional[list[tuple[int, int, int, int]]] = None,
     blob_verifier_config: Optional[dict] = None,
+    detector_type: str = "auto",
 ) -> None:
     """Process a video file segment through the ball detection pipeline.
 
@@ -108,6 +109,8 @@ def run_video_pipeline(
         ensemble_config: If provided and enabled, runs both TrackNet + HRNet
             with cross-validation. Dict with keys: enabled, hrnet_path,
             agree_distance, boost_factor, penalty_factor, single_factor.
+        detector_type: ``"auto"`` (default), or ``"median_bg"`` for median
+            background subtraction.
     """
     logging.basicConfig(
         level=logging.INFO,
@@ -176,9 +179,10 @@ def run_video_pipeline(
             cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
         else:
             # Single model mode (auto-selects ONNX or PyTorch backend)
-            detector = create_detector(model_path, input_size, frames_in, frames_out, device)
-            actual_frames_in = frames_in
-            actual_frames_out = frames_out
+            detector = create_detector(model_path, input_size, frames_in, frames_out, device,
+                                       detector_type=detector_type)
+            actual_frames_in = detector.frames_in
+            actual_frames_out = detector.frames_out
 
             # Compute background median for TrackNet (author's approach)
             if hasattr(detector, "compute_video_median"):
@@ -186,11 +190,14 @@ def run_video_pipeline(
                 detector.compute_video_median(cap, start_frame, end_frame)
                 cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
 
-        tracker = BallTracker(
-            original_size=(vid_w, vid_h),
-            threshold=threshold,
-            heatmap_mask=heatmap_mask,
-        )
+        # MedianBGDetector returns blobs directly; no BallTracker needed.
+        tracker = None
+        if not getattr(detector if detector is not None else ensemble_detector, "returns_blobs", False):
+            tracker = BallTracker(
+                original_size=(vid_w, vid_h),
+                threshold=threshold,
+                heatmap_mask=heatmap_mask,
+            )
         homography = HomographyTransformer(homography_path, homography_key)
 
         # Initialize blob verifier (optional YOLO secondary detection)
@@ -275,7 +282,10 @@ def run_video_pipeline(
                     continue
 
                 for i in range(min(actual_frames_out, len(heatmaps))):
-                    blobs = tracker.process_heatmap_multi(heatmaps[i])
+                    if tracker is not None:
+                        blobs = tracker.process_heatmap_multi(heatmaps[i])
+                    else:
+                        blobs = heatmaps[i]  # MedianBGDetector: blobs returned directly
                     if not blobs:
                         continue
 

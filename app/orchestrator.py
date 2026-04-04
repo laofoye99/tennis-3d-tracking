@@ -7,6 +7,7 @@ import multiprocessing as mp
 import threading
 import time
 from pathlib import Path
+from collections import deque
 from typing import Any, Optional
 
 import cv2
@@ -19,6 +20,8 @@ from app.schemas import BallPosition3D, PipelineStatus, SystemStatus, WorldPoint
 from app.analytics import (
     BounceDetector,
     EnhancedBounceDetector,
+    HybridBounceDetector,
+    PeakBounceDetector,
     RallyStateMachine,
     RallyTracker,
     run_batch_analytics,
@@ -30,7 +33,8 @@ from app.triangulation import triangulate
 logger = logging.getLogger(__name__)
 
 # Maximum age (seconds) for pairing detections from two cameras.
-_MATCH_WINDOW = 0.1
+_MATCH_WINDOW = 2.0  # max age difference (seconds) between camera captures for pairing
+# Hikvision cameras without HW sync can have 0.5-1s capture_ts difference
 
 
 class _PipelineHandle:
@@ -63,6 +67,8 @@ class Orchestrator:
         self._latest_frames: dict[str, bytes] = {}
         self._latest_3d: Optional[BallPosition3D] = None
         self._triangulation_active = False
+        self._last_tri_pair: tuple = (None, None)  # (d1.ts, d2.ts) to dedup
+        self._det_queues: dict[str, list] = {}  # per-camera detection queues
         self._consumer_thread: Optional[threading.Thread] = None
         self._stopped = threading.Event()
         self._inference_enabled: bool = True  # 全局推理开关
@@ -74,31 +80,44 @@ class Orchestrator:
         self._recording_lock = threading.Lock()
         self._recordings_dir = Path("recordings")
 
+        # Tracking data recording (JSONL alongside video)
+        self._data_file: Any = None
+        self._data_frame_counter: int = 0
+
         # Video test
         self._video_test_handle: Optional[_PipelineHandle] = None
         self._video_test_handles: dict[str, _PipelineHandle] = {}  # parallel handles
         self._video_test_detections: dict[str, list[dict]] = {}  # camera_name -> detections
 
-        # Live analytics (bounce detection + rally tracking)
-        self._bounce_detector = BounceDetector()
+        # Debug output — records all pipeline stages for GT comparison
+        self._debug_dir = Path("debug_output")
+        self._debug_data = self._new_debug_data()
+
+        # Live analytics — use batch find_peaks for all modes (validated 30/30 vs GT)
+        self._bounce_detector = PeakBounceDetector(batch_size=10)
         self._rally_tracker = RallyTracker()
         self._live_bounces: list[dict] = []
-        # Enhanced analytics (event-driven state machine)
         self._enhanced_bounce = EnhancedBounceDetector()
+        self._hybrid_bounce = HybridBounceDetector()
         self._rally_sm = RallyStateMachine()
+
+        # MedianBG tracking state (track-first-triangulate-later pipeline)
+        self._is_median_bg = self.config.model.detector_type == "median_bg"
+        self._blob_buffers: dict[str, dict[int, list]] = {}  # cam -> {frame_id: [(cx,cy)]}
+        self._blob_homographies: dict = {}  # cam -> H matrix (lazy init)
+        self._tracker_process_interval = 30  # run tracker every N blob_blocks
+        self._tracker_block_count = 0
+        self._trajectory_3d: list = []  # accumulated 3D trajectory
+        self._emitted_3d_frames: set = set()  # frames already emitted
+        self._emitted_bounce_frames: set = set()
+
+        # Savitzky-Golay smoothing buffer (matches offline smooth_trajectory_sg)
+        self._sg_buffer: list[dict] = []  # raw 3D points with timestamps
+        self._sg_window = 11
+        self._sg_poly = 3
+        self._sg_max_gap = 3  # frames gap to split segments
         self._live_rallies: list[dict] = []
         self._analytics_lock = threading.Lock()
-
-        # Pixel bounce detectors (per camera, no 3D Z dependency)
-        from app.analytics import PixelBounceDetector
-        self._pixel_bounce_66 = PixelBounceDetector(window_size=15, min_margin_px=25, cooldown_frames=12)
-        self._pixel_bounce_68 = PixelBounceDetector(window_size=15, min_margin_px=25, cooldown_frames=12)
-        self._pixel_bounces: list[dict] = []
-
-        # Robust net crossing tracking
-        self._net_wy_history: list[tuple] = []  # [(frame, world_y)]
-        self._net_crossings: list[dict] = []
-        self._last_net_frame = -100
 
         # Confidence filtering (top1_conf20)
         self._conf_percentile = 20  # reject bottom 20% by blob_sum
@@ -106,17 +125,23 @@ class Orchestrator:
         self._conf_threshold = 0.0  # dynamic, updated from history
 
         # Net crossing speed detection
-        self._prev_3d: Optional[dict] = None  # previous 3D point for speed calc
+        self._prev_3d: Optional[dict] = None
+        self._speed_buffer: deque = deque(maxlen=5)  # recent per-frame speeds for smoothing
         self._latest_net_crossing: Optional[dict] = None
         self._net_crossings: list[dict] = []
-        NET_Y = 0.0  # V2: net at origin  # net position
-        self._NET_Y = NET_Y
+        self._NET_Y = 0.0  # V2: net at y=0
+        self._SPEED_MIN = 30   # km/h — consumer minimum
+        self._SPEED_MAX = 150  # km/h — consumer maximum
 
         # 3D display WebSocket push
         self._ws_bounce_queue: list[dict] = []  # bounces to push
         self._ws_thread: Optional[threading.Thread] = None
         self._ws_url = "wss://tennisserver.motionrivalry.com:8086/general"
         self._ws_enabled = False
+
+        # Latency instrumentation
+        self._latency_buffer: deque = deque(maxlen=1000)
+        self._latency_max: float = 0.0
 
         # ML Rally segmentation filter
         self._ml_rally_enabled = False
@@ -166,9 +191,8 @@ class Orchestrator:
 
         cam_cfg = self.config.cameras[name]
         model_cfg = self.config.model
-        is_record_only = getattr(cam_cfg, 'record_only', False)
 
-        handle.result_queue = mp.Queue(maxsize=64) if not is_record_only else None
+        handle.result_queue = mp.Queue(maxsize=64)
         handle.frame_queue = mp.Queue(maxsize=128)
         handle.stop_event = mp.Event()
         handle.status_dict = self._manager.dict(
@@ -177,28 +201,9 @@ class Orchestrator:
                 "fps": 0.0,
                 "last_detection_time": None,
                 "error_msg": "",
-                "inference_enabled": not is_record_only and self._inference_enabled,
-                "record_only": is_record_only,
+                "inference_enabled": self._inference_enabled,
             }
         )
-
-        if is_record_only:
-            # Record-only camera: just stream video, no inference
-            from app.pipeline.camera_stream import CameraStream
-            handle.process = mp.Process(
-                target=self._run_record_only_pipeline,
-                kwargs={
-                    "name": name,
-                    "rtsp_url": cam_cfg.rtsp_url,
-                    "frame_queue": handle.frame_queue,
-                    "stop_event": handle.stop_event,
-                    "status_dict": handle.status_dict,
-                },
-                daemon=True,
-            )
-            handle.process.start()
-            logger.info("[%s] Record-only pipeline started (no inference)", name)
-            return
 
         handle.process = mp.Process(
             target=run_pipeline,
@@ -212,11 +217,12 @@ class Orchestrator:
                 "threshold": model_cfg.threshold,
                 "device": model_cfg.device,
                 "homography_path": self.config.homography.path,
-                "homography_key": getattr(cam_cfg, 'homography_key', None),
+                "homography_key": cam_cfg.homography_key,
                 "result_queue": handle.result_queue,
                 "frame_queue": handle.frame_queue,
                 "stop_event": handle.stop_event,
                 "status_dict": handle.status_dict,
+                "detector_type": model_cfg.detector_type,
             },
             daemon=True,
         )
@@ -228,41 +234,6 @@ class Orchestrator:
             self._stopped.clear()
             self._consumer_thread = threading.Thread(target=self._consume_loop, daemon=True)
             self._consumer_thread.start()
-
-    @staticmethod
-    def _run_record_only_pipeline(name, rtsp_url, frame_queue, stop_event, status_dict):
-        """Minimal pipeline: read RTSP stream and push JPEG frames for recording/preview."""
-        import cv2, time, logging
-        log = logging.getLogger(name)
-        log.info("Record-only pipeline starting: %s", rtsp_url)
-        status_dict["state"] = "running"
-
-        while not stop_event.is_set():
-            try:
-                cap = cv2.VideoCapture(rtsp_url)
-                if not cap.isOpened():
-                    log.warning("Cannot open %s, retrying in 3s...", rtsp_url)
-                    time.sleep(3)
-                    continue
-                log.info("Connected to %s", rtsp_url)
-                while not stop_event.is_set():
-                    ret, frame = cap.read()
-                    if not ret:
-                        log.warning("Frame read failed, reconnecting...")
-                        break
-                    _, jpeg = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
-                    if frame_queue is not None:
-                        try:
-                            frame_queue.put_nowait(jpeg.tobytes())
-                        except Exception:
-                            pass  # queue full, skip frame
-                cap.release()
-            except Exception as e:
-                log.error("Record-only error: %s", e)
-                time.sleep(3)
-
-        status_dict["state"] = "stopped"
-        log.info("Record-only pipeline stopped")
 
     def stop_pipeline(self, name: str) -> None:
         if name not in self._handles:
@@ -281,6 +252,13 @@ class Orchestrator:
         self._latest_frames.pop(name, None)
         logger.info("[%s] Pipeline stopped", name)
 
+        # Auto-save debug output if there's data
+        if self._debug_data["trajectory"]:
+            try:
+                self.save_debug_output()
+            except Exception as e:
+                logger.warning("Failed to auto-save debug output: %s", e)
+
     def shutdown(self) -> None:
         self._stopped.set()
         for name in list(self._handles):
@@ -294,17 +272,18 @@ class Orchestrator:
         logger.info("Consumer thread started")
         self._triangulation_active = True
 
-        # Only inference-capable cameras (exclude record_only like pickleball)
-        cam_names = [n for n, c in self.config.cameras.items() if not getattr(c, 'record_only', False)]
+        # Only cameras with position_3d can do triangulation
         cam_positions = self._get_camera_positions()
+        cam_names = [n for n in self.config.cameras if n in cam_positions]
+        tri_cams = cam_names[:2]  # first 2 positioned cameras for triangulation
 
         # Initialize multi-blob matcher for live mode
         live_matcher = None
         if len(cam_names) == 2:
-            pos1 = cam_positions.get(cam_names[0])
-            pos2 = cam_positions.get(cam_names[1])
+            pos1 = cam_positions.get(tri_cams[0])
+            pos2 = cam_positions.get(tri_cams[1])
             if pos1 and pos2:
-                live_matcher = MultiBlobMatcher(pos1, pos2)
+                live_matcher = MultiBlobMatcher(pos1, pos2, valid_z_range=(0.0, 8.0))
 
         while not self._stopped.is_set():
             got_any = False
@@ -314,7 +293,28 @@ class Orchestrator:
                     try:
                         while not handle.result_queue.empty():
                             det = handle.result_queue.get_nowait()
+
+                            # MedianBG: blob_block → accumulate for tracker
+                            if det.get("type") == "blob_block":
+                                cam = det["camera_name"]
+                                self._blob_buffers.setdefault(cam, {}).update(det["blobs"])
+                                self._tracker_block_count += 1
+                                # Build a minimal latest_detection for dashboard overlay
+                                # (pick first blob of last frame as rough position)
+                                last_fi = max(det["blobs"].keys()) if det["blobs"] else None
+                                if last_fi is not None and det["blobs"][last_fi]:
+                                    cx, cy = det["blobs"][last_fi][0]
+                                    self._latest_detections[cam] = {
+                                        "camera_name": cam, "pixel_x": cx, "pixel_y": cy,
+                                        "timestamp": det["timestamp"],
+                                        "capture_ts": det["capture_ts"],
+                                    }
+                                got_any = True
+                                continue
+
                             self._latest_detections[name] = det
+                            if name in tri_cams:
+                                self._det_queues.setdefault(name, []).append(det)
                             if name.startswith("_video_test"):
                                 cam = det.get("camera_name", "unknown")
                                 self._video_test_detections.setdefault(cam, []).append(det)
@@ -333,242 +333,218 @@ class Orchestrator:
                     except Exception:
                         pass
 
-            # --- Per-camera pixel bounce + net crossing (independent of triangulation) ---
-            # Only process NEW detections (track last processed timestamp per camera)
-            if not hasattr(self, '_last_processed_ts'):
-                self._last_processed_ts = {}
-                self._frame_counter = 0
-                self._px_debug_count = 0
-            for cname in cam_names:
-                if cname not in self._latest_detections:
+            # ---- MedianBG: track → match → triangulate → events ----
+            if self._is_median_bg and self._tracker_block_count > 0 and len(tri_cams) == 2:
+                # Run every time both cameras have new blocks
+                cam1, cam2 = tri_cams
+                buf1 = self._blob_buffers.get(cam1, {})
+                buf2 = self._blob_buffers.get(cam2, {})
+                if buf1 and buf2:
+                    self._run_tracker_pipeline(cam1, cam2, cam_positions)
+                    self._tracker_block_count = 0
+
+            # ---- TrackNet: pair detections by capture_ts ----
+            q1 = self._det_queues.get(tri_cams[0], []) if len(tri_cams) == 2 else []
+            q2 = self._det_queues.get(tri_cams[1], []) if len(tri_cams) == 2 else []
+
+            # Only match when both queues have data
+            pairs = []
+            if q1 and q2:
+                used_i, used_j = set(), set()
+                for i, d1 in enumerate(q1):
+                    t1 = d1.get("capture_ts", d1["timestamp"])
+                    best_j, best_dt = -1, _MATCH_WINDOW
+                    for j, d2 in enumerate(q2):
+                        if j in used_j:
+                            continue
+                        t2 = d2.get("capture_ts", d2["timestamp"])
+                        dt = abs(t1 - t2)
+                        if dt < best_dt:
+                            best_dt = dt
+                            best_j = j
+                    if best_j >= 0:
+                        pairs.append((d1, q2[best_j]))
+                        used_i.add(i)
+                        used_j.add(best_j)
+                # Keep unmatched detections for next round
+                self._det_queues[tri_cams[0]] = [d for i, d in enumerate(q1) if i not in used_i]
+                self._det_queues[tri_cams[1]] = [d for j, d in enumerate(q2) if j not in used_j]
+                # Cap queue size to prevent memory leak
+                for c in tri_cams:
+                    if len(self._det_queues[c]) > 32:
+                        self._det_queues[c] = self._det_queues[c][-16:]
+
+            for d1, d2 in pairs:
+                # Dedup by pixel coords
+                pair_id = (d1.get("pixel_x"), d1.get("pixel_y"),
+                           d2.get("pixel_x"), d2.get("pixel_y"))
+                if pair_id == self._last_tri_pair:
                     continue
-                det = self._latest_detections[cname]
-                det_ts = det.get("timestamp", 0)
-                if det_ts <= self._last_processed_ts.get(cname, 0):
-                    continue  # already processed this detection
-                self._last_processed_ts[cname] = det_ts
-                self._frame_counter += 1
-                if self._frame_counter <= 10 or self._frame_counter % 50 == 0:
-                    logger.info("NEW_DET(%s) #%d: py=%.0f wx=%.2f wy=%.2f",
-                                cname, self._frame_counter,
-                                det.get("pixel_y", 0), det.get("x", 0), det.get("y", 0))
-                py = det.get("pixel_y")
-                wx = det.get("x")  # homography world_x
-                wy = det.get("y")  # homography world_y
-                fi = det.get("frame_index", 0)
-                now_t = time.time()
+                # --- Confidence filtering (top1_conf20) ---
+                blob_sum1 = d1.get("blob_sum", d1.get("confidence", 1.0))
+                blob_sum2 = d2.get("blob_sum", d2.get("confidence", 1.0))
+                avg_conf = (blob_sum1 + blob_sum2) / 2
+                self._conf_history.append(avg_conf)
+                if len(self._conf_history) > 500:
+                    self._conf_history = self._conf_history[-500:]
+                # Update threshold every 50 new pairs (not every pair)
+                if len(self._conf_history) >= 50 and len(self._conf_history) % 50 == 0:
+                    sorted_h = sorted(self._conf_history)
+                    self._conf_threshold = sorted_h[int(len(sorted_h) * self._conf_percentile / 100)]
+                if avg_conf < self._conf_threshold:
+                    continue
 
-                fi = self._frame_counter  # use monotonic counter as frame_index
-                if py is not None and wx is not None and self._bounce_detection_enabled:
-                    pxd = self._pixel_bounce_66 if "66" in cname else self._pixel_bounce_68
-                    pb = pxd.update({
-                        "pixel_y": py, "world_x": wx, "world_y": wy,
-                        "frame_index": fi, "timestamp": now_t, "camera": cname,
-                    })
-                    if pb is not None:
-                        pbd = pb.to_dict()
-                        with self._analytics_lock:
-                            self._live_bounces.append(pbd)
-                            if len(self._live_bounces) > 50:
-                                self._live_bounces = self._live_bounces[-50:]
-                        logger.info("PX_BOUNCE(%s) f%d: (%.2f, %.2f) %s",
-                                    cname, fi, pbd.get("x", 0), pbd.get("y", 0),
-                                    "IN" if pbd.get("in_court") else "OUT")
+                try:
+                    x, y, z = None, None, None
+                    _tri_smoothed = None
+                    _tri_bounce = None
+                    match = None
 
-                # Net crossing from single camera homography world_y
-                if wy is not None and self._net_crossing_enabled:
-                    key = f"_prev_wy_{cname}"
-                    prev = getattr(self, key, None)
-                    if prev is not None:
-                        prev_wy, prev_wx, prev_t = prev
-                        crossed = (prev_wy < -1.5 and wy > 1.5) or (prev_wy > 1.5 and wy < -1.5)
-                        dt = now_t - prev_t
-                        if crossed and 0.05 < dt < 3.0:
-                            dx = wx - prev_wx
-                            dy = wy - prev_wy
-                            spd = min(np.sqrt(dx**2 + dy**2) / dt * 3.6, 150)
-                            if spd >= 15:
-                                direction = "near_to_far" if wy > prev_wy else "far_to_near"
-                                crossing = {
-                                    "speed_kmh": round(spd, 1),
-                                    "direction": direction,
-                                    "timestamp": now_t,
-                                }
-                                self._latest_net_crossing = crossing
-                                self._net_crossings.append(crossing)
-                                if len(self._net_crossings) > 100:
-                                    self._net_crossings = self._net_crossings[-100:]
-                                logger.info("NET_CROSSING(%s) f%d: %.0f km/h %s", cname, fi, spd, direction)
-                    setattr(self, key, (wy, wx, now_t))
+                    if (live_matcher
+                            and "candidates" in d1
+                            and "candidates" in d2):
+                        match = live_matcher.match(d1, d2)
+                        if match is not None:
+                            x, y, z = match["x"], match["y"], match["z"]
 
-            # Attempt triangulation when both cameras have recent data.
-            if len(cam_names) == 2 and all(c in self._latest_detections for c in cam_names):
-                d1 = self._latest_detections[cam_names[0]]
-                d2 = self._latest_detections[cam_names[1]]
-                dt = abs(d1["timestamp"] - d2["timestamp"])
-                if dt < _MATCH_WINDOW:
-                    # --- Confidence filtering (top1_conf20) ---
-                    blob_sum1 = d1.get("blob_sum", d1.get("confidence", 1.0))
-                    blob_sum2 = d2.get("blob_sum", d2.get("confidence", 1.0))
-                    avg_conf = (blob_sum1 + blob_sum2) / 2
-                    self._conf_history.append(avg_conf)
-                    if len(self._conf_history) > 500:
-                        self._conf_history = self._conf_history[-500:]
-                    if len(self._conf_history) >= 50:
-                        sorted_h = sorted(self._conf_history)
-                        idx = int(len(sorted_h) * self._conf_percentile / 100)
-                        self._conf_threshold = sorted_h[idx]
-                    if avg_conf < self._conf_threshold:
-                        continue  # skip low-confidence detection
-
-                    try:
-                        x, y, z = None, None, None
-
-                        # Try multi-blob matching first
-                        if (live_matcher
-                                and "candidates" in d1
-                                and "candidates" in d2):
-                            match = live_matcher.match(d1, d2)
-                            if match is not None:
-                                x, y, z = match["x"], match["y"], match["z"]
-
-                        # Fallback to single-blob triangulation
-                        if x is None:
-                            x, y, z = triangulate(
-                                (d1["x"], d1["y"]),
-                                (d2["x"], d2["y"]),
-                                cam_positions[cam_names[0]],
-                                cam_positions[cam_names[1]],
-                            )
-
-                        self._latest_3d = BallPosition3D(
-                            x=x, y=y, z=z,
-                            cam66_world=WorldPoint2D(**d1),
-                            cam68_world=WorldPoint2D(**d2),
+                    if x is None:
+                        x, y, z = triangulate(
+                            (d1["x"], d1["y"]),
+                            (d2["x"], d2["y"]),
+                            cam_positions[tri_cams[0]],
+                            cam_positions[tri_cams[1]],
                         )
-                        logger.info("Ball 3D: (%.2f, %.2f, z=%.2f) cam66_px=(%.0f,%.0f) cam68_px=(%.0f,%.0f)",
-                                    x, y, z,
-                                    d1.get("pixel_x", 0), d1.get("pixel_y", 0),
-                                    d2.get("pixel_x", 0), d2.get("pixel_y", 0))
 
-                        # --- Net crossing speed detection ---
-                        # Use cam66 world_y for more stable net detection
-                        now = time.time()
-                        pt = {"x": x, "y": y, "z": z, "timestamp": now,
-                              "frame_index": d1.get("frame_index", 0)}
-                        cam66_wy = d1.get("y", y)  # cam66 homography world_y
-                        if self._prev_3d is not None:
-                            prev_cam66_wy = self._prev_3d.get("cam66_wy", self._prev_3d["y"])
-                            # Robust net crossing: require Y to cross 0 with minimum travel > 3m
-                            crossed = (prev_cam66_wy < -1.5 and cam66_wy > 1.5) or \
-                                      (prev_cam66_wy > 1.5 and cam66_wy < -1.5)
-                            if crossed and (now - self._prev_3d["timestamp"]) > 0.1:
-                                t_delta = now - self._prev_3d["timestamp"]
-                                if t_delta > 0.001:
-                                    dx = x - self._prev_3d["x"]
-                                    dy = y - self._prev_3d["y"]
-                                    dz = z - self._prev_3d["z"]
-                                    dist = (dx**2 + dy**2 + dz**2) ** 0.5
-                                    speed_ms = dist / t_delta
-                                    speed_kmh = speed_ms * 3.6
-                                    if 20 <= speed_kmh <= 250:  # sane range
-                                        direction = "near_to_far" if curr_y > prev_y else "far_to_near"
-                                        crossing = {
-                                            "speed_kmh": round(speed_kmh, 1),
-                                            "direction": direction,
-                                            "timestamp": now,
-                                            "x": x, "y": y, "z": z,
-                                        }
-                                        self._latest_net_crossing = crossing
-                                        self._net_crossings.append(crossing)
-                                        if len(self._net_crossings) > 100:
-                                            self._net_crossings = self._net_crossings[-100:]
-                                        logger.info("NET CROSSING: %.0f km/h %s at (%.2f, %.2f, %.2f)",
-                                                    speed_kmh, direction, x, y, z)
-                        pt["cam66_wy"] = cam66_wy
-                        self._prev_3d = pt
+                    self._latest_3d = BallPosition3D(
+                        x=x, y=y, z=z,
+                        cam66_world=WorldPoint2D(**d1),
+                        cam68_world=WorldPoint2D(**d2),
+                    )
+                    self._last_tri_pair = pair_id
 
-                        # Feed live analytics
-                        cam_dets = {}
-                        for cname, det in [(cam_names[0], d1), (cam_names[1], d2)]:
-                            cam_dets[cname] = {
-                                "world_x": det.get("x"),
-                                "world_y": det.get("y"),
-                                "pixel_x": det.get("pixel_x"),
-                                "pixel_y": det.get("pixel_y"),
-                                "yolo_conf": det.get("yolo_conf", 0.5),
-                            }
-                        with self._analytics_lock:
-                            # Bounce detection (controlled by toggle)
-                            bounce = None
-                            ebounce = None
-                            if self._bounce_detection_enabled:
-                                bounce = self._bounce_detector.update(pt)
-                                if bounce is not None:
-                                    self._live_bounces.append(bounce.to_dict())
-                                    if len(self._live_bounces) > 50:
-                                        self._live_bounces = self._live_bounces[-50:]
-                                    bd = bounce.to_dict()
-                                    logger.info("BOUNCE: (%.2f, %.2f, z=%.2f) %s",
-                                                bd.get("x", 0), bd.get("y", 0), bd.get("z", 0),
-                                                "IN" if bd.get("in_court", False) else "OUT")
-                                    if self._ws_enabled:
-                                        bx, by = bounce.x, bounce.y
-                                        self._ws_bounce_queue.append({
-                                            "x": (bx + 4.115) / 8.23,
-                                            "y": (11.89 - by) / 23.78,
-                                            "speed": self._latest_net_crossing["speed_kmh"] if self._latest_net_crossing else 0,
-                                            "timestamp": int(now * 1000),
-                                        })
-                                ebounce = self._enhanced_bounce.update(pt, cam_dets)
+                    # Debug recording
+                    self._debug_data["frame_counter"] += 1
+                    fi = self._debug_data["frame_counter"]
+                    self._debug_record_detection(tri_cams[0], d1, fi)
+                    self._debug_record_detection(tri_cams[1], d2, fi)
+                    rd = match.get("ray_distance", 0) if match else 0
+                    self._debug_record_3d(fi, x, y, z, rd, d1, d2, tri_cams[0], tri_cams[1])
 
-                            # Pixel bounce detection (per camera, no Z dependency)
-                            if self._bounce_detection_enabled:
-                                for cname, cdet in cam_dets.items():
-                                    py = cdet.get("pixel_y")
-                                    wx = cdet.get("world_x")
-                                    wy = cdet.get("world_y")
-                                    if py is not None and wx is not None:
-                                        pxd = self._pixel_bounce_66 if "66" in cname else self._pixel_bounce_68
-                                        pb = pxd.update({
-                                            "pixel_y": py, "world_x": wx, "world_y": wy,
-                                            "frame_index": pt.get("frame_index", 0),
-                                            "timestamp": now, "camera": cname,
-                                        })
-                                        if pb is not None:
-                                            pbd = pb.to_dict()
-                                            self._pixel_bounces.append(pbd)
-                                            if len(self._pixel_bounces) > 50:
-                                                self._pixel_bounces = self._pixel_bounces[-50:]
-                                            # Also add to live_bounces for UI
-                                            self._live_bounces.append(pbd)
-                                            if len(self._live_bounces) > 50:
-                                                self._live_bounces = self._live_bounces[-50:]
-                                            logger.info("PX_BOUNCE(%s): (%.2f, %.2f) %s",
-                                                        cname, pbd.get("x", 0), pbd.get("y", 0),
-                                                        "IN" if pbd.get("in_court") else "OUT")
+                    cap_ts1 = d1.get("capture_ts", d1["timestamp"])
+                    cap_ts2 = d2.get("capture_ts", d2["timestamp"])
+                    latency_ms = (time.time() - min(cap_ts1, cap_ts2)) * 1000
+                    self._latency_buffer.append(latency_ms)
+                    if latency_ms > self._latency_max:
+                        self._latency_max = latency_ms
 
-                            # Rally tracking (controlled by ML Rally toggle)
-                            rally_result = None
-                            if self._ml_rally_enabled:
-                                self._rally_tracker.update(pt, bounce)
-                                rally_result = self._rally_sm.update(pt, ebounce)
-                            if ebounce is not None:
-                                self._live_bounces.append(ebounce.to_dict())
-                                ebd = ebounce.to_dict()
-                                logger.info("BOUNCE(enhanced): (%.2f, %.2f, z=%.2f) %s",
-                                            ebd.get("x", 0), ebd.get("y", 0), ebd.get("z", 0),
-                                            "IN" if ebd.get("in_court", False) else "OUT")
-                            if rally_result is not None:
-                                self._live_rallies.append(rally_result.to_dict())
-                                if len(self._live_rallies) > 20:
-                                    self._live_rallies = self._live_rallies[-20:]
-                                logger.info("RALLY: %s", rally_result.to_dict())
-                    except Exception as e:
-                        logger.error("Triangulation error: %s", e)
+                    now = time.time()
+                    capture_ts = min(
+                        d1.get("capture_ts", d1["timestamp"]),
+                        d2.get("capture_ts", d2["timestamp"]),
+                    )
+                    pt = {"x": x, "y": y, "z": z, "timestamp": now,
+                          "capture_ts": capture_ts}
+                    if self._prev_3d is not None:
+                        # Compute per-frame speed and buffer it
+                        t_delta = now - self._prev_3d["timestamp"]
+                        if t_delta > 0.001:
+                            dx = x - self._prev_3d["x"]
+                            dy = y - self._prev_3d["y"]
+                            dz = z - self._prev_3d["z"]
+                            dist = (dx**2 + dy**2 + dz**2) ** 0.5
+                            self._speed_buffer.append(dist / t_delta * 3.6)  # km/h
+
+                        # Net crossing detection
+                        prev_y = self._prev_3d["y"]
+                        curr_y = y
+                        if (prev_y < self._NET_Y and curr_y >= self._NET_Y) or \
+                           (prev_y > self._NET_Y and curr_y <= self._NET_Y):
+                            # Use median of recent speeds (smoothed, robust to outliers)
+                            if len(self._speed_buffer) >= 2:
+                                speed_kmh = float(np.median(list(self._speed_buffer)))
+                                if self._SPEED_MIN <= speed_kmh <= self._SPEED_MAX:
+                                    direction = "near_to_far" if curr_y > prev_y else "far_to_near"
+                                    crossing = {
+                                        "speed_kmh": round(speed_kmh, 1),
+                                        "direction": direction,
+                                        "timestamp": now,
+                                        "x": x, "y": y, "z": z,
+                                    }
+                                    self._latest_net_crossing = crossing
+                                    self._net_crossings.append(crossing)
+                                    self._debug_data.setdefault("net_crossings", []).append({
+                                        "frame": fi, "speed_kmh": round(speed_kmh, 1),
+                                        "direction": direction, "x": round(x, 3), "y": round(y, 3), "z": round(z, 3),
+                                    })
+                                    if len(self._net_crossings) > 100:
+                                        self._net_crossings = self._net_crossings[-100:]
+                    self._prev_3d = pt
+
+                    cam_dets = {}
+                    for cname, det in [(tri_cams[0], d1), (tri_cams[1], d2)]:
+                        cam_dets[cname] = {
+                            "world_x": det.get("x"),
+                            "world_y": det.get("y"),
+                            "pixel_x": det.get("pixel_x"),
+                            "pixel_y": det.get("pixel_y"),
+                            "yolo_conf": det.get("yolo_conf", 0.5),
+                        }
+                    with self._analytics_lock:
+                        bounce = self._bounce_detector.update(pt)
+                        # PeakBounceDetector may produce multiple bounces per batch
+                        if hasattr(self._bounce_detector, "pop_pending"):
+                            pending_bounces = self._bounce_detector.pop_pending()
+                        else:
+                            pending_bounces = [bounce] if bounce is not None else []
+                        for pb in pending_bounces:
+                            bd = pb.to_dict()
+                            if self._latest_net_crossing and (now - self._latest_net_crossing["timestamp"]) < 3.0:
+                                bd["speed_kmh"] = self._latest_net_crossing["speed_kmh"]
+                                bd["speed_direction"] = self._latest_net_crossing["direction"]
+                            self._live_bounces.append(bd)
+                            self._debug_record_bounce(pb)
+                            if self._ws_enabled:
+                                bx, by = pb.x, pb.y
+                                self._ws_bounce_queue.append({
+                                    "x": (bx + 4.115) / 8.23,
+                                    "y": 1.0 - (by + 11.89) / 23.78,
+                                    "speed": self._latest_net_crossing["speed_kmh"] if self._latest_net_crossing else 0,
+                                    "timestamp": int(now * 1000),
+                                })
+                        if len(self._live_bounces) > 50:
+                            self._live_bounces = self._live_bounces[-50:]
+                        self._rally_tracker.update(pt, bounce)
+                        smoothed_pt = self._smooth_latest(pt)
+                        _tri_smoothed = smoothed_pt
+                        hbounce = self._hybrid_bounce.update(smoothed_pt or pt, cam_dets)
+                        ebounce = self._enhanced_bounce.update(pt, cam_dets)
+                        best_bounce = hbounce or ebounce
+                        _tri_bounce = best_bounce
+                        rally_result = self._rally_sm.update(pt, best_bounce)
+                        if best_bounce is not None:
+                            bd = best_bounce.to_dict()
+                            bd["capture_ts"] = capture_ts
+                            bd["detect_delay"] = round(now - capture_ts, 2)
+                            if self._latest_net_crossing and (now - self._latest_net_crossing["timestamp"]) < 3.0:
+                                bd["speed_kmh"] = self._latest_net_crossing["speed_kmh"]
+                                bd["speed_direction"] = self._latest_net_crossing["direction"]
+                            self._live_bounces.append(bd)
+                        if rally_result is not None:
+                            self._live_rallies.append(rally_result.to_dict())
+                            if len(self._live_rallies) > 20:
+                                self._live_rallies = self._live_rallies[-20:]
+
+                    # Write per-frame tracking data (JSONL)
+                    if self._recording and self._data_file is not None:
+                        self._write_tracking_frame(
+                            d1, d2, tri_cams, x, y, z,
+                            _tri_smoothed, _tri_bounce, now, capture_ts,
+                        )
+                except Exception as e:
+                    logger.error("Triangulation/analytics error: %s", e, exc_info=True)
 
             if not got_any:
-                time.sleep(0.005)
+                time.sleep(0.001)  # 1ms — fast response to new detections
 
         self._triangulation_active = False
         logger.info("Consumer thread stopped")
@@ -604,6 +580,14 @@ class Orchestrator:
                     handle.status_dict["recording_enabled"] = True
             self._recording = True
             self._recording_info = {"start_time": rec_start, "files": files}
+            # Open JSONL data file for per-frame tracking data
+            data_path = str(self._recordings_dir / f"tracking_{ts}.jsonl")
+            try:
+                self._data_file = open(data_path, "w", encoding="utf-8")
+                self._data_frame_counter = 0
+                files["tracking_data"] = data_path
+            except Exception as e:
+                logger.warning("Failed to open tracking data file: %s", e)
             logger.info("Recording started: %s", files)
             return {"status": "recording", "files": files}
 
@@ -636,6 +620,14 @@ class Orchestrator:
                     writer.release()
                 files[name] = wr_info["path"]
             self._recording_writers.clear()
+            # Close tracking data file
+            if self._data_file is not None:
+                try:
+                    self._data_file.close()
+                    logger.info("Tracking data saved: %d frames", self._data_frame_counter)
+                except Exception:
+                    pass
+                self._data_file = None
             logger.info("Recording stopped (%.1fs, target %d frames), files: %s", elapsed, target_frames, files)
             result = {"status": "stopped", "files": files, "duration_s": round(elapsed, 1)}
             self._recording_info = {}
@@ -790,6 +782,55 @@ class Orchestrator:
 
     # ------------------------------------------------------------------
     # Status queries (called from FastAPI)
+    def _write_tracking_frame(
+        self, d1, d2, cam_names, x, y, z, smoothed_pt, bounce, now, capture_ts
+    ):
+        """Write one JSONL line with per-frame tracking data."""
+        def _cam_dict(d):
+            if d is None:
+                return None
+            return {
+                "px": round(d.get("pixel_x", 0), 1),
+                "py": round(d.get("pixel_y", 0), 1),
+                "conf": round(d.get("blob_sum", d.get("confidence", 0)), 2),
+                "wx": round(d.get("x", 0), 3),
+                "wy": round(d.get("y", 0), 3),
+            }
+
+        state = "tracking"
+        row = {
+            "frame": self._data_frame_counter,
+            "ts": round(now, 4),
+            "capture_ts": round(capture_ts, 4),
+            cam_names[0]: _cam_dict(d1),
+            cam_names[1]: _cam_dict(d2),
+        }
+
+        if x is not None:
+            row["3d"] = {"x": round(x, 3), "y": round(y, 3), "z": round(z, 3)}
+        else:
+            row["3d"] = None
+            state = "no_match"
+
+        if smoothed_pt is not None:
+            row["smoothed"] = {
+                "x": round(smoothed_pt["x"], 3),
+                "y": round(smoothed_pt["y"], 3),
+                "z": round(smoothed_pt["z"], 3),
+            }
+
+        if bounce is not None:
+            state = "bounce"
+            row["bounce"] = bounce.to_dict()
+
+        row["state"] = state
+
+        try:
+            self._data_file.write(json.dumps(row, ensure_ascii=False) + "\n")
+            self._data_frame_counter += 1
+        except Exception:
+            pass
+
     # ------------------------------------------------------------------
     def get_pipeline_status(self, name: str) -> PipelineStatus:
         handle = self._handles[name]
@@ -805,11 +846,31 @@ class Orchestrator:
 
     def get_system_status(self) -> SystemStatus:
         pipelines = {n: self.get_pipeline_status(n) for n in self._handles}
+        # Extract candidates from latest detections for minimap visualization
+        det_summary = {}
+        for cam_name, det in self._latest_detections.items():
+            if det is None:
+                continue
+            candidates = det.get("candidates", [])
+            det_summary[cam_name] = {
+                "x": det.get("x"),
+                "y": det.get("y"),
+                "pixel_x": det.get("pixel_x"),
+                "pixel_y": det.get("pixel_y"),
+                "candidates": [
+                    {"x": float(c["x"]), "y": float(c["y"]),
+                     "pixel_x": float(c.get("pixel_x", 0)),
+                     "pixel_y": float(c.get("pixel_y", 0)),
+                     "blob_sum": float(c.get("blob_sum", 1.0))}
+                    for c in candidates
+                ],
+            }
         return SystemStatus(
             pipelines=pipelines,
             triangulation_active=self._triangulation_active,
             latest_ball_3d=self._latest_3d,
             analytics=self.get_live_analytics(),
+            latest_detections=det_summary or None,
         )
 
     def get_latest_3d(self) -> Optional[BallPosition3D]:
@@ -827,10 +888,315 @@ class Orchestrator:
                 "completed_rallies": self._rally_tracker.get_completed_rallies(),
                 # Enhanced analytics
                 "enhanced_state": self._rally_sm.get_state_dict(),
-                "enhanced_rallies": [
-                    r.to_dict() for r in self._rally_sm.get_completed_rallies()
-                ],
+                "enhanced_rallies": self._enrich_rallies(),
             }
+
+    # ------------------------------------------------------------------
+    # Debug output for GT comparison
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _new_debug_data():
+        return {
+            "detections": {},   # cam_name -> [{frame, pixel_x, pixel_y, confidence, world_x, world_y, n_candidates}]
+            "trajectory": [],   # [{frame, x, y, z, ray_dist, px66, py66, px68, py68, world66, world68}]
+            "bounces": [],      # [{frame, z, x, y, in_court}]
+            "frame_counter": 0,
+        }
+
+    def _debug_record_detection(self, cam: str, det: dict, frame_idx: int = None):
+        """Record a per-camera detection for debug output."""
+        fi = frame_idx if frame_idx is not None else self._debug_data["frame_counter"]
+        self._debug_data["detections"].setdefault(cam, []).append({
+            "frame": fi,
+            "pixel_x": round(det.get("pixel_x", 0), 1),
+            "pixel_y": round(det.get("pixel_y", 0), 1),
+            "confidence": round(det.get("confidence", det.get("blob_sum", 0)), 2),
+            "world_x": round(det.get("x", 0), 4),
+            "world_y": round(det.get("y", 0), 4),
+            "n_candidates": len(det.get("candidates", [])),
+        })
+
+    def _debug_record_3d(self, frame_idx, x, y, z, ray_dist,
+                         d1: dict, d2: dict, cam1: str, cam2: str):
+        """Record a triangulated 3D point for debug output."""
+        self._debug_data["trajectory"].append({
+            "frame": frame_idx,
+            "x": round(x, 4), "y": round(y, 4), "z": round(z, 4),
+            "ray_dist": round(ray_dist, 4) if ray_dist else 0,
+            f"px{cam1[-2:]}": round(d1.get("pixel_x", 0), 1),
+            f"py{cam1[-2:]}": round(d1.get("pixel_y", 0), 1),
+            f"px{cam2[-2:]}": round(d2.get("pixel_x", 0), 1),
+            f"py{cam2[-2:]}": round(d2.get("pixel_y", 0), 1),
+            f"world{cam1[-2:]}": [round(d1.get("x", 0), 4), round(d1.get("y", 0), 4)],
+            f"world{cam2[-2:]}": [round(d2.get("x", 0), 4), round(d2.get("y", 0), 4)],
+        })
+
+    def _debug_record_bounce(self, bounce):
+        """Record a bounce event for debug output."""
+        if isinstance(bounce, dict):
+            self._debug_data["bounces"].append({
+                "frame": bounce.get("frame") or bounce.get("frame_index"),
+                "z": round(bounce.get("z", 0), 4),
+                "x": round(bounce.get("x", 0), 4),
+                "y": round(bounce.get("y", 0), 4),
+                "in_court": bool(bounce.get("in_court", False)),
+            })
+        else:
+            # BounceEvent object
+            self._debug_data["bounces"].append({
+                "frame": bounce.frame_index,
+                "z": round(float(bounce.z), 4),
+                "x": round(float(bounce.x), 4),
+                "y": round(float(bounce.y), 4),
+                "in_court": bool(bounce.in_court),
+            })
+
+    def save_debug_output(self) -> str:
+        """Save accumulated debug data to timestamped directory. Returns path."""
+        import datetime as dt
+        ts = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+        out_dir = self._debug_dir / ts
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        # Config
+        cfg = {
+            "model": self.config.model.model_dump(),
+            "cameras": {n: c.model_dump() for n, c in self.config.cameras.items()},
+            "camera_positions": self._get_camera_positions(),
+            "homography_path": self.config.homography.path,
+        }
+        with open(out_dir / "config.json", "w") as f:
+            json.dump(cfg, f, indent=2, default=str)
+
+        # Per-camera detections
+        for cam, dets in self._debug_data["detections"].items():
+            with open(out_dir / f"detections_{cam}.json", "w") as f:
+                json.dump(dets, f, indent=2)
+
+        # 3D trajectory
+        with open(out_dir / "trajectory_3d.json", "w") as f:
+            json.dump(self._debug_data["trajectory"], f, indent=2)
+
+        # Bounces
+        with open(out_dir / "bounces.json", "w") as f:
+            json.dump(self._debug_data["bounces"], f, indent=2)
+
+        # Summary
+        summary = {
+            "total_detections": {cam: len(d) for cam, d in self._debug_data["detections"].items()},
+            "trajectory_points": len(self._debug_data["trajectory"]),
+            "bounces": len(self._debug_data["bounces"]),
+            "bounce_in": sum(1 for b in self._debug_data["bounces"] if b.get("in_court")),
+            "bounce_out": sum(1 for b in self._debug_data["bounces"] if not b.get("in_court")),
+        }
+        with open(out_dir / "summary.json", "w") as f:
+            json.dump(summary, f, indent=2)
+
+        logger.info("Debug output saved to %s (%d traj points, %d bounces)",
+                     out_dir, summary["trajectory_points"], summary["bounces"])
+
+        # Reset for next session
+        self._debug_data = self._new_debug_data()
+        return str(out_dir)
+
+    def _init_homographies(self):
+        """Lazy-init homography matrices from homography_matrices.json."""
+        if self._blob_homographies:
+            return
+        import json as _json
+        hpath = self.config.homography.path
+        try:
+            with open(hpath, "r", encoding="utf-8") as f:
+                hdata = _json.load(f)
+            for cam_name in self.config.cameras:
+                key = self.config.cameras[cam_name].homography_key
+                if key and key in hdata:
+                    H = np.array(hdata[key], dtype=np.float64)
+                    self._blob_homographies[cam_name] = H
+            logger.info("Loaded homographies for %s", list(self._blob_homographies.keys()))
+        except Exception as e:
+            logger.error("Failed to load homographies: %s", e)
+
+    def _run_tracker_pipeline(self, cam1: str, cam2: str, cam_positions: dict):
+        """Run the full track-first-triangulate-later pipeline on accumulated blobs.
+
+        Steps from research (tracker_3d.py + bounce_detector.py):
+        1. track_single_camera() per camera
+        2. match_and_triangulate() cross-camera
+        3. detect_bounces() / detect_events() on 3D trajectory
+        """
+        from app.pipeline.tracker import track_single_camera, match_and_triangulate
+        from app.pipeline.bounce_detect import detect_bounces
+
+        self._init_homographies()
+        H1 = self._blob_homographies.get(cam1)
+        H2 = self._blob_homographies.get(cam2)
+        if H1 is None or H2 is None:
+            return
+
+        buf1 = self._blob_buffers.get(cam1, {})
+        buf2 = self._blob_buffers.get(cam2, {})
+        if not buf1 or not buf2:
+            return
+
+        now = time.time()
+
+        # Step 1: Single-camera tracking
+        tracks1 = track_single_camera(buf1, max_pixel_dist=80, max_gap=3, min_len=10)
+        tracks2 = track_single_camera(buf2, max_pixel_dist=80, max_gap=3, min_len=10)
+
+        if not tracks1 or not tracks2:
+            return
+
+        # Step 2: Cross-camera matching + 3D triangulation
+        pos1 = cam_positions.get(cam1)
+        pos2 = cam_positions.get(cam2)
+        if not pos1 or not pos2:
+            return
+
+        matched = match_and_triangulate(
+            tracks1, tracks2, H1, H2, pos1, pos2,
+            max_ray_dist=1.0, min_overlap=10, max_tracks=50,
+        )
+
+        if not matched:
+            return
+
+        # Best trajectory
+        best = matched[0]["trajectory"]
+        # (frame, x, y, z, px1, py1, px2, py2, ray_dist)
+
+        # Emit new 3D points
+        for pt in best:
+            fi = pt[0]
+            if fi in self._emitted_3d_frames:
+                continue
+            self._emitted_3d_frames.add(fi)
+
+            x, y, z = pt[1], pt[2], pt[3]
+            self._latest_3d = BallPosition3D(x=x, y=y, z=z)
+
+            d1 = {"pixel_x": pt[4], "pixel_y": pt[5], "x": x, "y": y}
+            d2 = {"pixel_x": pt[6], "pixel_y": pt[7], "x": x, "y": y}
+            self._debug_record_3d(fi, x, y, z, pt[8], d1, d2, cam1, cam2)
+
+            self._latest_detections[cam1] = {
+                "camera_name": cam1, "pixel_x": pt[4], "pixel_y": pt[5],
+                "x": x, "y": y, "timestamp": now,
+            }
+            self._latest_detections[cam2] = {
+                "camera_name": cam2, "pixel_x": pt[6], "pixel_y": pt[7],
+                "x": x, "y": y, "timestamp": now,
+            }
+
+        # Step 3: Bounce detection on trajectory
+        # Convert to tuple format: (frame, x, y, z, ray_dist)
+        traj_tuples = [(pt[0], pt[1], pt[2], pt[3], pt[8]) for pt in best]
+        bounces = detect_bounces(traj_tuples)
+
+        with self._analytics_lock:
+            for b in bounces:
+                if b["frame"] in self._emitted_bounce_frames:
+                    continue
+                self._emitted_bounce_frames.add(b["frame"])
+                self._live_bounces.append(b)
+                self._debug_record_bounce(b)
+                # Push to 3D display (V2 → normalized [0,1])
+                if self._ws_enabled:
+                    self._ws_bounce_queue.append({
+                        "x": (b["x"] + 4.115) / 8.23,
+                        "y": 1.0 - (b["y"] + 11.89) / 23.78,
+                        "speed": 0,
+                        "timestamp": int(now * 1000),
+                    })
+                logger.info(
+                    "Bounce: frame=%d z=%.3f (%.2f, %.2f) %s",
+                    b["frame"], b["z"], b["x"], b["y"],
+                    "IN" if b["in_court"] else "OUT",
+                )
+            if len(self._live_bounces) > 50:
+                self._live_bounces = self._live_bounces[-50:]
+
+    def _smooth_latest(self, pt: dict) -> dict | None:
+        """Add a raw 3D point to the SG buffer and return a smoothed point.
+
+        Matches offline ``smooth_trajectory_sg()`` logic: applies Savitzky-Golay
+        filter to recent continuous points and returns the smoothed value at the
+        midpoint of the window (best smoothing quality).
+
+        Returns None if not enough points yet for smoothing.
+        """
+        from scipy.signal import savgol_filter
+
+        self._sg_buffer.append(pt)
+        if len(self._sg_buffer) > 60:
+            self._sg_buffer = self._sg_buffer[-60:]
+
+        buf = self._sg_buffer
+        n = len(buf)
+        if n < self._sg_window:
+            return pt  # not enough points, pass through raw
+
+        # Find the latest continuous segment (no gap > sg_max_gap frames apart)
+        # We use timestamp difference: max gap ~0.15s at ~25fps = 3 frames
+        seg_start = n - 1
+        for i in range(n - 2, -1, -1):
+            dt = buf[i + 1]["timestamp"] - buf[i]["timestamp"]
+            if dt > 0.2:  # >0.2s gap = new segment
+                break
+            seg_start = i
+
+        seg = buf[seg_start:]
+        if len(seg) < self._sg_window:
+            return pt  # segment too short
+
+        xs = np.array([p["x"] for p in seg])
+        ys = np.array([p["y"] for p in seg])
+        zs = np.array([p["z"] for p in seg])
+
+        xs_s = savgol_filter(xs, self._sg_window, self._sg_poly)
+        ys_s = savgol_filter(ys, self._sg_window, self._sg_poly)
+        zs_s = savgol_filter(zs, self._sg_window, self._sg_poly)
+        zs_s = np.maximum(zs_s, 0.0)
+
+        # Return the smoothed point at the midpoint of the window end
+        # (the latest point with full context on both sides)
+        mid = len(seg) - 1 - self._sg_window // 2
+        if mid < 0:
+            mid = len(seg) - 1
+
+        src = seg[mid]
+        return {
+            "x": float(xs_s[mid]),
+            "y": float(ys_s[mid]),
+            "z": float(zs_s[mid]),
+            "timestamp": src["timestamp"],
+            "capture_ts": src.get("capture_ts", src["timestamp"]),
+        }
+
+    def _enrich_rallies(self) -> list[dict]:
+        """Enrich rally results with net crossing speeds for each bounce."""
+        rallies = []
+        for r in self._rally_sm.get_completed_rallies():
+            rd = r.to_dict()
+            # Attach speed_kmh to each bounce by finding the nearest net crossing
+            for b in rd.get("bounces", []):
+                bt = b.get("timestamp", 0)
+                best = None
+                best_dt = 3.0  # max 3 seconds lookback
+                for nc in self._net_crossings:
+                    dt = bt - nc["timestamp"]
+                    if 0 < dt < best_dt:
+                        best_dt = dt
+                        best = nc
+                if best:
+                    b["speed_kmh"] = best["speed_kmh"]
+                    b["speed_direction"] = best["direction"]
+            # Also add rally-level summary
+            rd["duration"] = rd.get("duration_seconds", 0)
+            rallies.append(rd)
+        return rallies
 
     def reset_live_analytics(self) -> None:
         """Reset analytics state (e.g. when starting a new session)."""
@@ -849,6 +1215,20 @@ class Orchestrator:
     def get_net_crossings(self) -> list[dict]:
         """Return recent net crossing events."""
         return list(self._net_crossings[-20:])
+
+    def get_latency_stats(self) -> dict:
+        """Return end-to-end latency statistics (capture → 3D output)."""
+        buf = list(self._latency_buffer)
+        if not buf:
+            return {"count": 0, "p50_ms": 0, "p95_ms": 0, "max_ms": 0}
+        buf_sorted = sorted(buf)
+        n = len(buf_sorted)
+        return {
+            "count": n,
+            "p50_ms": round(buf_sorted[n // 2], 1),
+            "p95_ms": round(buf_sorted[min(int(n * 0.95), n - 1)], 1),
+            "max_ms": round(self._latency_max, 1),
+        }
 
     def enable_3d_display(self, url: str = None) -> dict:
         """Enable WebSocket push to 3D display."""
@@ -1090,6 +1470,7 @@ class Orchestrator:
                 "heatmap_mask": [tuple(r) for r in self.config.model.heatmap_mask],
                 "blob_verifier_config": self.config.blob_verifier.model_dump()
                     if self.config.blob_verifier.enabled else None,
+                "detector_type": self.config.model.detector_type,
             },
             daemon=True,
         )
@@ -1187,6 +1568,7 @@ class Orchestrator:
                     "heatmap_mask": [tuple(r) for r in self.config.model.heatmap_mask],
                     "blob_verifier_config": self.config.blob_verifier.model_dump()
                         if self.config.blob_verifier.enabled else None,
+                    "detector_type": self.config.model.detector_type,
                 },
                 daemon=True,
             )
@@ -1660,7 +2042,7 @@ class Orchestrator:
             next_z = points[i + 1]["z"]
             if curr_z < prev_z and curr_z < next_z and curr_z < 0.3:
                 bx, by = points[i]["x"], points[i]["y"]
-                in_court = -4.115 <= bx <= 4.115 and -11.89 <= by <= 11.89
+                in_court = 1.37 <= bx <= 6.86 and 0 <= by <= 23.77
                 bounces.append({
                     "frame": points[i]["frame_index"],
                     "x": bx, "y": by, "z": curr_z,
