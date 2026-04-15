@@ -134,9 +134,14 @@ class Orchestrator:
 
         # Net crossing speed detection
         self._prev_3d: Optional[dict] = None
-        self._speed_buffer: deque = deque(maxlen=5)  # recent per-frame speeds for smoothing
+        self._speed_buffer: deque = deque(maxlen=5)
         self._latest_net_crossing: Optional[dict] = None
         self._net_crossings: list[dict] = []
+
+        # Gap-based OUT detection: ball disappears > 3s → find last landing point
+        self._GAP_OUT_THRESHOLD = 2.4  # seconds
+        self._last_detection_time: float = 0.0
+        self._trajectory_history: deque = deque(maxlen=75)  # ~3s at 25fps
         self._NET_Y = 0.0  # V2: net at y=0
         self._SPEED_MIN = 30   # km/h — consumer minimum
         self._SPEED_MAX = 150  # km/h — consumer maximum
@@ -443,6 +448,9 @@ class Orchestrator:
                         cam68_world=WorldPoint2D(**d2),
                     )
                     self._last_tri_pair = pair_id
+                    now = time.time()
+                    self._last_detection_time = now
+                    self._trajectory_history.append({"x": x, "y": y, "z": z, "t": now})
 
                     # Debug recording
                     self._debug_data["frame_counter"] += 1
@@ -580,8 +588,15 @@ class Orchestrator:
                 except Exception as e:
                     logger.error("Triangulation/analytics error: %s", e, exc_info=True)
 
+            # ---- Gap-based OUT detection ----
+            # Ball disappeared > 3s → infer OUT, find last reasonable landing point
+            if (self._last_detection_time > 0
+                    and time.time() - self._last_detection_time > self._GAP_OUT_THRESHOLD
+                    and len(self._trajectory_history) >= 5):
+                self._handle_gap_out()
+
             if not got_any:
-                time.sleep(0.001)  # 1ms — fast response to new detections
+                time.sleep(0.001)
 
         self._triangulation_active = False
         # Close tracking JSONL
@@ -698,6 +713,117 @@ class Orchestrator:
                         result.get("report_name"), self._rally_completed_count)
         except Exception as e:
             logger.warning("Auto report failed: %s", e)
+
+    def _handle_gap_out(self):
+        """Ball disappeared > threshold. Extrapolate trajectory to z=0 to predict landing point.
+
+        Strategy: fit a parabola (gravity) to the last N frames of z vs time,
+        solve for z=0 to find predicted landing time, then use x/y velocity
+        to project the landing position.
+        """
+        hist = list(self._trajectory_history)
+        if len(hist) < 5:
+            return
+
+        # Reset timer so we don't fire repeatedly
+        self._last_detection_time = 0.0
+
+        # Use last 15 frames (~0.6s) for trajectory fitting
+        recent = hist[-15:] if len(hist) >= 15 else hist
+
+        # Check ball was descending (z decreasing)
+        zs = [p["z"] for p in recent]
+        if len(zs) >= 3 and zs[-1] >= zs[0]:
+            self._trajectory_history.clear()
+            return  # ball was ascending, not landing
+
+        # Fit z = a*t² + b*t + c (parabola with gravity)
+        ts = np.array([p["t"] - recent[0]["t"] for p in recent])
+        z_arr = np.array(zs)
+        x_arr = np.array([p["x"] for p in recent])
+        y_arr = np.array([p["y"] for p in recent])
+
+        if len(ts) < 3:
+            self._trajectory_history.clear()
+            return
+
+        # Quadratic fit for z(t)
+        try:
+            coeffs = np.polyfit(ts, z_arr, 2)  # a*t² + b*t + c
+            # Solve a*t² + b*t + c = 0
+            a, b, c = coeffs
+            if a >= 0:
+                # Not a downward parabola — use last point
+                land_x, land_y = float(x_arr[-1]), float(y_arr[-1])
+            else:
+                disc = b**2 - 4*a*c
+                if disc < 0:
+                    land_x, land_y = float(x_arr[-1]), float(y_arr[-1])
+                else:
+                    t_land = (-b + np.sqrt(disc)) / (2*a)
+                    # Clamp: don't extrapolate more than 1s into the future
+                    t_land = min(t_land, ts[-1] + 1.0)
+                    if t_land <= ts[-1]:
+                        # Landing within observed data — interpolate
+                        land_x, land_y = float(x_arr[-1]), float(y_arr[-1])
+                    else:
+                        # Extrapolate x and y linearly
+                        if len(ts) >= 2:
+                            vx = (x_arr[-1] - x_arr[-3]) / max(ts[-1] - ts[-3], 0.01)
+                            vy = (y_arr[-1] - y_arr[-3]) / max(ts[-1] - ts[-3], 0.01)
+                            dt_extra = t_land - ts[-1]
+                            land_x = float(x_arr[-1] + vx * dt_extra)
+                            land_y = float(y_arr[-1] + vy * dt_extra)
+                        else:
+                            land_x, land_y = float(x_arr[-1]), float(y_arr[-1])
+        except Exception:
+            land_x, land_y = float(x_arr[-1]), float(y_arr[-1])
+
+        # Must be near court
+        if abs(land_x) > 8 or abs(land_y) > 18:
+            self._trajectory_history.clear()
+            return
+
+        # Determine IN or OUT
+        in_court = abs(land_x) <= 4.265 and abs(land_y) <= 12.035
+        side = "near" if land_y < 0 else "far"
+        reason = "in" if in_court else ("wide" if abs(land_x) > 4.115 else "long")
+
+        now = time.time()
+        with self._analytics_lock:
+            bd = {
+                "x": round(land_x, 4),
+                "y": round(land_y, 4),
+                "z": 0.0,
+                "timestamp": now,
+                "in_court": in_court,
+                "side": side,
+                "source": "gap_out",
+                "reason": reason,
+            }
+            self._live_bounces.append(bd)
+            if len(self._live_bounces) > 50:
+                self._live_bounces = self._live_bounces[-50:]
+
+        # Push to 3D display (always push gap OUT, even without speed)
+        if self._ws_enabled:
+            matched_speed = 0
+            if self._latest_net_crossing:
+                if now - self._latest_net_crossing["timestamp"] < 5.0:
+                    matched_speed = self._latest_net_crossing["speed_kmh"]
+            self._ws_bounce_queue.append({
+                "x": round(land_x * 10, 4),
+                "y": round(land_y * 10, 4),
+                "speed": matched_speed,
+                "timestamp": int(now * 1000),
+            })
+
+        logger.info("Gap OUT: ball lost %.1fs, predicted landing (%.2f, %.2f) %s %s",
+                    self._GAP_OUT_THRESHOLD, land_x, land_y,
+                    "IN" if in_court else "OUT", reason)
+
+        # Clear history for next rally
+        self._trajectory_history.clear()
 
     def flush_data_file(self) -> None:
         """Flush the JSONL tracking data file so report module can read it."""

@@ -414,6 +414,110 @@ class MedianBGDetector:
 
 
 # ---------------------------------------------------------------------------
+# BallSelector detector (TrackNet + CandidateTransformer)
+# ---------------------------------------------------------------------------
+
+class BallSelectorDetector:
+    """TrackNet + CandidateTransformer ball detector.
+
+    Uses TrackNet for heatmap generation, then a lightweight Transformer
+    (85K params) to select the correct ball from top-K candidates.
+    Reduces false positives from 9% to 3-6% at the cost of lower recall.
+
+    Same interface as TrackNetDetector: infer(frames) → heatmaps-like output.
+    But returns_blobs=True since it outputs pixel coordinates directly.
+    """
+
+    returns_blobs = True  # camera_pipeline skips BallTracker postprocessing
+
+    def __init__(
+        self,
+        model_path: str = "",
+        input_size: tuple[int, int] = (288, 512),
+        frames_in: int = 8,
+        frames_out: int = 8,
+        device: str = "cuda",
+        selector_weights: str = "model_weight/ball_selector_v2.2.pt",
+        **_kwargs,
+    ):
+        from app.pipeline.ball_selector.inference_api import BallSelector
+        from app.pipeline.ball_selector.utils import compute_median_bg
+
+        self.input_h, self.input_w = input_size
+        self.frames_in = 8  # BallSelector always uses 8 frames
+        self.frames_out = 8
+        self._compute_median = compute_median_bg
+
+        tracknet_path = model_path or "model_weight/TrackNet_finetuned.pt"
+        self._selector = BallSelector(
+            tracknet_weights=tracknet_path,
+            selector_weights=selector_weights,
+            device=device,
+            exist_threshold=0.5,
+        )
+        self._median_bg = None
+        self._median_computed = False
+
+        logger.info("BallSelectorDetector ready (TrackNet + CandidateTransformer)")
+
+    def load_static_median(self, camera_name: str) -> bool:
+        """Load pre-computed median background for a camera."""
+        import os
+        path = f"src/bg_median_{camera_name}.png"
+        if not os.path.exists(path):
+            return False
+        try:
+            img = cv2.imread(path)
+            if img is None:
+                return False
+            img = cv2.resize(img, (self.input_w, self.input_h))
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            self._median_bg = img.astype(np.float32).transpose(2, 0, 1) / 255.0
+            self._median_computed = True
+            logger.info("BallSelector: loaded static median from %s", path)
+            return True
+        except Exception as e:
+            logger.warning("Failed to load median: %s", e)
+            return False
+
+    def infer(self, frames: list[np.ndarray]) -> list[list[dict]]:
+        """Run BallSelector on a batch of BGR frames.
+
+        Returns:
+            List of length len(frames). Each element is a list of blob dicts:
+            [{"pixel_x": float, "pixel_y": float, "blob_sum": float}] or []
+        """
+        # Compute median from frames if not pre-loaded
+        if self._median_bg is None:
+            from app.pipeline.ball_selector.utils import preprocess_frame
+            processed = [preprocess_frame(f) for f in frames]
+            self._median_bg = np.median(processed, axis=0).astype(np.float32)
+
+        # Pad to 8 frames if needed
+        batch = list(frames)
+        while len(batch) < 8:
+            batch.append(batch[-1])
+
+        results = self._selector.detect(batch[:8], self._median_bg)
+
+        output: list[list[dict]] = []
+        for i in range(len(frames)):
+            r = results[i] if i < len(results) else {"px": None, "py": None, "conf": 0}
+            if r["px"] is not None:
+                output.append([{
+                    "pixel_x": float(r["px"]),
+                    "pixel_y": float(r["py"]),
+                    "blob_sum": float(r["conf"]),
+                    "blob_max": float(r["conf"]),
+                    "blob_area": 0,
+                }])
+            else:
+                output.append([])
+
+        return output
+
+
+# ---------------------------------------------------------------------------
 # Factory function
 # ---------------------------------------------------------------------------
 
@@ -424,12 +528,13 @@ def create_detector(
     frames_out: int = 3,
     device: str = "cuda",
     detector_type: str = "auto",
-) -> "BallDetector | TrackNetDetector | MedianBGDetector":
+) -> "BallDetector | TrackNetDetector | MedianBGDetector | BallSelectorDetector":
     """Select detector backend.
 
     Args:
-        detector_type: ``"auto"`` (default) selects by file extension,
-            ``"median_bg"`` uses MedianBGDetector (no model file needed).
+        detector_type: ``"auto"`` selects TrackNet/HRNet by extension,
+            ``"median_bg"`` uses MedianBGDetector,
+            ``"ball_selector"`` uses TrackNet + CandidateTransformer.
     """
     if detector_type == "median_bg":
         logger.info("Using MedianBGDetector (median background subtraction)")
@@ -437,6 +542,15 @@ def create_detector(
             input_size=input_size,
             frames_in=frames_in,
             frames_out=frames_in,
+            device=device,
+        )
+    if detector_type == "ball_selector":
+        logger.info("Using BallSelectorDetector (TrackNet + CandidateTransformer)")
+        return BallSelectorDetector(
+            model_path=model_path,
+            input_size=input_size,
+            frames_in=8,
+            frames_out=8,
             device=device,
         )
     # Auto-select by file extension
