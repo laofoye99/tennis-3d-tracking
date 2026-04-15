@@ -38,7 +38,8 @@ model:
   threshold: 0.3
   heatmap_mask:
   - [0, 0, 620, 40]
-  detector_type: auto
+  detector_type: ball_selector
+  # detector_type: auto          # TrackNet raw
   # detector_type: median_bg     # 切换时同时改 frames_in: 30, frames_out: 30
 blob_verifier:
   enabled: true

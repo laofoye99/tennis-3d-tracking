@@ -167,15 +167,12 @@ def run_pipeline(
                 frame_id_buffer.clear()
                 continue
 
-            if getattr(detector, "returns_blobs", False):
+            if isinstance(heatmaps, dict):
                 # ---- MedianBG path: send raw blob_block ----
-                # heatmaps is dict {local_idx: [(cx, cy), ...]}
-                # Remap to global frame_id keys
                 blob_block = {}
                 for local_i, blobs in heatmaps.items():
                     if local_i < len(frame_id_buffer):
                         blob_block[frame_id_buffer[local_i]] = blobs
-
                 msg = {
                     "camera_name": name,
                     "type": "blob_block",
@@ -188,8 +185,43 @@ def run_pipeline(
                 except Exception:
                     pass
                 status_dict["last_detection_time"] = time.time()
+            elif isinstance(heatmaps, list) and heatmaps and isinstance(heatmaps[0], list):
+                # ---- BallSelector path: list of blob lists ----
+                for i in range(min(frames_out, len(heatmaps))):
+                    blobs = heatmaps[i]
+                    if not blobs:
+                        continue
+
+                    top = blobs[0]
+                    px, py, conf = top["pixel_x"], top["pixel_y"], top["blob_sum"]
+                    wx, wy = homography.pixel_to_world(px, py)
+
+                    candidates = []
+                    for b in blobs:
+                        bwx, bwy = homography.pixel_to_world(b["pixel_x"], b["pixel_y"])
+                        candidates.append({
+                            "x": bwx, "y": bwy,
+                            "world_x": bwx, "world_y": bwy,
+                            "pixel_x": b["pixel_x"], "pixel_y": b["pixel_y"],
+                            "blob_sum": b["blob_sum"],
+                        })
+
+                    detection = {
+                        "camera_name": name,
+                        "x": wx, "y": wy,
+                        "pixel_x": px, "pixel_y": py,
+                        "confidence": conf, "blob_sum": conf,
+                        "timestamp": time.time(),
+                        "capture_ts": capture_ts_buffer[0],
+                        "candidates": candidates,
+                    }
+                    try:
+                        result_queue.put_nowait(detection)
+                    except Exception:
+                        pass
+                    status_dict["last_detection_time"] = time.time()
             else:
-                # ---- TrackNet / HRNet path: per-frame detections ----
+                # ---- TrackNet / HRNet path: heatmaps → BallTracker ----
                 for i in range(min(frames_out, len(heatmaps))):
                     blobs = tracker.process_heatmap_multi(heatmaps[i], max_blobs=2)
                     if not blobs:
