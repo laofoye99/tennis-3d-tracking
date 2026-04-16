@@ -129,19 +129,17 @@ def run_pipeline(
             last_frame_id = frame_id
             capture_ts = time.time()
 
-            # One copy for inference (need to mask OSD). JPEG thread copies internally.
-            frame = frame.copy()
-
-            # Send to JPEG thread (non-blocking, thread does its own copy if needed)
+            # Send clean frame to JPEG thread (before OSD mask)
             if frame_queue is not None:
                 is_recording = status_dict.get("recording_enabled", False)
                 if is_recording or frame_id % 4 == 0:
                     try:
-                        _jpeg_q.put_nowait((frame, is_recording))
+                        _jpeg_q.put_nowait((frame.copy(), is_recording))
                     except _queue.Full:
                         pass
 
-            # Mask OSD for inference only (after JPEG thread got clean ref)
+            # Copy + mask OSD for inference only
+            frame = frame.copy()
             frame[0:41, 0:603] = 0
 
             frame_buffer.append(frame)
