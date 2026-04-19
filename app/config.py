@@ -57,6 +57,18 @@ class BlobVerifierConfig(BaseModel):
     conf: float = 0.25
 
 
+class PlayerDetectionConfig(BaseModel):
+    enabled: bool = False
+    model_path: str = "model_weight/yolo26x-pose.pt"
+    device: str = "cuda"
+    conf: float = 0.4
+    run_every_n_frames: int = 5  # ~6 fps at 30 fps source
+
+
+class ExportConfig(BaseModel):
+    endpoint: str = "https://tennisync.top/api/admin/SpaceParties/reportData"
+
+
 class AppConfig(BaseModel):
     cameras: dict[str, CameraConfig]
     model: ModelConfig
@@ -65,6 +77,9 @@ class AppConfig(BaseModel):
     calibration: CalibrationConfig = CalibrationConfig()
     ensemble: EnsembleConfig = EnsembleConfig()
     blob_verifier: BlobVerifierConfig = BlobVerifierConfig()
+    player_detection: PlayerDetectionConfig = PlayerDetectionConfig()
+    serial_numbers: dict[str, str] = {}
+    export: ExportConfig = ExportConfig()
 
 
 def load_config(config_path: str = "config.yaml") -> AppConfig:

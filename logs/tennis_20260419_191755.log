@@ -1,0 +1,60 @@
+2026-04-19 19:17:55,421 [main] INFO Log file: logs\tennis_20260419_191755.log
+2026-04-19 19:17:57,455 [main] INFO Starting server on 0.0.0.0:8000
+2026-04-19 19:18:31,842 [app.orchestrator] INFO [cam66] Pipeline process started (pid=29884)
+2026-04-19 19:18:31,844 [app.orchestrator] INFO Consumer thread started
+2026-04-19 19:18:31,844 [app.orchestrator] INFO Tracking JSONL started: recordings\tracking_20260419_191831.jsonl
+2026-04-19 19:18:35,095 [app.orchestrator] INFO [cam68] Pipeline process started (pid=15840)
+2026-04-19 19:18:43,298 [app.pipeline.homography] INFO [cam66] Homography loaded (reproj error: 0.0000m, court_x: [-1.0, 9.2])
+2026-04-19 19:18:48,114 [app.pipeline.homography] INFO [cam68] Homography loaded (reproj error: 0.0000m, court_x: [-1.0, 9.2])
+2026-04-19 19:18:48,957 [app.analytics] INFO Rally 1: serving from near (frame 0)
+2026-04-19 19:19:16,657 [app.analytics] INFO Rally 2: serving from near (frame 0)
+2026-04-19 19:19:19,594 [app.analytics] INFO Rally 1 started (t=1776597559.59)
+2026-04-19 19:19:19,594 [app.analytics] INFO Rally 2: serve crossed net (frame 0)
+2026-04-19 19:19:22,986 [app.analytics] INFO Rally 1 ended: 2 strokes, 0 bounces, 0.0s
+2026-04-19 19:19:28,028 [app.analytics] INFO Rally 2 ended: reason=timeout, strokes=2, bounces=0, 11.4s
+2026-04-19 19:19:28,029 [app.analytics] INFO Rally 3: started (frame 0)
+2026-04-19 19:19:28,120 [app.result_exporter] INFO Rally 2 payload saved to recordings/rally_2_payload.json
+2026-04-19 19:19:28,800 [app.result_exporter] WARNING Rally 2 export failed: 500 <!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>系统发生错误</title>
+    <meta name="robots" content="noindex,nofollow" />
+    <style>
+        /* Base */
+        body {
+            color
+2026-04-19 19:20:30,048 [app.analytics] INFO Rally 2 started (t=1776597630.05)
+2026-04-19 19:20:32,638 [app.analytics] INFO Rally 3 ended: reason=net, strokes=3, bounces=0, 64.6s
+2026-04-19 19:20:32,653 [app.result_exporter] INFO Rally 3 payload saved to recordings/rally_3_payload.json
+2026-04-19 19:20:33,277 [app.result_exporter] WARNING Rally 3 export failed: 500 <!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>系统发生错误</title>
+    <meta name="robots" content="noindex,nofollow" />
+    <style>
+        /* Base */
+        body {
+            color
+2026-04-19 19:20:36,514 [app.analytics] INFO Rally 4: started (frame 0)
+2026-04-19 19:21:00,024 [app.analytics] INFO Rally 4 ended: reason=net, strokes=1, bounces=0, 23.5s
+2026-04-19 19:21:00,035 [app.result_exporter] INFO Rally 4 payload saved to recordings/rally_4_payload.json
+2026-04-19 19:21:00,493 [app.result_exporter] WARNING Rally 4 export failed: 500 <!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>系统发生错误</title>
+    <meta name="robots" content="noindex,nofollow" />
+    <style>
+        /* Base */
+        body {
+            color
+2026-04-19 19:21:12,467 [app.analytics] INFO Rally 2 ended: 6 strokes, 4 bounces, 39.2s
+2026-04-19 19:21:12,467 [app.analytics] INFO Rally 5: serving from near (frame 0)
+2026-04-19 19:21:26,790 [app.analytics] INFO Rally 6: serving from near (frame 0)
+2026-04-19 19:21:56,020 [app.analytics] INFO Rally 7: serving from near (frame 0)
+2026-04-19 19:22:01,236 [main] INFO Received signal 2, shutting down...
+2026-04-19 19:22:01,237 [main] INFO Shutting down orchestrator...
+2026-04-19 19:22:01,238 [app.orchestrator] INFO Tracking JSONL closed: recordings\tracking_20260419_191831.jsonl (2232 frames)
+2026-04-19 19:22:01,238 [app.orchestrator] INFO Consumer thread stopped

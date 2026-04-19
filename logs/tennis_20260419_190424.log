@@ -1,0 +1,14 @@
+2026-04-19 19:04:24,878 [main] INFO Log file: logs\tennis_20260419_190424.log
+2026-04-19 19:04:24,882 [cam66] INFO Pipeline starting...
+2026-04-19 19:04:24,886 [app.pipeline.inference] INFO Auto-detected PyTorch model → TrackNetDetector
+2026-04-19 19:04:24,899 [app.pipeline.inference] INFO Loading TrackNet model: model_weight/TrackNet_finetuned.pt (device=cuda)
+2026-04-19 19:04:25,060 [app.pipeline.inference] INFO Loaded static median background: src\bg_median_cam66.png
+2026-04-19 19:04:25,060 [app.pipeline.inference] INFO TrackNetDetector ready (PyTorch, CUDA=True, params=11,341,000, seq_len=8, bg=concat)
+2026-04-19 19:04:25,064 [app.pipeline.inference] INFO Loaded static median background: src/bg_median_cam66.png
+2026-04-19 19:04:25,064 [app.pipeline.homography] INFO [cam66] Homography loaded (reproj error: 0.0000m, court_x: [-1.0, 9.2])
+2026-04-19 19:04:26,213 [app.pipeline.player_detector] INFO Loading player pose model: model_weight/yolo26x-pose.pt (device=cuda)
+2026-04-19 19:04:26,404 [app.pipeline.player_detector] INFO PlayerPoseDetector ready (conf=0.40, run_every_n=5)
+2026-04-19 19:04:26,404 [cam66] INFO Pipeline running
+2026-04-19 19:04:30,061 [app.pipeline.camera_stream] INFO [cam66] Connected to rtsp://localhost:8554/cam66
+2026-04-19 19:17:44,793 [app.pipeline.camera_stream] INFO [cam66] Stream stopped
+2026-04-19 19:17:44,793 [cam66] INFO Pipeline exited (state=stopped)

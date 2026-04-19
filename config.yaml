@@ -54,3 +54,14 @@ ensemble:
 server:
   host: 0.0.0.0
   port: 8000
+player_detection:
+  enabled: true                              # 改为 true 开启球员检测
+  model_path: model_weight/yolo26x-pose.pt
+  device: cuda
+  conf: 0.4
+  run_every_n_frames: 5                       # 每5帧推理一次 (~6fps)
+serial_numbers:
+  cam66: FV9942593
+  cam68: FV9942588
+export:
+  endpoint: https://tennisync.top/api/admin/SpaceParties/reportData

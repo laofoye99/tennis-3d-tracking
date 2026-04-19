@@ -73,6 +73,13 @@ class Orchestrator:
         self._stopped = threading.Event()
         self._inference_enabled: bool = True  # 全局推理开关
 
+        # Ball 3D position queue (most recent 500 points, ~16s at 30fps)
+        from collections import deque as _deque
+        self._ball_3d_queue: _deque = _deque(maxlen=500)
+
+        # Latest player pose per camera (nearest player to ball)
+        self._latest_player_pose: dict[str, dict] = {}
+
         # 录像
         self._recording: bool = False
         self._recording_writers: dict[str, Any] = {}  # name -> {"writer": VideoWriter|None, "path": str}
@@ -161,6 +168,11 @@ class Orchestrator:
         self._net_crossing_enabled: bool = True
         self._ocr_align_enabled: bool = False
 
+        # Rally raw buffer for result export (120s @ 25fps ≈ 3000 frames)
+        self._rally_raw_buffer: deque = deque(maxlen=3000)
+        self._last_frame_speed_kmh: float = 0.0
+        self._last_bounce_ts: float = 0.0  # timestamp of most recent bounce
+
     def _get_camera_positions(self) -> dict[str, list[float]]:
         """Get camera 3D positions, optionally overriding with calibrated values.
 
@@ -213,6 +225,7 @@ class Orchestrator:
             }
         )
 
+        player_cfg = self.config.player_detection
         handle.process = mp.Process(
             target=run_pipeline,
             kwargs={
@@ -231,6 +244,10 @@ class Orchestrator:
                 "stop_event": handle.stop_event,
                 "status_dict": handle.status_dict,
                 "detector_type": model_cfg.detector_type,
+                "player_model_path": player_cfg.model_path if player_cfg.enabled else "",
+                "player_device": player_cfg.device,
+                "player_conf": player_cfg.conf,
+                "player_run_every_n": player_cfg.run_every_n_frames,
             },
             daemon=True,
         )
@@ -315,6 +332,12 @@ class Orchestrator:
                     try:
                         while not handle.result_queue.empty():
                             det = handle.result_queue.get_nowait()
+
+                            # Player pose detection result
+                            if det.get("type") == "player_pose":
+                                self._handle_player_pose(det, cam_positions)
+                                got_any = True
+                                continue
 
                             # MedianBG: blob_block → accumulate for tracker
                             if det.get("type") == "blob_block":
@@ -442,6 +465,14 @@ class Orchestrator:
                         cam66_world=WorldPoint2D(**d1),
                         cam68_world=WorldPoint2D(**d2),
                     )
+                    self._ball_3d_queue.append({
+                        "x": x, "y": y, "z": z,
+                        "timestamp": time.time(),
+                        "capture_ts": min(
+                            d1.get("capture_ts", d1["timestamp"]),
+                            d2.get("capture_ts", d2["timestamp"]),
+                        ),
+                    })
                     self._last_tri_pair = pair_id
 
                     # Debug recording
@@ -502,6 +533,10 @@ class Orchestrator:
                                         self._net_crossings = self._net_crossings[-100:]
                     self._prev_3d = pt
 
+                    # Track per-frame speed for raw buffer
+                    if self._speed_buffer:
+                        self._last_frame_speed_kmh = float(self._speed_buffer[-1])
+
                     cam_dets = {}
                     for cname, det in [(tri_cams[0], d1), (tri_cams[1], d2)]:
                         cam_dets[cname] = {
@@ -560,6 +595,31 @@ class Orchestrator:
                                 bd["speed_kmh"] = self._latest_net_crossing["speed_kmh"]
                                 bd["speed_direction"] = self._latest_net_crossing["direction"]
                             self._live_bounces.append(bd)
+                        # Append frame to rally raw buffer
+                        is_bounce_frame = best_bounce is not None
+                        if is_bounce_frame:
+                            self._last_bounce_ts = now
+                        # is_hit: first frame after a bounce where speed rises
+                        is_hit_frame = (
+                            not is_bounce_frame
+                            and now - self._last_bounce_ts < 1.0
+                            and len(self._speed_buffer) >= 2
+                            and self._speed_buffer[-1] > self._speed_buffer[-2]
+                        )
+                        _near_pose = self._latest_player_pose.get(tri_cams[0])
+                        _far_pose = self._latest_player_pose.get(tri_cams[1])
+                        near_player = _near_pose["player"] if _near_pose else None
+                        far_player = _far_pose["player"] if _far_pose else None
+                        self._rally_raw_buffer.append({
+                            "ts": now,
+                            "ball": {"x": x, "y": y, "z": z},
+                            "near_player": near_player,
+                            "far_player": far_player,
+                            "speed_kmh": self._last_frame_speed_kmh,
+                            "is_bounce": is_bounce_frame,
+                            "is_hit": is_hit_frame,
+                        })
+
                         if rally_result is not None:
                             self._live_rallies.append(rally_result.to_dict())
                             if len(self._live_rallies) > 20:
@@ -570,6 +630,18 @@ class Orchestrator:
                                     and self._rally_completed_count - self._last_report_rally_count
                                     >= self._rally_report_interval):
                                 self._auto_generate_report()
+                            # Snapshot frames now (before deque rolls over) then export async
+                            _start_ts = rally_result.start_time
+                            _end_ts = rally_result.end_time
+                            _frames_snapshot = [
+                                fr for fr in self._rally_raw_buffer
+                                if _start_ts <= fr["ts"] <= _end_ts
+                            ]
+                            threading.Thread(
+                                target=self._export_rally,
+                                args=(rally_result, _frames_snapshot),
+                                daemon=True,
+                            ).start()
 
                     # Write per-frame tracking data (JSONL — always, not just during recording)
                     if self._tracking_file is not None:
@@ -683,6 +755,23 @@ class Orchestrator:
         """Set how many rallies trigger an auto report. 0 = disabled."""
         self._rally_report_interval = max(0, interval)
         return {"interval": self._rally_report_interval}
+
+    def _export_rally(self, rally_result, frames: list) -> None:
+        """Export a completed rally to the configured API endpoint (runs in background thread)."""
+        try:
+            from app.result_exporter import format_rally
+
+            if not frames:
+                logger.warning("Rally %d: no frames in snapshot, skipping export", rally_result.rally_id)
+                return
+
+            serial_numbers = self.config.serial_numbers
+            serial = serial_numbers.get("cam66") or next(iter(serial_numbers.values()), "UNKNOWN")
+
+            endpoint = self.config.export.endpoint
+            format_rally(rally_result, frames, serial, endpoint)
+        except Exception as e:
+            logger.warning("Rally export error: %s", e)
 
     def _auto_generate_report(self):
         """Auto-generate report from current tracking JSONL."""
@@ -863,6 +952,123 @@ class Orchestrator:
 
     # ------------------------------------------------------------------
     # Status queries (called from FastAPI)
+    def _handle_player_pose(self, msg: dict, cam_positions: dict) -> None:
+        """Process a player_pose message from a camera pipeline subprocess.
+
+        Steps:
+          1. Project each detected player's foot pixel to court (x, y) via homography.
+          2. Filter to this camera's half of the court (derived from camera y position).
+          3. Pick the player nearest to the latest 3D ball position.
+          4. Store in _latest_player_pose and write a JSONL line.
+        """
+        cam_name: str = msg["camera_name"]
+        detections: list[dict] = msg.get("detections", [])
+        if not detections:
+            return
+
+        # Retrieve homography transformer (lazy init, one per camera)
+        if not hasattr(self, "_player_homographies"):
+            self._player_homographies: dict = {}
+        if cam_name not in self._player_homographies:
+            try:
+                cam_cfg = self.config.cameras.get(cam_name)
+                if cam_cfg:
+                    from app.pipeline.homography import HomographyTransformer
+                    self._player_homographies[cam_name] = HomographyTransformer(
+                        self.config.homography.path, cam_cfg.homography_key
+                    )
+            except Exception as e:
+                logger.warning("[%s] Failed to init player homography: %s", cam_name, e)
+                return
+        hom = self._player_homographies.get(cam_name)
+        if hom is None:
+            return
+
+        # Determine which half this camera covers (sign of camera y position)
+        cam_pos = cam_positions.get(cam_name)
+        if cam_pos is None:
+            return
+        cam_y_sign = 1 if cam_pos[1] >= 0 else -1  # +1 → far half (y>0), -1 → near half (y<0)
+        half_slack = 0.5  # metres of tolerance around the net
+
+        # Project each player foot to court and filter by half
+        candidates = []
+        for det in detections:
+            foot_px = det.get("foot_px")
+            if not foot_px:
+                continue
+            try:
+                court_x, court_y = hom.pixel_to_world(foot_px[0], foot_px[1])
+            except Exception:
+                continue
+            # Keep players in this camera's half (+ slack toward net)
+            if cam_y_sign < 0 and court_y > half_slack:
+                continue
+            if cam_y_sign > 0 and court_y < -half_slack:
+                continue
+            candidates.append({**det, "court_x": court_x, "court_y": court_y})
+
+        if not candidates:
+            return
+
+        # Pick player nearest to latest 3D ball position (2D court distance)
+        ball = self._latest_3d
+        if ball is not None and len(candidates) > 1:
+            def _dist(c):
+                return (c["court_x"] - ball.x) ** 2 + (c["court_y"] - ball.y) ** 2
+            nearest = min(candidates, key=_dist)
+            dist_2d = float(_dist(nearest) ** 0.5)
+        else:
+            nearest = candidates[0]
+            dist_2d = float(
+                ((nearest["court_x"] - ball.x) ** 2 + (nearest["court_y"] - ball.y) ** 2) ** 0.5
+            ) if ball is not None else -1.0
+
+        player_record = {
+            "bbox": nearest["bbox"],
+            "conf": nearest["conf"],
+            "foot_px": nearest["foot_px"],
+            "foot_court": [round(nearest["court_x"], 3), round(nearest["court_y"], 3)],
+            "dist_to_ball_2d": round(dist_2d, 3),
+            "keypoints_px": nearest.get("keypoints", []),
+        }
+        self._latest_player_pose[cam_name] = {
+            "timestamp": msg["timestamp"],
+            "capture_ts": msg["capture_ts"],
+            "frame_id": msg["frame_id"],
+            "player": player_record,
+        }
+
+        # Write JSONL
+        if self._tracking_file is not None:
+            ball_snap = (
+                {"x": round(ball.x, 3), "y": round(ball.y, 3), "z": round(ball.z, 3),
+                 "ts": round(ball.timestamp, 4)}
+                if ball is not None else None
+            )
+            row = {
+                "type": "player_pose",
+                "camera": cam_name,
+                "timestamp": round(msg["timestamp"], 4),
+                "capture_ts": round(msg["capture_ts"], 4),
+                "ball_3d": ball_snap,
+                "player": {
+                    "bbox": [round(v, 1) for v in player_record["bbox"]],
+                    "conf": round(player_record["conf"], 3),
+                    "foot_court": player_record["foot_court"],
+                    "dist_to_ball_2d": player_record["dist_to_ball_2d"],
+                    "keypoints_px": [
+                        [round(kp[0], 1), round(kp[1], 1), round(kp[2], 3)]
+                        for kp in player_record["keypoints_px"]
+                    ],
+                },
+            }
+            try:
+                self._tracking_file.write(json.dumps(row, ensure_ascii=False) + "\n")
+                self._tracking_file.flush()
+            except Exception:
+                pass
+
     def _write_tracking_frame(
         self, d1, d2, cam_names, x, y, z, smoothed_pt, bounce, now, capture_ts
     ):

@@ -1,0 +1,139 @@
+{
+  "serial_number": "FV9942576", 						// 设备序列号
+    "startTime": "2026-01-28T17:09:00Z",  	// 开始时间
+    "endTime": "2026-01-28T17:09:30Z", 			// 结束时间
+    "content": {
+    "mete": {
+      "movingDistance": 0,
+      "battingAttempts": 0,
+      "serveSuccessRate": 0,
+      "serveAceCount": 0,
+      "serveSpeed": 0,
+      "receiveSuccessRate": 0,
+      "breakPointConversionRate": 0,
+      "hitSuccessRate": 0,
+      "forehandHitRate": 0,
+      "backhandHitRate": 0,
+      "baselineScoreRate": 0,
+      "averageHitSpeed": 0,
+      "maxHitSpeed": 0,
+      "netApproachCount": 0,
+      "netScoreRate": 0,
+      "volleyScoreRate": 0,
+      "farCount": {
+        "firstServeSuccessRate": 0, 			// [必填]一发成功率(%) = 成功一发次数÷总一发次数×100%（成功：发球落点xy在0.2<x<0.8、0.1<y<0.4落点在远场|0.6<y<0.9落点在近场）
+        "returnFirstSuccessRate": 100, 		// [必填]接一发成功率(%) = 成功接一发数÷总接一发数×100%（成功：回击球落点xy在对方半场）
+        "baselineShotRate": 50, 				  // [必填]底线击球率(%) = 底线击球数÷总击球数×100%（底线：击球点位置y≥0.8）
+        "baselineWinRate": 30, 				    // [必填]底线得分率(%) = 底线击球得分数÷底线击球数×100%
+        "netPointRate": 22, 							// [必填]网前球率(%) = 网前击球数÷总击球数×100%（网前：击球点位置y≤0.2）
+        "netPointWinRate": 50, 						// [必填]网前得分率(%) = 网前击球得分数÷网前击球数×100%
+        "totalShots": 23, 								// [必填]总击球数 = 统计所有hit类型的击球次数（含失误）
+        "aceCount": 20, 									// [必填]ACE球数 = 发球落点xy有效且对方未触球的次数
+        "netApproaches": 20, 							// [必填]上网次数 = 球员移动至y≤0.2区域的次数
+        "avgBallSpeed": 100, 							// [必填]平均球速(km/h) = 所有击球速度总和÷总击球数
+        "maxBallSpeed": 150, 							// [必填]最高球速(km/h) = 所有击球速度中的最大值
+        "totalDistance": 20, 							// [必填]总移动距离(米) = 累加球员每帧xy坐标变化的物理距离
+        "avgMoveSpeed": 3, 								// [必填]平均移动速度(m/s) = 总移动距离÷总运动时间
+        "maxMoveSpeed": 15 								// [必填]最高移动速度(m/s) = 单帧移动距离÷单帧时间（如10ms）
+      },
+      "nearCount": {
+        "firstServeSuccessRate": 0, 			// [必填]一发成功率(%) = 成功一发数÷总一发数×100%（成功：发球落点xy在0.2<x<0.8、0.1<y<0.4有效区）
+        "returnFirstSuccessRate": 100, 		// [必填]接一发成功率(%) = 成功接一发数÷总接一发数×100%（成功：回击球落点xy在对方半场）
+        "baselineShotRate": 50, 					// [必填]底线击球率(%) = 底线击球数÷总击球数×100%（底线：击球位置y≥0.8）
+        "baselineWinRate": 30, 						// [必填]底线得分率(%) = 底线击球得分数÷底线击球数×100%
+        "netPointRate": 22, 							// [必填]网前球率(%) = 网前击球数÷总击球数×100%（网前：击球位置y≤0.2）
+        "netPointWinRate": 50, 						// [必填]网前得分率(%) = 网前击球得分数÷网前击球数×100%
+        "totalShots": 23, 								// [必填]总击球数 = 统计所有hit类型的击球次数（含失误）
+        "aceCount": 20, 									// [必填]ACE球数 = 发球落点xy有效且对方未触球的次数
+        "netApproaches": 20, 							// [必填]上网次数 = 球员移动至y≤0.2区域的次数
+        "avgBallSpeed": 100, 							// [必填]平均球速(km/h) = 所有击球速度总和÷总击球数
+        "maxBallSpeed": 150, 							// [必填]最高球速(km/h) = 所有击球速度中的最大值
+        "totalDistance": 20, 							// [必填]总移动距离(米) = 累加球员每帧xy坐标变化的物理距离
+        "avgMoveSpeed": 3, 								// [必填]平均移动速度(m/s) = 总移动距离÷总运动时间
+        "maxMoveSpeed": 15 								// [必填]最高移动速度(m/s) = 单帧移动距离÷单帧时间（如10ms）
+      }
+    },
+    "resultmatrix": [												// [必填]整个回合的击球/落点位置数组(无顺序),type类型,hit:击球,bounce:落点,handType类型:forehand正手，backhand反手
+          {
+            "x": 0.11,
+            "y": 0.15,
+            "type": "hit",
+            "speed": 70,
+            "handType": "forehand"
+          },
+          {
+            "x": 0.33,
+            "y": 0.22,
+            "type": "bounce",
+            "speed": 50,
+            "handType": "forehand"
+          },
+          {
+              "x": 0.77,
+              "y": 0.86,
+              "type": "hit",
+              "speed": 80,
+              "handType": "forehand"
+          },
+          {
+              "x": 0.11,
+              "y": 0.63,
+              "type": "bounce",
+              "speed": 70,
+              "handType": "backhand"
+          },
+          {
+              "x": 0.82,
+              "y": 0.94,
+              "type": "hit",
+              "speed": 50,
+              "handType": "forehand"
+          },
+          {
+              "x": 0.31,
+              "y": 0.29,
+              "type": "bounce",
+              "speed": 80,
+              "handType": "forehand"
+          },
+          {
+              "x": 0.31,
+              "y": 0.29,
+              "type": "bounce",
+              "speed": 80,
+              "handType": "serve"
+          },
+          {
+              "x": 0.47,
+              "y": 0.33,
+              "type": "serve",
+              "speed": 120,
+              "handType": "forehand"
+          }
+      ],
+    "trackMatrix": [		// 预留，填空数组就行			
+          {
+              "x": 0.11,
+              "y": 0.15,
+              "type": "hit",
+              "speed": 70,
+              "timestamp": 0,
+              "farCountPerson_x": 0.11,
+              "farCountPerson_y": 0.09,
+              "nearCountPerson_x": 0.81,
+              "nearCountPerson_y": 0.99
+          },
+          {
+              "x": 0.11,
+              "y": 0.18,
+              "type": "running",
+              "speed": 60,
+              "timestamp": 1,
+              "farCountPerson_x": 0.11,
+              "farCountPerson_y": 0.09,
+              "nearCountPerson_x": 0.81,
+              "nearCountPerson_y": 0.99
+          }
+      ]
+    }
+}

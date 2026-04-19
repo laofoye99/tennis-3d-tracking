@@ -30,6 +30,10 @@ def run_pipeline(
     status_dict: dict[str, Any],
     frame_queue: Optional[mp.Queue] = None,
     detector_type: str = "auto",
+    player_model_path: str = "",
+    player_device: str = "cuda",
+    player_conf: float = 0.4,
+    player_run_every_n: int = 5,
 ) -> None:
     """Entry point for a camera pipeline subprocess.
 
@@ -56,6 +60,7 @@ def run_pipeline(
         detector = None
         tracker = None
         homography = None
+        player_detector = None
         try:
             detector = create_detector(
                 model_path, input_size, frames_in, frames_out, device,
@@ -72,6 +77,18 @@ def run_pipeline(
         except Exception as e:
             log.warning("Inference components failed to load, inference disabled: %s", e)
             status_dict["inference_enabled"] = False
+
+        if player_model_path:
+            try:
+                from app.pipeline.player_detector import PlayerPoseDetector
+                player_detector = PlayerPoseDetector(
+                    model_path=player_model_path,
+                    device=player_device,
+                    conf=player_conf,
+                    run_every_n=player_run_every_n,
+                )
+            except Exception as e:
+                log.warning("Player detector failed to load, disabled: %s", e)
 
         status_dict["state"] = "running"
         log.info("Pipeline running")
@@ -140,6 +157,26 @@ def run_pipeline(
                         _jpeg_q.put_nowait((frame, is_recording))
                     except _queue.Full:
                         pass
+
+            # Player pose detection (clean frame, before OSD mask)
+            if player_detector is not None:
+                try:
+                    player_dets = player_detector.detect(frame)
+                    if player_dets:
+                        player_msg = {
+                            "type": "player_pose",
+                            "camera_name": name,
+                            "frame_id": frame_id,
+                            "timestamp": time.time(),
+                            "capture_ts": capture_ts,
+                            "detections": player_dets,
+                        }
+                        try:
+                            result_queue.put_nowait(player_msg)
+                        except Exception:
+                            pass
+                except Exception as e:
+                    log.debug("Player detection error: %s", e)
 
             # Mask OSD for inference only (after JPEG thread got clean ref)
             frame[0:41, 0:603] = 0

@@ -1,0 +1,273 @@
+2026-04-19 18:21:09,310 [main] INFO Log file: logs\tennis_20260419_182109.log
+2026-04-19 18:21:11,290 [main] INFO Starting server on 0.0.0.0:8000
+2026-04-19 18:21:36,655 [app.orchestrator] INFO [cam66] Pipeline process started (pid=41248)
+2026-04-19 18:21:36,656 [app.orchestrator] INFO Consumer thread started
+2026-04-19 18:21:36,656 [app.orchestrator] INFO Tracking JSONL started: recordings\tracking_20260419_182136.jsonl
+2026-04-19 18:21:44,000 [app.pipeline.homography] INFO [cam66] Homography loaded (reproj error: 0.0000m, court_x: [-1.0, 9.2])
+2026-04-19 18:21:51,917 [app.orchestrator] INFO [cam68] Pipeline process started (pid=37504)
+2026-04-19 18:21:58,660 [app.pipeline.homography] INFO [cam68] Homography loaded (reproj error: 0.0000m, court_x: [-1.0, 9.2])
+2026-04-19 18:22:00,690 [app.analytics] INFO Rally 1: serving from near (frame 0)
+2026-04-19 18:22:30,079 [app.analytics] INFO Rally 1 started (t=1776594150.08)
+2026-04-19 18:22:30,079 [app.analytics] INFO Rally 1: serve crossed net (frame 0)
+2026-04-19 18:22:31,021 [app.analytics] INFO Rally 1 ended: reason=net, strokes=3, bounces=0, 32.1s
+2026-04-19 18:22:33,927 [app.analytics] INFO Rally 2: started (frame 0)
+2026-04-19 18:23:00,031 [app.analytics] INFO Rally 2 ended: reason=net, strokes=3, bounces=0, 26.1s
+2026-04-19 18:23:12,486 [app.analytics] INFO Rally 1 ended: 6 strokes, 3 bounces, 39.2s
+2026-04-19 18:23:12,499 [app.analytics] INFO Rally 3: serving from near (frame 0)
+2026-04-19 18:23:26,808 [app.analytics] INFO Rally 4: serving from near (frame 0)
+2026-04-19 18:23:49,229 [app.orchestrator] WARNING [cam66] Pipeline already running
+2026-04-19 18:23:51,645 [app.orchestrator] WARNING [cam66] Pipeline already running
+2026-04-19 18:23:57,191 [app.analytics] INFO Rally 5: serving from near (frame 0)
+2026-04-19 18:24:05,665 [app.analytics] INFO Rally 6: serving from near (frame 0)
+2026-04-19 18:24:30,496 [app.analytics] INFO Rally 2 started (t=1776594270.50)
+2026-04-19 18:24:30,496 [app.analytics] INFO Rally 6: serve crossed net (frame 0)
+2026-04-19 18:24:32,630 [app.analytics] INFO Rally 6 ended: reason=net, strokes=1, bounces=0, 27.0s
+2026-04-19 18:24:42,462 [app.analytics] INFO Rally 7: serving from near (frame 0)
+2026-04-19 18:25:12,416 [app.analytics] INFO Rally 2 ended: 4 strokes, 4 bounces, 38.7s
+2026-04-19 18:25:12,416 [app.analytics] INFO Rally 8: serving from near (frame 0)
+2026-04-19 18:25:16,969 [app.analytics] INFO Rally 9: serving from near (frame 0)
+2026-04-19 18:25:27,189 [app.analytics] INFO Rally 10: serving from near (frame 0)
+2026-04-19 18:25:57,136 [app.analytics] INFO Rally 11: serving from near (frame 0)
+2026-04-19 18:26:06,661 [app.analytics] INFO Rally 12: serving from near (frame 0)
+2026-04-19 18:26:30,130 [app.analytics] INFO Rally 3 started (t=1776594390.13)
+2026-04-19 18:26:30,130 [app.analytics] INFO Rally 12: serve crossed net (frame 0)
+2026-04-19 18:26:33,987 [app.analytics] INFO Rally 3 ended: 4 strokes, 0 bounces, 0.4s
+2026-04-19 18:26:34,671 [app.analytics] INFO Rally 12 ended: reason=timeout, strokes=4, bounces=0, 28.0s
+2026-04-19 18:26:34,671 [app.analytics] INFO Rally 13: started (frame 0)
+2026-04-19 18:26:34,673 [app.analytics] INFO Rally 4 started (t=1776594394.67)
+2026-04-19 18:26:59,242 [app.analytics] INFO Rally 13 ended: reason=net, strokes=2, bounces=0, 24.6s
+2026-04-19 18:27:12,487 [app.analytics] INFO Rally 4 ended: 2 strokes, 4 bounces, 34.7s
+2026-04-19 18:27:12,558 [app.analytics] INFO Rally 14: serving from near (frame 0)
+2026-04-19 18:27:27,245 [app.analytics] INFO Rally 15: started (frame 0)
+2026-04-19 18:27:50,442 [app.analytics] INFO Rally 5 started (t=1776594470.44)
+2026-04-19 18:27:50,442 [app.analytics] INFO Rally 15 ended: reason=net, strokes=1, bounces=0, 23.2s
+2026-04-19 18:27:56,970 [app.analytics] INFO Rally 5 ended: 2 strokes, 0 bounces, 3.3s
+2026-04-19 18:27:57,160 [app.analytics] INFO Rally 16: serving from near (frame 0)
+2026-04-19 18:28:05,905 [app.analytics] INFO Rally 17: serving from near (frame 0)
+2026-04-19 18:28:29,910 [app.analytics] INFO Rally 6 started (t=1776594509.91)
+2026-04-19 18:28:29,910 [app.analytics] INFO Rally 17: serve crossed net (frame 0)
+2026-04-19 18:28:59,992 [app.analytics] INFO Rally 17 ended: reason=net, strokes=4, bounces=0, 54.1s
+2026-04-19 18:29:12,558 [app.analytics] INFO Rally 6 ended: 4 strokes, 2 bounces, 39.4s
+2026-04-19 18:29:12,558 [app.analytics] INFO Rally 18: serving from near (frame 0)
+2026-04-19 18:29:27,187 [app.analytics] INFO Rally 19: serving from near (frame 0)
+2026-04-19 18:29:57,187 [app.analytics] INFO Rally 20: serving from near (frame 0)
+2026-04-19 18:30:29,898 [app.analytics] INFO Rally 7 started (t=1776594629.90)
+2026-04-19 18:30:29,899 [app.analytics] INFO Rally 20: serve crossed net (frame 0)
+2026-04-19 18:31:00,216 [app.analytics] INFO Rally 20 ended: reason=net, strokes=4, bounces=0, 63.0s
+2026-04-19 18:31:12,623 [app.analytics] INFO Rally 7 ended: 4 strokes, 4 bounces, 39.2s
+2026-04-19 18:31:12,623 [app.analytics] INFO Rally 21: serving from near (frame 0)
+2026-04-19 18:31:19,474 [app.analytics] INFO Rally 8 started (t=1776594679.47)
+2026-04-19 18:31:19,474 [app.analytics] INFO Rally 21: serve crossed net (frame 0)
+2026-04-19 18:31:24,969 [app.analytics] INFO Rally 8 ended: 2 strokes, 0 bounces, 1.5s
+2026-04-19 18:31:26,859 [app.analytics] INFO Rally 21 ended: reason=timeout, strokes=2, bounces=0, 14.2s
+2026-04-19 18:31:26,859 [app.analytics] INFO Rally 22: serving from near (frame 0)
+2026-04-19 18:31:57,209 [app.analytics] INFO Rally 23: serving from near (frame 0)
+2026-04-19 18:32:10,833 [app.analytics] INFO Rally 24: serving from near (frame 0)
+2026-04-19 18:32:30,016 [app.analytics] INFO Rally 9 started (t=1776594750.02)
+2026-04-19 18:32:30,016 [app.analytics] INFO Rally 24: serve crossed net (frame 0)
+2026-04-19 18:32:33,567 [app.analytics] INFO Rally 24 ended: reason=net, strokes=6, bounces=0, 22.7s
+2026-04-19 18:32:33,573 [app.report] INFO Generating report from tracking_20260419_182136.jsonl
+2026-04-19 18:32:35,095 [app.orchestrator] WARNING Auto report failed: 'ts'
+2026-04-19 18:32:37,543 [app.analytics] INFO Rally 25: serving from near (frame 0)
+2026-04-19 18:32:37,543 [app.analytics] INFO Rally 25: serve crossed net (frame 0)
+2026-04-19 18:33:00,219 [app.analytics] INFO Rally 25 ended: reason=net, strokes=3, bounces=0, 22.7s
+2026-04-19 18:33:12,608 [app.analytics] INFO Rally 9 ended: 10 strokes, 2 bounces, 39.4s
+2026-04-19 18:33:12,608 [app.analytics] INFO Rally 26: serving from near (frame 0)
+2026-04-19 18:33:16,989 [app.analytics] INFO Rally 27: serving from near (frame 0)
+2026-04-19 18:33:19,571 [app.analytics] INFO Rally 10 started (t=1776594799.57)
+2026-04-19 18:33:19,571 [app.analytics] INFO Rally 27: serve crossed net (frame 0)
+2026-04-19 18:33:19,572 [app.analytics] INFO Rally 27 ended: reason=net, strokes=1, bounces=0, 2.6s
+2026-04-19 18:33:27,224 [app.analytics] INFO Rally 10 ended: 2 strokes, 1 bounces, 0.6s
+2026-04-19 18:33:27,224 [app.analytics] INFO Rally 28: started (frame 0)
+2026-04-19 18:34:09,630 [app.analytics] INFO Rally 28 ended: reason=timeout, strokes=0, bounces=0, 42.4s
+2026-04-19 18:34:09,630 [app.analytics] INFO Rally 29: serving from near (frame 0)
+2026-04-19 18:34:30,180 [app.analytics] INFO Rally 11 started (t=1776594870.18)
+2026-04-19 18:34:30,180 [app.analytics] INFO Rally 29: serve crossed net (frame 0)
+2026-04-19 18:34:34,036 [app.analytics] INFO Rally 29 ended: reason=net, strokes=3, bounces=0, 24.4s
+2026-04-19 18:35:12,697 [app.analytics] INFO Rally 11 ended: 6 strokes, 6 bounces, 39.3s
+2026-04-19 18:35:12,697 [app.analytics] INFO Rally 30: serving from near (frame 0)
+2026-04-19 18:35:27,553 [app.analytics] INFO Rally 31: serving from near (frame 0)
+2026-04-19 18:35:52,213 [app.analytics] INFO Rally 12 started (t=1776594952.21)
+2026-04-19 18:35:52,213 [app.analytics] INFO Rally 31: serve crossed net (frame 0)
+2026-04-19 18:35:52,213 [app.analytics] INFO Rally 31 ended: reason=net, strokes=1, bounces=0, 24.7s
+2026-04-19 18:35:57,101 [app.analytics] INFO Rally 12 ended: 2 strokes, 1 bounces, 0.7s
+2026-04-19 18:35:57,101 [app.analytics] INFO Rally 32: serving from near (frame 0)
+2026-04-19 18:36:05,868 [app.analytics] INFO Rally 33: serving from near (frame 0)
+2026-04-19 18:36:29,933 [app.analytics] INFO Rally 13 started (t=1776594989.93)
+2026-04-19 18:36:29,933 [app.analytics] INFO Rally 33: serve crossed net (frame 0)
+2026-04-19 18:36:35,421 [app.analytics] INFO Rally 33 ended: reason=net, strokes=4, bounces=0, 29.6s
+2026-04-19 18:36:42,657 [app.analytics] INFO Rally 34: started (frame 0)
+2026-04-19 18:37:00,072 [app.analytics] INFO Rally 34 ended: reason=net, strokes=0, bounces=0, 17.4s
+2026-04-19 18:37:12,986 [app.analytics] INFO Rally 13 ended: 4 strokes, 2 bounces, 39.6s
+2026-04-19 18:37:13,401 [app.analytics] INFO Rally 35: serving from near (frame 0)
+2026-04-19 18:37:19,602 [app.analytics] INFO Rally 14 started (t=1776595039.60)
+2026-04-19 18:37:19,602 [app.analytics] INFO Rally 35: serve crossed net (frame 0)
+2026-04-19 18:37:22,986 [app.analytics] INFO Rally 14 ended: 2 strokes, 0 bounces, 0.0s
+2026-04-19 18:37:26,690 [app.analytics] INFO Rally 35 ended: reason=timeout, strokes=2, bounces=0, 13.3s
+2026-04-19 18:37:26,690 [app.analytics] INFO Rally 36: serving from near (frame 0)
+2026-04-19 18:37:57,186 [app.analytics] INFO Rally 37: serving from near (frame 0)
+2026-04-19 18:38:09,460 [app.analytics] INFO Rally 15 started (t=1776595089.46)
+2026-04-19 18:38:09,461 [app.analytics] INFO Rally 37: serve crossed net (frame 0)
+2026-04-19 18:38:09,461 [app.analytics] INFO Rally 37 ended: reason=net, strokes=1, bounces=0, 12.3s
+2026-04-19 18:38:31,985 [app.analytics] INFO Rally 15 ended: 2 strokes, 1 bounces, 19.5s
+2026-04-19 18:38:32,638 [app.analytics] INFO Rally 16 started (t=1776595112.64)
+2026-04-19 18:38:32,638 [app.analytics] INFO Rally 38: started (frame 0)
+2026-04-19 18:38:36,487 [app.analytics] INFO Rally 16 ended: 3 strokes, 0 bounces, 0.6s
+2026-04-19 18:38:36,505 [app.analytics] INFO Rally 17 started (t=1776595116.50)
+2026-04-19 18:38:36,505 [app.analytics] INFO Rally 38 ended: reason=timeout, strokes=3, bounces=0, 3.9s
+2026-04-19 18:38:36,507 [app.analytics] INFO Rally 39: started (frame 0)
+2026-04-19 18:38:36,507 [app.report] INFO Generating report from tracking_20260419_182136.jsonl
+2026-04-19 18:38:38,280 [app.orchestrator] WARNING Auto report failed: 'ts'
+2026-04-19 18:38:46,258 [app.analytics] INFO Rally 39 ended: reason=net, strokes=1, bounces=0, 9.8s
+2026-04-19 18:39:12,659 [app.analytics] INFO Rally 17 ended: 1 strokes, 4 bounces, 32.6s
+2026-04-19 18:39:12,659 [app.analytics] INFO Rally 40: serving from near (frame 0)
+2026-04-19 18:39:27,996 [app.analytics] INFO Rally 41: serving from near (frame 0)
+2026-04-19 18:40:05,683 [app.analytics] INFO Rally 42: serving from near (frame 0)
+2026-04-19 18:40:10,634 [app.analytics] INFO Rally 43: serving from near (frame 0)
+2026-04-19 18:40:30,511 [app.analytics] INFO Rally 18 started (t=1776595230.51)
+2026-04-19 18:40:30,511 [app.analytics] INFO Rally 43: serve crossed net (frame 0)
+2026-04-19 18:40:36,330 [app.analytics] INFO Rally 43 ended: reason=net, strokes=5, bounces=0, 25.7s
+2026-04-19 18:41:12,680 [app.analytics] INFO Rally 18 ended: 6 strokes, 4 bounces, 38.6s
+2026-04-19 18:41:12,680 [app.analytics] INFO Rally 44: serving from near (frame 0)
+2026-04-19 18:41:27,198 [app.analytics] INFO Rally 45: serving from near (frame 0)
+2026-04-19 18:42:05,782 [app.analytics] INFO Rally 46: serving from near (frame 0)
+2026-04-19 18:42:30,489 [app.analytics] INFO Rally 19 started (t=1776595350.49)
+2026-04-19 18:42:30,489 [app.analytics] INFO Rally 46: serve crossed net (frame 0)
+2026-04-19 18:42:35,299 [app.analytics] INFO Rally 19 ended: 2 strokes, 0 bounces, 1.4s
+2026-04-19 18:42:35,299 [app.analytics] INFO Rally 20 started (t=1776595355.30)
+2026-04-19 18:42:35,300 [app.analytics] INFO Rally 46 ended: reason=timeout, strokes=2, bounces=0, 29.5s
+2026-04-19 18:42:35,300 [app.analytics] INFO Rally 47: started (frame 0)
+2026-04-19 18:43:00,015 [app.analytics] INFO Rally 47 ended: reason=net, strokes=2, bounces=0, 24.7s
+2026-04-19 18:43:12,660 [app.analytics] INFO Rally 20 ended: 2 strokes, 2 bounces, 33.9s
+2026-04-19 18:43:12,660 [app.analytics] INFO Rally 48: serving from near (frame 0)
+2026-04-19 18:43:17,231 [app.analytics] INFO Rally 49: serving from near (frame 0)
+2026-04-19 18:43:27,557 [app.analytics] INFO Rally 50: serving from near (frame 0)
+2026-04-19 18:43:57,101 [app.analytics] INFO Rally 51: serving from near (frame 0)
+2026-04-19 18:44:09,496 [app.analytics] INFO Rally 21 started (t=1776595449.50)
+2026-04-19 18:44:09,496 [app.analytics] INFO Rally 51: serve crossed net (frame 0)
+2026-04-19 18:44:32,877 [app.analytics] INFO Rally 51 ended: reason=net, strokes=7, bounces=0, 35.8s
+2026-04-19 18:44:36,418 [app.analytics] INFO Rally 52: serving from near (frame 0)
+2026-04-19 18:45:12,694 [app.analytics] INFO Rally 21 ended: 10 strokes, 9 bounces, 60.0s
+2026-04-19 18:45:12,694 [app.analytics] INFO Rally 53: serving from near (frame 0)
+2026-04-19 18:45:27,194 [app.analytics] INFO Rally 54: serving from near (frame 0)
+2026-04-19 18:45:57,242 [app.analytics] INFO Rally 55: serving from near (frame 0)
+2026-04-19 18:46:05,901 [app.analytics] INFO Rally 56: serving from near (frame 0)
+2026-04-19 18:46:29,990 [app.analytics] INFO Rally 22 started (t=1776595589.99)
+2026-04-19 18:46:29,990 [app.analytics] INFO Rally 56: serve crossed net (frame 0)
+2026-04-19 18:46:36,463 [app.analytics] INFO Rally 22 ended: 5 strokes, 0 bounces, 3.2s
+2026-04-19 18:46:36,464 [app.analytics] INFO Rally 23 started (t=1776595596.46)
+2026-04-19 18:46:36,464 [app.analytics] INFO Rally 56 ended: reason=timeout, strokes=5, bounces=0, 30.6s
+2026-04-19 18:46:36,464 [app.analytics] INFO Rally 57: started (frame 0)
+2026-04-19 18:47:00,023 [app.analytics] INFO Rally 57 ended: reason=net, strokes=1, bounces=0, 23.6s
+2026-04-19 18:47:12,474 [app.analytics] INFO Rally 23 ended: 1 strokes, 4 bounces, 32.8s
+2026-04-19 18:47:12,474 [app.analytics] INFO Rally 58: serving from near (frame 0)
+2026-04-19 18:47:16,864 [app.analytics] INFO Rally 59: serving from near (frame 0)
+2026-04-19 18:47:26,938 [app.analytics] INFO Rally 60: serving from near (frame 0)
+2026-04-19 18:48:05,909 [app.analytics] INFO Rally 61: serving from near (frame 0)
+2026-04-19 18:48:30,127 [app.analytics] INFO Rally 24 started (t=1776595710.13)
+2026-04-19 18:48:30,127 [app.analytics] INFO Rally 61: serve crossed net (frame 0)
+2026-04-19 18:48:59,238 [app.analytics] INFO Rally 61 ended: reason=net, strokes=2, bounces=0, 53.3s
+2026-04-19 18:49:12,486 [app.analytics] INFO Rally 24 ended: 2 strokes, 1 bounces, 39.0s
+2026-04-19 18:49:12,699 [app.analytics] INFO Rally 62: serving from near (frame 0)
+2026-04-19 18:49:17,018 [app.analytics] INFO Rally 63: serving from near (frame 0)
+2026-04-19 18:49:27,226 [app.analytics] INFO Rally 64: started (frame 0)
+2026-04-19 18:49:44,991 [app.analytics] INFO Rally 25 started (t=1776595784.99)
+2026-04-19 18:50:33,351 [app.analytics] INFO Rally 64 ended: reason=net, strokes=8, bounces=0, 66.1s
+2026-04-19 18:50:36,486 [app.analytics] INFO Rally 25 ended: 9 strokes, 3 bounces, 48.4s
+2026-04-19 18:50:37,527 [app.analytics] INFO Rally 26 started (t=1776595837.53)
+2026-04-19 18:50:37,527 [app.analytics] INFO Rally 65: serving from near (frame 0)
+2026-04-19 18:50:37,528 [app.analytics] INFO Rally 65: serve crossed net (frame 0)
+2026-04-19 18:50:59,991 [app.analytics] INFO Rally 65 ended: reason=net, strokes=1, bounces=0, 22.5s
+2026-04-19 18:50:59,992 [app.report] INFO Generating report from tracking_20260419_182136.jsonl
+2026-04-19 18:51:03,407 [app.orchestrator] WARNING Auto report failed: 'ts'
+2026-04-19 18:51:03,635 [app.analytics] INFO Rally 26 ended: 1 strokes, 2 bounces, 22.5s
+2026-04-19 18:51:03,640 [app.analytics] INFO Rally 66: started (frame 0)
+2026-04-19 18:51:16,804 [app.analytics] INFO Rally 66 ended: reason=timeout, strokes=0, bounces=0, 13.2s
+2026-04-19 18:51:16,804 [app.analytics] INFO Rally 67: serving from near (frame 0)
+2026-04-19 18:51:26,736 [app.analytics] INFO Rally 68: serving from near (frame 0)
+2026-04-19 18:51:57,124 [app.analytics] INFO Rally 69: serving from near (frame 0)
+2026-04-19 18:52:09,471 [app.analytics] INFO Rally 27 started (t=1776595929.47)
+2026-04-19 18:52:09,471 [app.analytics] INFO Rally 69: serve crossed net (frame 0)
+2026-04-19 18:52:32,660 [app.analytics] INFO Rally 69 ended: reason=net, strokes=4, bounces=0, 35.5s
+2026-04-19 18:52:36,488 [app.analytics] INFO Rally 27 ended: 9 strokes, 2 bounces, 23.8s
+2026-04-19 18:52:36,499 [app.analytics] INFO Rally 28 started (t=1776595956.50)
+2026-04-19 18:52:36,499 [app.analytics] INFO Rally 70: started (frame 0)
+2026-04-19 18:52:59,962 [app.analytics] INFO Rally 70 ended: reason=net, strokes=1, bounces=0, 23.5s
+2026-04-19 18:53:12,486 [app.analytics] INFO Rally 28 ended: 1 strokes, 7 bounces, 32.6s
+2026-04-19 18:53:12,614 [app.analytics] INFO Rally 71: serving from near (frame 0)
+2026-04-19 18:53:26,585 [app.analytics] INFO Rally 72: serving from near (frame 0)
+2026-04-19 18:53:57,075 [app.analytics] INFO Rally 73: serving from near (frame 0)
+2026-04-19 18:54:09,623 [app.analytics] INFO Rally 74: serving from near (frame 0)
+2026-04-19 18:54:30,048 [app.analytics] INFO Rally 29 started (t=1776596070.05)
+2026-04-19 18:54:30,048 [app.analytics] INFO Rally 74: serve crossed net (frame 0)
+2026-04-19 18:54:32,664 [app.analytics] INFO Rally 74 ended: reason=net, strokes=5, bounces=0, 23.0s
+2026-04-19 18:54:36,487 [app.analytics] INFO Rally 29 ended: 9 strokes, 1 bounces, 3.3s
+2026-04-19 18:54:36,541 [app.analytics] INFO Rally 30 started (t=1776596076.54)
+2026-04-19 18:54:36,541 [app.analytics] INFO Rally 75: serving from near (frame 0)
+2026-04-19 18:54:36,541 [app.analytics] INFO Rally 75: serve crossed net (frame 0)
+2026-04-19 18:55:00,067 [app.analytics] INFO Rally 75 ended: reason=net, strokes=1, bounces=0, 23.5s
+2026-04-19 18:55:12,486 [app.analytics] INFO Rally 30 ended: 1 strokes, 6 bounces, 32.7s
+2026-04-19 18:55:12,501 [app.analytics] INFO Rally 76: serving from near (frame 0)
+2026-04-19 18:55:16,828 [app.analytics] INFO Rally 77: serving from near (frame 0)
+2026-04-19 18:55:19,439 [app.analytics] INFO Rally 31 started (t=1776596119.44)
+2026-04-19 18:55:19,439 [app.analytics] INFO Rally 77: serve crossed net (frame 0)
+2026-04-19 18:55:22,488 [app.analytics] INFO Rally 31 ended: 1 strokes, 0 bounces, 0.0s
+2026-04-19 18:55:26,823 [app.analytics] INFO Rally 32 started (t=1776596126.82)
+2026-04-19 18:55:26,823 [app.analytics] INFO Rally 77 ended: reason=timeout, strokes=1, bounces=0, 10.0s
+2026-04-19 18:55:26,823 [app.analytics] INFO Rally 78: serving from near (frame 0)
+2026-04-19 18:55:26,823 [app.analytics] INFO Rally 78: serve crossed net (frame 0)
+2026-04-19 18:55:56,987 [app.analytics] INFO Rally 32 ended: 1 strokes, 3 bounces, 26.7s
+2026-04-19 18:55:57,205 [app.analytics] INFO Rally 78 ended: reason=timeout, strokes=1, bounces=0, 30.4s
+2026-04-19 18:55:57,205 [app.analytics] INFO Rally 79: serving from near (frame 0)
+2026-04-19 18:56:05,899 [app.analytics] INFO Rally 80: serving from near (frame 0)
+2026-04-19 18:56:30,129 [app.analytics] INFO Rally 33 started (t=1776596190.13)
+2026-04-19 18:56:30,129 [app.analytics] INFO Rally 80: serve crossed net (frame 0)
+2026-04-19 18:56:30,463 [app.analytics] INFO Rally 80 ended: reason=net, strokes=5, bounces=0, 24.6s
+2026-04-19 18:56:33,486 [app.analytics] INFO Rally 33 ended: 6 strokes, 0 bounces, 0.3s
+2026-04-19 18:56:35,265 [app.analytics] INFO Rally 81: started (frame 0)
+2026-04-19 18:57:00,008 [app.analytics] INFO Rally 81 ended: reason=net, strokes=0, bounces=0, 24.7s
+2026-04-19 18:57:26,771 [app.analytics] INFO Rally 82: serving from near (frame 0)
+2026-04-19 18:57:57,068 [app.analytics] INFO Rally 83: serving from near (frame 0)
+2026-04-19 18:58:09,479 [app.analytics] INFO Rally 34 started (t=1776596289.48)
+2026-04-19 18:58:09,479 [app.analytics] INFO Rally 83: serve crossed net (frame 0)
+2026-04-19 18:58:30,115 [app.analytics] INFO Rally 83 ended: reason=net, strokes=5, bounces=0, 33.0s
+2026-04-19 18:58:30,115 [app.report] INFO Generating report from tracking_20260419_182136.jsonl
+2026-04-19 18:58:34,598 [app.orchestrator] WARNING Auto report failed: 'ts'
+2026-04-19 18:58:34,886 [app.analytics] INFO Rally 34 ended: 5 strokes, 2 bounces, 20.6s
+2026-04-19 18:58:34,947 [app.analytics] INFO Rally 84: started (frame 0)
+2026-04-19 18:58:34,967 [app.analytics] INFO Rally 35 started (t=1776596314.95)
+2026-04-19 18:58:59,991 [app.analytics] INFO Rally 84 ended: reason=net, strokes=5, bounces=0, 25.0s
+2026-04-19 18:59:12,480 [app.analytics] INFO Rally 35 ended: 5 strokes, 3 bounces, 34.3s
+2026-04-19 18:59:12,480 [app.analytics] INFO Rally 85: serving from near (frame 0)
+2026-04-19 18:59:16,461 [app.analytics] INFO Rally 86: serving from near (frame 0)
+2026-04-19 18:59:26,791 [app.analytics] INFO Rally 87: serving from near (frame 0)
+2026-04-19 18:59:57,263 [app.analytics] INFO Rally 88: serving from near (frame 0)
+2026-04-19 19:00:29,933 [app.analytics] INFO Rally 36 started (t=1776596429.93)
+2026-04-19 19:00:29,933 [app.analytics] INFO Rally 88: serve crossed net (frame 0)
+2026-04-19 19:00:36,302 [app.analytics] INFO Rally 88 ended: reason=net, strokes=8, bounces=0, 39.0s
+2026-04-19 19:01:12,486 [app.analytics] INFO Rally 36 ended: 8 strokes, 5 bounces, 39.2s
+2026-04-19 19:01:12,708 [app.analytics] INFO Rally 89: serving from near (frame 0)
+2026-04-19 19:01:17,187 [app.analytics] INFO Rally 90: serving from near (frame 0)
+2026-04-19 19:01:19,446 [app.analytics] INFO Rally 37 started (t=1776596479.45)
+2026-04-19 19:01:19,446 [app.analytics] INFO Rally 90: serve crossed net (frame 0)
+2026-04-19 19:01:22,486 [app.analytics] INFO Rally 37 ended: 1 strokes, 0 bounces, 0.0s
+2026-04-19 19:01:22,760 [app.analytics] INFO Rally 38 started (t=1776596482.76)
+2026-04-19 19:01:22,760 [app.analytics] INFO Rally 90 ended: reason=timeout, strokes=1, bounces=0, 5.6s
+2026-04-19 19:01:22,761 [app.analytics] INFO Rally 91: serving from near (frame 0)
+2026-04-19 19:01:22,761 [app.analytics] INFO Rally 91: serve crossed net (frame 0)
+2026-04-19 19:01:25,986 [app.analytics] INFO Rally 38 ended: 1 strokes, 0 bounces, 0.0s
+2026-04-19 19:01:27,656 [app.analytics] INFO Rally 91 ended: reason=timeout, strokes=1, bounces=0, 4.9s
+2026-04-19 19:01:27,657 [app.analytics] INFO Rally 92: serving from near (frame 0)
+2026-04-19 19:01:57,025 [app.analytics] INFO Rally 93: serving from near (frame 0)
+2026-04-19 19:02:02,828 [app.analytics] INFO Rally 94: serving from near (frame 0)
+2026-04-19 19:02:09,625 [app.analytics] INFO Rally 95: started (frame 0)
+2026-04-19 19:02:29,934 [app.analytics] INFO Rally 39 started (t=1776596549.93)
+2026-04-19 19:03:00,133 [app.analytics] INFO Rally 95 ended: reason=net, strokes=6, bounces=0, 50.5s
+2026-04-19 19:03:12,687 [app.analytics] INFO Rally 39 ended: 6 strokes, 5 bounces, 39.6s
+2026-04-19 19:03:12,687 [app.analytics] INFO Rally 96: serving from near (frame 0)
+2026-04-19 19:03:26,448 [app.analytics] INFO Rally 97: serving from near (frame 0)
+2026-04-19 19:03:57,083 [app.analytics] INFO Rally 98: serving from near (frame 0)
+2026-04-19 19:04:05,163 [main] INFO Received signal 2, shutting down...
+2026-04-19 19:04:05,164 [main] INFO Shutting down orchestrator...
+2026-04-19 19:04:05,165 [app.orchestrator] INFO Tracking JSONL closed: recordings\tracking_20260419_182136.jsonl (29773 frames)
+2026-04-19 19:04:05,165 [app.orchestrator] INFO Consumer thread stopped

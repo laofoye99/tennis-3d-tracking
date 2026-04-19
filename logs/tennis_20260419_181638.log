@@ -1,0 +1,10 @@
+2026-04-19 18:16:38,513 [main] INFO Log file: logs\tennis_20260419_181638.log
+2026-04-19 18:16:40,408 [main] INFO Starting server on 0.0.0.0:8000
+2026-04-19 18:17:21,843 [app.orchestrator] INFO [cam66] Pipeline process started (pid=48712)
+2026-04-19 18:17:21,844 [app.orchestrator] INFO Consumer thread started
+2026-04-19 18:17:21,845 [app.orchestrator] INFO Tracking JSONL started: recordings\tracking_20260419_181721.jsonl
+2026-04-19 18:17:26,329 [app.orchestrator] INFO [cam68] Pipeline process started (pid=43348)
+2026-04-19 18:18:03,474 [main] INFO Received signal 2, shutting down...
+2026-04-19 18:18:03,475 [main] INFO Shutting down orchestrator...
+2026-04-19 18:18:03,476 [app.orchestrator] INFO Tracking JSONL closed: recordings\tracking_20260419_181721.jsonl (0 frames)
+2026-04-19 18:18:03,476 [app.orchestrator] INFO Consumer thread stopped
