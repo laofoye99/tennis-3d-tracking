@@ -40,6 +40,11 @@ class CameraStream:
         try:
             cap = cv2.VideoCapture(self.url, cv2.CAP_FFMPEG)
             if cap.isOpened():
+                # Set buffer size and timeouts for stable RTSP reading
+                cap.set(cv2.CAP_PROP_BUFFERSIZE, 3)
+                # Use TCP transport for RTSP (more reliable than UDP)
+                cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 10000)
+                cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 10000)
                 self._cap = cap
                 logger.info("[%s] Connected to %s", self.name, self.url)
                 return True
@@ -74,11 +79,15 @@ class CameraStream:
                 self._timestamp = time.time()
 
     def read(self) -> tuple[np.ndarray | None, int, float]:
-        """Return (frame, frame_id, timestamp). Thread-safe."""
+        """Return (frame, frame_id, timestamp). Thread-safe.
+
+        Returns the internal frame reference directly (no copy).
+        Callers that modify the frame MUST copy it first.
+        """
         with self._lock:
             if self._frame is None:
                 return None, 0, 0.0
-            return self._frame.copy(), self._frame_id, self._timestamp
+            return self._frame, self._frame_id, self._timestamp
 
     def stop(self) -> None:
         self._stopped.set()

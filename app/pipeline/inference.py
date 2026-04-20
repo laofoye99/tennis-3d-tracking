@@ -1,11 +1,12 @@
 """Ball detection inference with GPU/CPU fallback.
 
-Supports two model backends:
+Supports three detector backends:
     - BallDetector:      ONNX-based HRNet (frames_in=3, frames_out=3)
     - TrackNetDetector:  PyTorch-based TrackNet (seq_len=8, bg_mode='concat')
+    - MedianBGDetector:  Median background subtraction (frames_in=30, no GPU)
 
-Use ``create_detector()`` factory to auto-select backend based on model file
-extension (.onnx → BallDetector, .pt → TrackNetDetector).
+Use ``create_detector()`` factory to select backend.  Default auto-selects by
+model file extension; pass ``detector_type="median_bg"`` to use MedianBGDetector.
 """
 
 import logging
@@ -136,31 +137,98 @@ class TrackNetDetector:
                 logger.warning("CUDA not available, falling back to CPU")
             self.device = torch.device("cpu")
 
-        # Load model (author's original architecture: TrackNet(in_dim, out_dim))
+        # Load model — prefer ONNX if available (much faster on RTX 50xx)
         logger.info("Loading TrackNet model: %s (device=%s)", model_path, self.device)
         if bg_mode == "concat":
             in_dim = (frames_in + 1) * 3  # 27 for seq_len=8
         else:
             in_dim = frames_in * 3
-        self.model = TrackNet(in_dim=in_dim, out_dim=frames_in)
-        ckpt = torch.load(model_path, map_location="cpu", weights_only=False)
-        self.model.load_state_dict(ckpt["model"])
-        self.model.eval()
-        self.model.to(self.device)
+
+        onnx_path = model_path.replace('.pt', '.onnx')
+        self._use_onnx = False
+        self.model = None
+
+        import os
+        if os.path.exists(onnx_path):
+            try:
+                import onnxruntime as ort
+                providers = ['CUDAExecutionProvider', 'CPUExecutionProvider'] if device == 'cuda' else ['CPUExecutionProvider']
+                self._ort_session = ort.InferenceSession(onnx_path, providers=providers)
+                self._ort_input_name = self._ort_session.get_inputs()[0].name
+                self._use_onnx = True
+                actual = self._ort_session.get_providers()
+                logger.info("TrackNet using ONNX Runtime (%s): %s", actual[0], onnx_path)
+            except Exception as e:
+                logger.warning("ONNX Runtime failed, falling back to PyTorch: %s", e)
+
+        if not self._use_onnx:
+            # PyTorch fallback
+            self.model = TrackNet(in_dim=in_dim, out_dim=frames_in)
+            ckpt = torch.load(model_path, map_location="cpu", weights_only=False)
+            self.model.load_state_dict(ckpt["model"])
+            self.model.eval()
+            self.model.to(self.device)
 
         # Background (median) frame — (3, H, W) float32 in [0, 1]
         self._bg_frame: Optional[np.ndarray] = None
         self._video_median_computed = False
 
-        # Running median buffer for live camera use
-        self._bg_buffer: list[np.ndarray] = []
-        self._bg_max_frames: int = 50
+        # Try loading pre-computed median from src/bg_median_{camera}.png
+        self._try_load_static_median()
 
-        n_params = sum(p.numel() for p in self.model.parameters())
-        logger.info(
-            "TrackNetDetector ready (CUDA=%s, params=%s, seq_len=%d, bg=%s)",
-            self.device.type == "cuda", f"{n_params:,}", frames_in, bg_mode,
-        )
+        # Running median: large buffer, background thread updates every 5 min
+        self._bg_buffer: list[np.ndarray] = []
+        self._bg_max_frames: int = 200
+        self._bg_update_interval: int = 300  # seconds
+        self._bg_last_update: float = 0
+        self._bg_thread = None
+
+        if self.model is not None:
+            n_params = sum(p.numel() for p in self.model.parameters())
+            logger.info(
+                "TrackNetDetector ready (PyTorch, CUDA=%s, params=%s, seq_len=%d, bg=%s)",
+                self.device.type == "cuda", f"{n_params:,}", frames_in, bg_mode,
+            )
+        else:
+            logger.info(
+                "TrackNetDetector ready (ONNX Runtime, seq_len=%d, bg=%s)",
+                frames_in, bg_mode,
+            )
+
+    def _try_load_static_median(self):
+        """Load pre-computed median background from src/bg_median_*.png if available.
+
+        Tries all matching files. In multi-camera setups, call
+        ``load_static_median(camera_name)`` after construction to load
+        the correct per-camera median.
+        """
+        import glob
+        for path in sorted(glob.glob("src/bg_median_*.png")):
+            self._load_median_file(path)
+            return  # load first match as default
+
+    def load_static_median(self, camera_name: str) -> bool:
+        """Load median for a specific camera: src/bg_median_{camera_name}.png"""
+        path = f"src/bg_median_{camera_name}.png"
+        return self._load_median_file(path)
+
+    def _load_median_file(self, path: str) -> bool:
+        import os
+        if not os.path.exists(path):
+            return False
+        try:
+            img = cv2.imread(path)
+            if img is None:
+                return False
+            img = cv2.resize(img, (self.input_w, self.input_h))
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            self._bg_frame = img.astype(np.float32).transpose(2, 0, 1) / 255.0
+            self._video_median_computed = True
+            logger.info("Loaded static median background: %s", path)
+            return True
+        except Exception as e:
+            logger.warning("Failed to load median from %s: %s", path, e)
+            return False
 
     def preprocess_frame(self, frame: np.ndarray) -> np.ndarray:
         """Resize, BGR→RGB, HWC→CHW, /255.  Returns float32 (3, H, W) in [0, 1].
@@ -225,13 +293,35 @@ class TrackNetDetector:
         logger.info("Video median computed from %d sampled frames", len(frame_list))
 
     def _update_running_median(self, preprocessed: np.ndarray) -> None:
-        """Update running background median for live camera use."""
+        """Accumulate frames for background median. Recompute in background thread every N seconds."""
+        import time as _time
+        import threading
+
         self._bg_buffer.append(preprocessed)
         if len(self._bg_buffer) > self._bg_max_frames:
             self._bg_buffer.pop(0)
-        # Recompute median every 10 frames (or on first frame)
-        if self._bg_frame is None or len(self._bg_buffer) % 10 == 0:
+
+        now = _time.time()
+
+        # First call: compute immediately (need BG before first inference)
+        if self._bg_frame is None and len(self._bg_buffer) >= 2:
             self._bg_frame = np.median(self._bg_buffer, axis=0).astype(np.float32)
+            self._bg_last_update = now
+            return
+
+        # Periodic update in background thread (every _bg_update_interval seconds)
+        if now - self._bg_last_update >= self._bg_update_interval:
+            if self._bg_thread is None or not self._bg_thread.is_alive():
+                buf_copy = list(self._bg_buffer)  # snapshot
+                def _compute():
+                    if len(buf_copy) < 10:
+                        return
+                    new_bg = np.median(buf_copy, axis=0).astype(np.float32)
+                    self._bg_frame = new_bg  # atomic replace
+                    logger.info("Background median updated from %d frames", len(buf_copy))
+                self._bg_thread = threading.Thread(target=_compute, daemon=True)
+                self._bg_thread.start()
+                self._bg_last_update = now
 
     def infer(self, frames: list[np.ndarray]) -> np.ndarray:
         """Run inference on a list of BGR frames.
@@ -259,11 +349,170 @@ class TrackNetDetector:
 
         # Stack: ((seq_len+1)*3, H, W) for concat, (seq_len*3, H, W) otherwise
         stacked = np.concatenate(all_channels, axis=0)
-        input_tensor = torch.from_numpy(stacked[np.newaxis]).to(self.device)
 
-        with torch.no_grad():
-            output = self.model(input_tensor)  # (1, seq_len, H, W) — sigmoid included
-            output = output[0].cpu().numpy()   # (seq_len, H, W)
+        if self._use_onnx:
+            input_np = stacked[np.newaxis].astype(np.float32)
+            outputs = self._ort_session.run(None, {self._ort_input_name: input_np})
+            return outputs[0][0]  # (seq_len, H, W)
+        else:
+            input_tensor = torch.from_numpy(stacked[np.newaxis]).to(self.device)
+            with torch.no_grad():
+                output = self.model(input_tensor)
+                output = output[0].cpu().numpy()
+            return output
+
+
+# ---------------------------------------------------------------------------
+# Median background subtraction detector (no GPU required)
+# ---------------------------------------------------------------------------
+
+class MedianBGDetector:
+    """Median background subtraction ball detector (30 frames per block).
+
+    Returns ALL raw pixel (cx, cy) blobs per frame — no filtering, no limit.
+    Downstream tracker (track_single_camera) handles blob linking and filtering.
+
+    Recall ~94% with thresh=10, ~67-89 candidates per frame.
+    """
+
+    # Flag: camera_pipeline sends raw blob_block instead of per-frame detections.
+    returns_blobs = True
+
+    def __init__(
+        self,
+        input_size: tuple[int, int] = (288, 512),
+        frames_in: int = 30,
+        frames_out: int = 30,
+        device: str = "cuda",
+        thresh: int = 10,
+        min_area: int = 2,
+        max_area: int = 600,
+        **_kwargs,
+    ):
+        from app.pipeline.blob_detector import BallBlobDetector
+
+        self.input_h, self.input_w = input_size
+        self.frames_in = frames_in
+        self.frames_out = frames_in
+        self._detector = BallBlobDetector(
+            thresh=thresh, min_area=min_area, max_area=max_area,
+        )
+        logger.info(
+            "MedianBGDetector ready (thresh=%d, area=%d-%d, block=%d)",
+            thresh, min_area, max_area, frames_in,
+        )
+
+    def infer(self, frames: list[np.ndarray]) -> dict[int, list[tuple]]:
+        """Run median-BG blob detection on a block of BGR frames.
+
+        Returns:
+            Dict mapping frame index (0-based in block) to list of (cx, cy).
+            ALL blobs returned — no limit, no ranking.
+        """
+        gray_frames = [cv2.cvtColor(f, cv2.COLOR_BGR2GRAY) for f in frames]
+        return self._detector.detect_block(gray_frames)
+
+
+# ---------------------------------------------------------------------------
+# BallSelector detector (TrackNet + CandidateTransformer)
+# ---------------------------------------------------------------------------
+
+class BallSelectorDetector:
+    """TrackNet + CandidateTransformer ball detector.
+
+    Uses TrackNet for heatmap generation, then a lightweight Transformer
+    (85K params) to select the correct ball from top-K candidates.
+    Reduces false positives from 9% to 3-6% at the cost of lower recall.
+
+    Same interface as TrackNetDetector: infer(frames) → heatmaps-like output.
+    But returns_blobs=True since it outputs pixel coordinates directly.
+    """
+
+    returns_blobs = True  # camera_pipeline skips BallTracker postprocessing
+
+    def __init__(
+        self,
+        model_path: str = "",
+        input_size: tuple[int, int] = (288, 512),
+        frames_in: int = 8,
+        frames_out: int = 8,
+        device: str = "cuda",
+        selector_weights: str = "model_weight/ball_selector_v2.2.pt",
+        **_kwargs,
+    ):
+        from app.pipeline.ball_selector.inference_api import BallSelector
+        from app.pipeline.ball_selector.utils import compute_median_bg
+
+        self.input_h, self.input_w = input_size
+        self.frames_in = 8  # BallSelector always uses 8 frames
+        self.frames_out = 8
+        self._compute_median = compute_median_bg
+
+        tracknet_path = model_path or "model_weight/TrackNet_finetuned.pt"
+        self._selector = BallSelector(
+            tracknet_weights=tracknet_path,
+            selector_weights=selector_weights,
+            device=device,
+            exist_threshold=0.5,
+        )
+        self._median_bg = None
+        self._median_computed = False
+
+        logger.info("BallSelectorDetector ready (TrackNet + CandidateTransformer)")
+
+    def load_static_median(self, camera_name: str) -> bool:
+        """Load pre-computed median background for a camera."""
+        import os
+        path = f"src/bg_median_{camera_name}.png"
+        if not os.path.exists(path):
+            return False
+        try:
+            img = cv2.imread(path)
+            if img is None:
+                return False
+            img = cv2.resize(img, (self.input_w, self.input_h))
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            self._median_bg = img.astype(np.float32).transpose(2, 0, 1) / 255.0
+            self._median_computed = True
+            logger.info("BallSelector: loaded static median from %s", path)
+            return True
+        except Exception as e:
+            logger.warning("Failed to load median: %s", e)
+            return False
+
+    def infer(self, frames: list[np.ndarray]) -> list[list[dict]]:
+        """Run BallSelector on a batch of BGR frames.
+
+        Returns:
+            List of length len(frames). Each element is a list of blob dicts:
+            [{"pixel_x": float, "pixel_y": float, "blob_sum": float}] or []
+        """
+        # Compute median from frames if not pre-loaded
+        if self._median_bg is None:
+            from app.pipeline.ball_selector.utils import preprocess_frame
+            processed = [preprocess_frame(f) for f in frames]
+            self._median_bg = np.median(processed, axis=0).astype(np.float32)
+
+        # Pad to 8 frames if needed
+        batch = list(frames)
+        while len(batch) < 8:
+            batch.append(batch[-1])
+
+        results = self._selector.detect(batch[:8], self._median_bg)
+
+        output: list[list[dict]] = []
+        for i in range(len(frames)):
+            r = results[i] if i < len(results) else {"px": None, "py": None, "conf": 0}
+            if r["px"] is not None:
+                output.append([{
+                    "pixel_x": float(r["px"]),
+                    "pixel_y": float(r["py"]),
+                    "blob_sum": float(r["conf"]),
+                    "blob_max": float(r["conf"]),
+                    "blob_area": 0,
+                }])
+            else:
+                output.append([])
 
         return output
 
@@ -278,12 +527,33 @@ def create_detector(
     frames_in: int = 3,
     frames_out: int = 3,
     device: str = "cuda",
-) -> BallDetector | TrackNetDetector:
-    """Auto-select detector backend based on model file extension.
+    detector_type: str = "auto",
+) -> "BallDetector | TrackNetDetector | MedianBGDetector | BallSelectorDetector":
+    """Select detector backend.
 
-    - ``.onnx`` → BallDetector (ONNX Runtime)
-    - ``.pt``   → TrackNetDetector (PyTorch native)
+    Args:
+        detector_type: ``"auto"`` selects TrackNet/HRNet by extension,
+            ``"median_bg"`` uses MedianBGDetector,
+            ``"ball_selector"`` uses TrackNet + CandidateTransformer.
     """
+    if detector_type == "median_bg":
+        logger.info("Using MedianBGDetector (median background subtraction)")
+        return MedianBGDetector(
+            input_size=input_size,
+            frames_in=frames_in,
+            frames_out=frames_in,
+            device=device,
+        )
+    if detector_type == "ball_selector":
+        logger.info("Using BallSelectorDetector (TrackNet + CandidateTransformer)")
+        return BallSelectorDetector(
+            model_path=model_path,
+            input_size=input_size,
+            frames_in=8,
+            frames_out=8,
+            device=device,
+        )
+    # Auto-select by file extension
     if model_path.endswith(".pt"):
         logger.info("Auto-detected PyTorch model → TrackNetDetector")
         return TrackNetDetector(

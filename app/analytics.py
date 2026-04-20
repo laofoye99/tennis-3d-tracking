@@ -73,13 +73,13 @@ class BounceEvent:
 
     def to_dict(self) -> dict:
         d = {
-            "x": round(self.x, 4),
-            "y": round(self.y, 4),
-            "z": round(self.z, 4),
-            "timestamp": round(self.timestamp, 4),
-            "in_court": self.in_court,
+            "x": round(float(self.x), 4),
+            "y": round(float(self.y), 4),
+            "z": round(float(self.z), 4),
+            "timestamp": round(float(self.timestamp), 4),
+            "in_court": bool(self.in_court),
             "frame_index": self.frame_index,
-            "confidence": round(self.confidence, 3),
+            "confidence": round(float(self.confidence), 3),
             "source_camera": self.source_camera,
             "side": self.side,
         }
@@ -159,12 +159,15 @@ class RallyState:
 # ---------------------------------------------------------------------------
 
 
-def _is_in_court(x: float, y: float) -> bool:
-    """Check if (x, y) falls within the singles court boundaries (V2 coords)."""
-    # V2: origin at court center, x in [-HW, +HW], y in [-HL, +HL]
-    HW = (SINGLES_X_MAX - SINGLES_X_MIN) / 2  # 2.745
+COURT_MARGIN = 0.15  # tolerance for calibration error (meters)
+
+
+def _is_in_court(x: float, y: float, margin: float = COURT_MARGIN) -> bool:
+    """Check if (x, y) falls within court boundaries (V2 coords)."""
+    # V2: origin at court center, x in [-4.115, +4.115], y in [-11.885, +11.885]
+    HW = DOUBLES_WIDTH / 2  # 4.115
     HL = COURT_Y / 2  # 11.885
-    return abs(x) <= HW and abs(y) <= HL
+    return abs(x) <= HW + margin and abs(y) <= HL + margin
 
 
 # ---------------------------------------------------------------------------
@@ -372,6 +375,105 @@ class BounceDetector:
         if dt <= 0:
             dt = max(1, len(segment) - 1) * 0.04  # ~25 fps fallback
         return (segment[-1]["z"] - segment[0]["z"]) / dt
+
+
+class PeakBounceDetector:
+    """Batch bounce detector wrapping ``detect_bounces()`` from bounce_detector.py.
+
+    Accumulates 3D points in a buffer.  Every ``batch_size`` points, runs
+    ``detect_bounces()`` on the full buffer and emits any new bounces.
+    Same interface as ``BounceDetector`` (``update`` / ``reset`` / ``get_all_bounces``).
+    """
+
+    def __init__(
+        self,
+        batch_size: int = 30,
+        z_max: float = 0.5,
+        prominence: float = 0.10,
+        min_distance: int = 5,
+        smooth: int = 3,
+        **_kwargs,
+    ):
+        from app.pipeline.blob_detector import BallBlobDetector  # noqa: F401 — validate import
+        self.batch_size = batch_size
+        self.z_max = z_max
+        self.prominence = prominence
+        self.min_distance = min_distance
+        self.smooth = smooth
+
+        self._buffer: list[tuple] = []  # (frame, x, y, z, 0)
+        self._point_map: dict[int, dict] = {}  # frame → original point dict
+        self._emitted_frames: set[int] = set()
+        self._all_bounces: list[BounceEvent] = []
+        self._counter: int = 0
+
+    def update(self, point: dict) -> Optional[BounceEvent]:
+        """Accumulate point; run batch detect_bounces every batch_size points.
+
+        Returns the latest new bounce (for interface compat with BounceDetector).
+        Use ``pop_pending()`` to get ALL new bounces from the last batch.
+        """
+        fi = point.get("frame_index") or point.get("frame_a") or self._counter
+        self._buffer.append((fi, point["x"], point["y"], point["z"], 0))
+        self._point_map[fi] = point
+        self._counter += 1
+
+        if self._counter % self.batch_size != 0:
+            return None
+
+        return self._run_batch(point)
+
+    def _run_batch(self, latest_point: dict) -> Optional[BounceEvent]:
+        """Run detect_bounces on full buffer, emit all new bounces."""
+        from app.pipeline.bounce_detect import detect_bounces
+
+        bounces = detect_bounces(
+            self._buffer,
+            z_max=self.z_max,
+            prominence=self.prominence,
+            min_distance=self.min_distance,
+            smooth=self.smooth,
+        )
+
+        now = latest_point.get("timestamp", time.time())
+        self._pending: list[BounceEvent] = []
+        for b in bounces:
+            bf = b["frame"]
+            if bf in self._emitted_frames:
+                continue
+            self._emitted_frames.add(bf)
+            # Use the original point's timestamp if available
+            orig = self._point_map.get(bf)
+            bounce_ts = orig.get("timestamp", now) if orig else now
+            evt = BounceEvent(
+                x=float(b["x"]),
+                y=float(b["y"]),
+                z=float(b["z"]),
+                timestamp=bounce_ts,
+                in_court=bool(b["in_court"]),
+                frame_index=bf,
+                confidence=1.0,
+            )
+            self._all_bounces.append(evt)
+            self._pending.append(evt)
+
+        return self._pending[-1] if self._pending else None
+
+    def pop_pending(self) -> list[BounceEvent]:
+        """Return and clear all bounces from the last batch."""
+        result = getattr(self, "_pending", [])
+        self._pending = []
+        return result
+
+    def get_all_bounces(self) -> list[BounceEvent]:
+        return list(self._all_bounces)
+
+    def reset(self) -> None:
+        self._buffer.clear()
+        self._point_map.clear()
+        self._emitted_frames.clear()
+        self._all_bounces.clear()
+        self._counter = 0
 
 
 # ---------------------------------------------------------------------------

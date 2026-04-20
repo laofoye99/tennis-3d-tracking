@@ -1,0 +1,717 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Tennis 3D Trajectory Viewer</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  background: #1a1a2e;
+  color: #e0e0e0;
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  overflow: hidden;
+  width: 100vw;
+  height: 100vh;
+}
+#canvas-container { width: 100%; height: 100%; }
+canvas { display: block; }
+
+/* Drop overlay */
+#drop-overlay {
+  position: fixed; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  z-index: 100;
+  pointer-events: none;
+  transition: opacity 0.2s;
+  opacity: 0;
+}
+#drop-overlay.active {
+  opacity: 1;
+  background: rgba(26,26,46,0.85);
+  pointer-events: all;
+}
+#drop-overlay .drop-box {
+  border: 3px dashed #4cc9f0;
+  border-radius: 20px;
+  padding: 60px 80px;
+  text-align: center;
+  font-size: 22px;
+  color: #4cc9f0;
+}
+
+/* Initial prompt */
+#initial-prompt {
+  position: fixed; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  z-index: 50;
+  background: rgba(26,26,46,0.7);
+}
+#initial-prompt .prompt-box {
+  border: 2px dashed #555;
+  border-radius: 20px;
+  padding: 60px 80px;
+  text-align: center;
+  color: #888;
+  font-size: 20px;
+}
+#initial-prompt .prompt-box .icon { font-size: 48px; margin-bottom: 16px; }
+#initial-prompt.hidden { display: none; }
+
+/* Controls panel */
+#controls {
+  position: fixed;
+  bottom: 0; left: 0; right: 0;
+  background: rgba(26,26,46,0.92);
+  backdrop-filter: blur(8px);
+  border-top: 1px solid #333;
+  padding: 14px 24px;
+  z-index: 20;
+  display: none;
+}
+#controls.visible { display: block; }
+
+.slider-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+.slider-row label {
+  min-width: 80px;
+  font-size: 13px;
+  color: #aaa;
+}
+.slider-row input[type=range] {
+  flex: 1;
+  accent-color: #4cc9f0;
+  height: 6px;
+}
+.slider-row .val {
+  min-width: 60px;
+  text-align: right;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  color: #4cc9f0;
+}
+
+.btn-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 6px;
+}
+.btn {
+  background: #4cc9f0;
+  color: #1a1a2e;
+  border: none;
+  border-radius: 6px;
+  padding: 6px 18px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.btn:hover { background: #7dd8f5; }
+.btn.active { background: #f72585; color: #fff; }
+
+#info-text {
+  font-size: 12px;
+  color: #777;
+  margin-left: auto;
+}
+
+/* Tooltip */
+#tooltip {
+  position: fixed;
+  background: rgba(0,0,0,0.85);
+  color: #fff;
+  padding: 6px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+  pointer-events: none;
+  z-index: 30;
+  display: none;
+  white-space: nowrap;
+}
+
+/* Stats bar */
+#stats-bar {
+  position: fixed;
+  top: 12px; left: 12px;
+  background: rgba(26,26,46,0.85);
+  backdrop-filter: blur(6px);
+  border: 1px solid #333;
+  border-radius: 10px;
+  padding: 12px 18px;
+  z-index: 20;
+  font-size: 13px;
+  display: none;
+  line-height: 1.8;
+}
+#stats-bar.visible { display: block; }
+#stats-bar .label { color: #888; }
+#stats-bar .value { color: #4cc9f0; font-weight: 600; }
+
+/* Legend */
+#legend {
+  position: fixed;
+  top: 12px; right: 12px;
+  background: rgba(26,26,46,0.85);
+  backdrop-filter: blur(6px);
+  border: 1px solid #333;
+  border-radius: 10px;
+  padding: 12px 18px;
+  z-index: 20;
+  font-size: 12px;
+  display: none;
+  line-height: 2;
+}
+#legend.visible { display: block; }
+.legend-item { display: flex; align-items: center; gap: 8px; }
+.legend-dot {
+  width: 10px; height: 10px;
+  border-radius: 50%;
+  display: inline-block;
+}
+</style>
+</head>
+<body>
+
+<div id="canvas-container"></div>
+
+<div id="initial-prompt">
+  <div class="prompt-box">
+    <div class="icon">&#128190;</div>
+    <div>Drag &amp; drop a tracking JSON file here</div>
+    <div style="margin-top:8px;font-size:14px;color:#666;">
+      Expects: smoothed_3d, bounces, net_crossings, speed_profile
+    </div>
+  </div>
+</div>
+
+<div id="drop-overlay">
+  <div class="drop-box">Drop JSON file to load</div>
+</div>
+
+<div id="stats-bar">
+  <div><span class="label">Frames: </span><span class="value" id="stat-frames">-</span></div>
+  <div><span class="label">FPS: </span><span class="value" id="stat-fps">-</span></div>
+  <div><span class="label">Bounces: </span><span class="value" id="stat-bounces">-</span></div>
+  <div><span class="label">Net crossings: </span><span class="value" id="stat-net">-</span></div>
+</div>
+
+<div id="legend">
+  <div class="legend-item"><span class="legend-dot" style="background:linear-gradient(90deg,#4361ee,#f72585)"></span> Trajectory (time gradient)</div>
+  <div class="legend-item"><span class="legend-dot" style="background:#00f593"></span> Bounce IN</div>
+  <div class="legend-item"><span class="legend-dot" style="background:#ff3333"></span> Bounce OUT</div>
+  <div class="legend-item"><span class="legend-dot" style="background:#00e5ff"></span> Net crossing</div>
+  <div class="legend-item"><span class="legend-dot" style="background:#ffd700"></span> Playback marker</div>
+</div>
+
+<div id="controls">
+  <div class="slider-row">
+    <label>Start frame</label>
+    <input type="range" id="slider-start" min="0" max="100" value="0">
+    <span class="val" id="val-start">0</span>
+  </div>
+  <div class="slider-row">
+    <label>End frame</label>
+    <input type="range" id="slider-end" min="0" max="100" value="100">
+    <span class="val" id="val-end">100</span>
+  </div>
+  <div class="btn-row">
+    <button class="btn" id="btn-play">&#9654; Play</button>
+    <button class="btn" id="btn-reset">Reset View</button>
+    <label style="font-size:13px;color:#aaa;display:flex;align-items:center;gap:6px;">
+      <input type="range" id="play-speed" min="0.25" max="4" step="0.25" value="1" style="width:80px;accent-color:#4cc9f0;">
+      Speed: <span id="speed-val">1x</span>
+    </label>
+    <span id="info-text"></span>
+  </div>
+</div>
+
+<div id="tooltip"></div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
+
+// ---- Scene setup ----
+const container = document.getElementById('canvas-container');
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x1a1a2e);
+
+const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 200);
+camera.position.set(4.1, -8, 14);
+camera.lookAt(0, 0, 1);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+container.appendChild(renderer.domElement);
+
+// CSS2D for labels
+const labelRenderer = new CSS2DRenderer();
+labelRenderer.setSize(window.innerWidth, window.innerHeight);
+labelRenderer.domElement.style.position = 'absolute';
+labelRenderer.domElement.style.top = '0';
+labelRenderer.domElement.style.left = '0';
+labelRenderer.domElement.style.pointerEvents = 'none';
+container.appendChild(labelRenderer.domElement);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 0, 1);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+controls.update();
+
+// Lights
+scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+dirLight.position.set(10, -5, 20);
+scene.add(dirLight);
+
+// ---- Court dimensions ----
+const COURT = {
+  xMin: 0, xMax: 8.23,           // full doubles width for reference
+  singlesXMin: -4.115, singlesXMax: 4.115,  // singles sidelines
+  yMin: -11.89, yMax: 11.89,
+  netY: 0.0,
+  netHeight: 0.914,
+  serviceNear: -6.4,
+  serviceFar: 6.4,
+  centerServiceX: 0.0,
+};
+
+function buildCourt() {
+  // Green surface
+  const surfaceGeo = new THREE.PlaneGeometry(COURT.xMax - COURT.xMin, COURT.yMax - COURT.yMin);
+  const surfaceMat = new THREE.MeshStandardMaterial({ color: 0x1b6e2f, side: THREE.DoubleSide });
+  const surface = new THREE.Mesh(surfaceGeo, surfaceMat);
+  surface.position.set((COURT.xMin + COURT.xMax) / 2, (COURT.yMin + COURT.yMax) / 2, -0.01);
+  scene.add(surface);
+
+  // Slightly larger dark surround
+  const surroundGeo = new THREE.PlaneGeometry(COURT.xMax - COURT.xMin + 6, COURT.yMax - COURT.yMin + 6);
+  const surroundMat = new THREE.MeshStandardMaterial({ color: 0x0f3d1e, side: THREE.DoubleSide });
+  const surround = new THREE.Mesh(surroundGeo, surroundMat);
+  surround.position.set((COURT.xMin + COURT.xMax) / 2, (COURT.yMin + COURT.yMax) / 2, -0.02);
+  scene.add(surround);
+
+  // Line drawing helper
+  const lineMat = new THREE.LineBasicMaterial({ color: 0xffffff, linewidth: 2 });
+  function drawLine(x1, y1, x2, y2, z = 0.001) {
+    const geo = new THREE.BufferGeometry().setFromPoints([
+      new THREE.Vector3(x1, y1, z), new THREE.Vector3(x2, y2, z)
+    ]);
+    scene.add(new THREE.Line(geo, lineMat));
+  }
+
+  const sx = COURT.singlesXMin, ex = COURT.singlesXMax;
+  // Singles boundary
+  drawLine(sx, COURT.yMin, sx, COURT.yMax);
+  drawLine(ex, COURT.yMin, ex, COURT.yMax);
+  drawLine(sx, 0, ex, 0);
+  drawLine(sx, COURT.yMax, ex, COURT.yMax);
+
+  // Service lines
+  drawLine(sx, COURT.serviceNear, ex, COURT.serviceNear);
+  drawLine(sx, COURT.serviceFar, ex, COURT.serviceFar);
+
+  // Center service line
+  drawLine(COURT.centerServiceX, COURT.serviceNear, COURT.centerServiceX, COURT.serviceFar);
+
+  // Center marks
+  drawLine(COURT.centerServiceX, 0, COURT.centerServiceX, 0.3);
+  drawLine(COURT.centerServiceX, COURT.yMax - 0.3, COURT.centerServiceX, COURT.yMax);
+
+  // Net
+  const netGeo = new THREE.PlaneGeometry(ex - sx + 0.6, COURT.netHeight);
+  const netMat = new THREE.MeshStandardMaterial({
+    color: 0xffffff, transparent: true, opacity: 0.35, side: THREE.DoubleSide
+  });
+  const net = new THREE.Mesh(netGeo, netMat);
+  net.position.set((sx + ex) / 2, COURT.netY, COURT.netHeight / 2);
+  net.rotation.x = Math.PI / 2;
+  scene.add(net);
+
+  // Net top line
+  const netLineMat = new THREE.LineBasicMaterial({ color: 0xffffff });
+  const netLineGeo = new THREE.BufferGeometry().setFromPoints([
+    new THREE.Vector3(sx - 0.3, COURT.netY, COURT.netHeight),
+    new THREE.Vector3(ex + 0.3, COURT.netY, COURT.netHeight)
+  ]);
+  scene.add(new THREE.Line(netLineGeo, netLineMat));
+
+  // Net posts
+  const postGeo = new THREE.CylinderGeometry(0.03, 0.03, COURT.netHeight + 0.15, 8);
+  const postMat = new THREE.MeshStandardMaterial({ color: 0xcccccc });
+  [sx - 0.3, ex + 0.3].forEach(px => {
+    const post = new THREE.Mesh(postGeo, postMat);
+    post.position.set(px, COURT.netY, (COURT.netHeight + 0.15) / 2);
+    scene.add(post);
+  });
+
+  // Grid helper on floor (subtle)
+  const grid = new THREE.GridHelper(40, 40, 0x333355, 0x222244);
+  grid.rotation.x = Math.PI / 2;
+  grid.position.set(0, 0, -0.03);
+  scene.add(grid);
+}
+
+buildCourt();
+
+// ---- State ----
+let trackData = null;
+let sortedFrames = [];
+let trajectoryGroup = new THREE.Group();
+let markersGroup = new THREE.Group();
+let playbackMarker = null;
+let isPlaying = false;
+let playFrame = 0;
+let playSpeed = 1;
+let trajectoryPoints = [];  // {frame, position, speed}
+let raycaster = new THREE.Raycaster();
+raycaster.params.Points.threshold = 0.15;
+let mouse = new THREE.Vector2();
+let pointsObj = null;
+
+scene.add(trajectoryGroup);
+scene.add(markersGroup);
+
+// ---- UI refs ----
+const sliderStart = document.getElementById('slider-start');
+const sliderEnd = document.getElementById('slider-end');
+const valStart = document.getElementById('val-start');
+const valEnd = document.getElementById('val-end');
+const btnPlay = document.getElementById('btn-play');
+const btnReset = document.getElementById('btn-reset');
+const playSpeedSlider = document.getElementById('play-speed');
+const speedVal = document.getElementById('speed-val');
+const tooltip = document.getElementById('tooltip');
+const infoText = document.getElementById('info-text');
+
+// ---- Color helper ----
+function timeColor(t) {
+  // t in [0,1]: blue(0) -> purple(0.33) -> red(0.66) -> red(1)
+  const c = new THREE.Color();
+  c.setHSL(0.66 - t * 0.66, 0.9, 0.55);
+  return c;
+}
+
+// ---- Build trajectory ----
+function buildTrajectory() {
+  // Clear
+  trajectoryGroup.clear();
+  markersGroup.clear();
+  trajectoryPoints = [];
+  pointsObj = null;
+
+  if (!trackData || sortedFrames.length === 0) return;
+
+  const startF = parseInt(sliderStart.value);
+  const endF = parseInt(sliderEnd.value);
+
+  // Filter frames in range
+  const frames = sortedFrames.filter(f => f >= startF && f <= endF);
+  if (frames.length < 2) return;
+
+  const minF = frames[0], maxF = frames[frames.length - 1];
+  const range = maxF - minF || 1;
+
+  // Build line segments with per-vertex color
+  const positions = [];
+  const colors = [];
+
+  frames.forEach(f => {
+    const p = trackData.smoothed_3d[f];
+    if (!p) return;
+    const t = (f - minF) / range;
+    const c = timeColor(t);
+    positions.push(p.x, p.y, p.z);
+    colors.push(c.r, c.g, c.b);
+
+    const spd = trackData.speed_profile && trackData.speed_profile[f]
+      ? trackData.speed_profile[f].speed_kmh : null;
+    trajectoryPoints.push({
+      frame: f,
+      position: new THREE.Vector3(p.x, p.y, p.z),
+      speed: spd
+    });
+  });
+
+  // Line
+  const lineGeo = new THREE.BufferGeometry();
+  lineGeo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  lineGeo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+  const lineMat = new THREE.LineBasicMaterial({ vertexColors: true, linewidth: 2 });
+  trajectoryGroup.add(new THREE.Line(lineGeo, lineMat));
+
+  // Points (for hover)
+  const ptGeo = new THREE.BufferGeometry();
+  ptGeo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  ptGeo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+  const ptMat = new THREE.PointsMaterial({ size: 0.08, vertexColors: true, sizeAttenuation: true });
+  pointsObj = new THREE.Points(ptGeo, ptMat);
+  trajectoryGroup.add(pointsObj);
+
+  // Bounces
+  if (trackData.bounces) {
+    trackData.bounces.forEach(b => {
+      if (b.frame < startF || b.frame > endF) return;
+      const isIn = b.in_court !== false;
+      const color = isIn ? 0x00f593 : 0xff3333;
+      const sGeo = new THREE.SphereGeometry(0.12, 16, 16);
+      const sMat = new THREE.MeshStandardMaterial({ color, emissive: color, emissiveIntensity: 0.4 });
+      const sphere = new THREE.Mesh(sGeo, sMat);
+      sphere.position.set(b.x, b.y, b.z != null ? b.z : 0.05);
+      markersGroup.add(sphere);
+
+      // Label
+      const div = document.createElement('div');
+      div.style.cssText = `
+        font-size:11px; color:${isIn ? '#00f593' : '#ff3333'};
+        background:rgba(0,0,0,0.7); padding:2px 6px; border-radius:4px;
+        font-family:monospace;
+      `;
+      div.textContent = `F${b.frame}`;
+      const lbl = new CSS2DObject(div);
+      lbl.position.set(b.x, b.y, (b.z || 0.05) + 0.3);
+      markersGroup.add(lbl);
+    });
+  }
+
+  // Net crossings
+  if (trackData.net_crossings) {
+    trackData.net_crossings.forEach(nc => {
+      if (nc.frame < startF || nc.frame > endF) return;
+      // Find x position at that frame
+      const p = trackData.smoothed_3d[nc.frame];
+      const px = p ? p.x : COURT.centerServiceX;
+      const lineGeo = new THREE.BufferGeometry().setFromPoints([
+        new THREE.Vector3(px, COURT.netY, 0),
+        new THREE.Vector3(px, COURT.netY, 3)
+      ]);
+      const lineMat = new THREE.LineBasicMaterial({ color: 0x00e5ff, linewidth: 2 });
+      markersGroup.add(new THREE.Line(lineGeo, lineMat));
+
+      // Label
+      const div = document.createElement('div');
+      div.style.cssText = `
+        font-size:10px; color:#00e5ff;
+        background:rgba(0,0,0,0.7); padding:2px 6px; border-radius:4px;
+        font-family:monospace;
+      `;
+      div.textContent = `${nc.speed_kmh ? nc.speed_kmh.toFixed(0) + ' km/h' : 'F' + nc.frame}`;
+      const lbl = new CSS2DObject(div);
+      lbl.position.set(px, COURT.netY, 3.2);
+      markersGroup.add(lbl);
+    });
+  }
+
+  // Playback marker
+  if (!playbackMarker) {
+    const mGeo = new THREE.SphereGeometry(0.1, 16, 16);
+    const mMat = new THREE.MeshStandardMaterial({ color: 0xffd700, emissive: 0xffd700, emissiveIntensity: 0.6 });
+    playbackMarker = new THREE.Mesh(mGeo, mMat);
+    playbackMarker.visible = false;
+    scene.add(playbackMarker);
+  }
+
+  infoText.textContent = `Showing frames ${startF} - ${endF} (${frames.length} points)`;
+}
+
+// ---- Load data ----
+function loadData(json) {
+  trackData = json;
+
+  // Collect sorted frame numbers
+  sortedFrames = Object.keys(json.smoothed_3d).map(Number).sort((a, b) => a - b);
+  if (sortedFrames.length === 0) { alert('No smoothed_3d data found'); return; }
+
+  const minF = sortedFrames[0];
+  const maxF = sortedFrames[sortedFrames.length - 1];
+
+  sliderStart.min = minF; sliderStart.max = maxF; sliderStart.value = minF;
+  sliderEnd.min = minF; sliderEnd.max = maxF; sliderEnd.value = maxF;
+  valStart.textContent = minF;
+  valEnd.textContent = maxF;
+
+  // Stats
+  document.getElementById('stat-frames').textContent = json.meta ? json.meta.n_frames : sortedFrames.length;
+  document.getElementById('stat-fps').textContent = json.meta ? json.meta.fps : '?';
+  document.getElementById('stat-bounces').textContent = json.bounces ? json.bounces.length : 0;
+  document.getElementById('stat-net').textContent = json.net_crossings ? json.net_crossings.length : 0;
+
+  document.getElementById('initial-prompt').classList.add('hidden');
+  document.getElementById('controls').classList.add('visible');
+  document.getElementById('stats-bar').classList.add('visible');
+  document.getElementById('legend').classList.add('visible');
+
+  buildTrajectory();
+
+  // Fit camera
+  const mid = sortedFrames[Math.floor(sortedFrames.length / 2)];
+  const mp = json.smoothed_3d[mid];
+  if (mp) {
+    controls.target.set(mp.x, mp.y, mp.z);
+    camera.position.set(mp.x - 8, mp.y - 10, 15);
+    controls.update();
+  }
+}
+
+// ---- Drag & drop ----
+document.addEventListener('dragover', e => { e.preventDefault(); e.stopPropagation(); });
+document.addEventListener('dragenter', e => {
+  e.preventDefault();
+  document.getElementById('drop-overlay').classList.add('active');
+});
+document.addEventListener('dragleave', e => {
+  if (e.relatedTarget === null || e.relatedTarget === document.documentElement) {
+    document.getElementById('drop-overlay').classList.remove('active');
+  }
+});
+document.addEventListener('drop', e => {
+  e.preventDefault();
+  e.stopPropagation();
+  document.getElementById('drop-overlay').classList.remove('active');
+  const file = e.dataTransfer.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = ev => {
+    try {
+      const json = JSON.parse(ev.target.result);
+      loadData(json);
+    } catch (err) {
+      alert('Failed to parse JSON: ' + err.message);
+    }
+  };
+  reader.readAsText(file);
+});
+
+// ---- Slider events ----
+sliderStart.addEventListener('input', () => {
+  let v = parseInt(sliderStart.value);
+  if (v > parseInt(sliderEnd.value)) { v = parseInt(sliderEnd.value); sliderStart.value = v; }
+  valStart.textContent = v;
+  buildTrajectory();
+});
+sliderEnd.addEventListener('input', () => {
+  let v = parseInt(sliderEnd.value);
+  if (v < parseInt(sliderStart.value)) { v = parseInt(sliderStart.value); sliderEnd.value = v; }
+  valEnd.textContent = v;
+  buildTrajectory();
+});
+
+// ---- Play/pause ----
+btnPlay.addEventListener('click', () => {
+  if (!trackData) return;
+  isPlaying = !isPlaying;
+  btnPlay.classList.toggle('active', isPlaying);
+  btnPlay.innerHTML = isPlaying ? '&#9646;&#9646; Pause' : '&#9654; Play';
+  if (isPlaying) {
+    playFrame = parseInt(sliderStart.value);
+    if (playbackMarker) playbackMarker.visible = true;
+  } else {
+    if (playbackMarker) playbackMarker.visible = false;
+  }
+});
+
+btnReset.addEventListener('click', () => {
+  camera.position.set(4.1, -8, 14);
+  controls.target.set(0, 0, 1);
+  controls.update();
+});
+
+playSpeedSlider.addEventListener('input', () => {
+  playSpeed = parseFloat(playSpeedSlider.value);
+  speedVal.textContent = playSpeed + 'x';
+});
+
+// ---- Hover tooltip ----
+renderer.domElement.addEventListener('mousemove', e => {
+  const rect = renderer.domElement.getBoundingClientRect();
+  mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+  mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+
+  if (!pointsObj || trajectoryPoints.length === 0) { tooltip.style.display = 'none'; return; }
+
+  raycaster.setFromCamera(mouse, camera);
+  const intersects = raycaster.intersectObject(pointsObj);
+  if (intersects.length > 0) {
+    const idx = intersects[0].index;
+    if (idx < trajectoryPoints.length) {
+      const tp = trajectoryPoints[idx];
+      const p = tp.position;
+      let text = `Frame ${tp.frame} | (${p.x.toFixed(2)}, ${p.y.toFixed(2)}, ${p.z.toFixed(2)})`;
+      if (tp.speed != null) text += ` | ${tp.speed.toFixed(1)} km/h`;
+      tooltip.textContent = text;
+      tooltip.style.display = 'block';
+      tooltip.style.left = (e.clientX + 14) + 'px';
+      tooltip.style.top = (e.clientY - 28) + 'px';
+    }
+  } else {
+    tooltip.style.display = 'none';
+  }
+});
+
+// ---- Animation loop ----
+const clock = new THREE.Clock();
+let accumulator = 0;
+
+function animate() {
+  requestAnimationFrame(animate);
+  controls.update();
+
+  // Playback
+  if (isPlaying && trackData && trajectoryPoints.length > 0) {
+    const fps = (trackData.meta && trackData.meta.fps) || 25;
+    const dt = clock.getDelta();
+    accumulator += dt * playSpeed;
+    const frameStep = 1 / fps;
+
+    while (accumulator >= frameStep) {
+      accumulator -= frameStep;
+      playFrame++;
+      const endF = parseInt(sliderEnd.value);
+      if (playFrame > endF) {
+        playFrame = parseInt(sliderStart.value);
+      }
+    }
+
+    // Find nearest trajectory point
+    const p = trackData.smoothed_3d[playFrame];
+    if (p && playbackMarker) {
+      playbackMarker.position.set(p.x, p.y, p.z);
+      playbackMarker.visible = true;
+    }
+  } else {
+    clock.getDelta(); // consume delta to avoid jump
+  }
+
+  renderer.render(scene, camera);
+  labelRenderer.render(scene, camera);
+}
+animate();
+
+// ---- Resize ----
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  labelRenderer.setSize(window.innerWidth, window.innerHeight);
+});
+</script>
+</body>
+</html>

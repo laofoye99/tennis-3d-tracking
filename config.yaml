@@ -1,21 +1,30 @@
 calibration:
   path: src/camera_calibration.json
-  use_calibrated_positions: false
+  use_calibrated_positions: False
 cameras:
   cam66:
     homography_key: cam66
     position_3d:
-    - 4.36
-    - 28.93
-    - 6.92
+    - 0.165      # cam66 x
+    - -17.042    # cam66 y: 近端底线后方 (y<0)
+    - 6.217      # cam66 z
+    # rtsp_url: rtsp://localhost:8554/cam66
     rtsp_url: rtsp://admin:motion168@192.168.1.66:554/Streaming/Channels/101
   cam68:
     homography_key: cam68
     position_3d:
-    - 4.431
-    - -5.28
-    - 6.10
+    - 0.211      # cam68 x
+    - 17.156     # cam68 y: 远端底线后方 (y>0)
+    - 5.286      # cam68 z
+    # rtsp_url: rtsp://localhost:8554/cam68
     rtsp_url: rtsp://admin:motion168@192.168.1.68:554/Streaming/Channels/101
+  # --- Pickleball court (separate court, record-only) ---
+  cam67:
+    rtsp_url: rtsp://admin:motion168@192.168.1.67:554/Streaming/Channels/101
+    record_only: true
+  cam65:
+    rtsp_url: rtsp://admin:motion168@192.168.1.65:554/Streaming/Channels/101
+    record_only: true
 homography:
   path: src/homography_matrices.json
 model:
@@ -25,10 +34,12 @@ model:
   input_size:
   - 288
   - 512
-  path: model_weight/TrackNet_finetuned.pt # 
+  path: model_weight/TrackNet_finetuned.pt
   threshold: 0.3
   heatmap_mask:
   - [0, 0, 620, 40]
+  detector_type: auto
+  # detector_type: median_bg     # 切换时同时改 frames_in: 30, frames_out: 30
 blob_verifier:
   enabled: true
   model_path: model_weight/blob_verifier_yolo.pt
@@ -43,3 +54,14 @@ ensemble:
 server:
   host: 0.0.0.0
   port: 8000
+player_detection:
+  enabled: true                              # 改为 true 开启球员检测
+  model_path: model_weight/yolo26x-pose.pt
+  device: cuda
+  conf: 0.4
+  run_every_n_frames: 5                       # 每5帧推理一次 (~6fps)
+serial_numbers:
+  cam66: FV9942593
+  cam68: FV9942588
+export:
+  endpoint: https://tennisync.top/api/admin/SpaceParties/reportData

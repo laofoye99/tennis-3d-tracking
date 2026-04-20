@@ -21,6 +21,7 @@ from app.analytics import (
     BounceDetector,
     EnhancedBounceDetector,
     HybridBounceDetector,
+    PeakBounceDetector,
     RallyStateMachine,
     RallyTracker,
     run_batch_analytics,
@@ -72,6 +73,13 @@ class Orchestrator:
         self._stopped = threading.Event()
         self._inference_enabled: bool = True  # 全局推理开关
 
+        # Ball 3D position queue (most recent 500 points, ~16s at 30fps)
+        from collections import deque as _deque
+        self._ball_3d_queue: _deque = _deque(maxlen=500)
+
+        # Latest player pose per camera (nearest player to ball)
+        self._latest_player_pose: dict[str, dict] = {}
+
         # 录像
         self._recording: bool = False
         self._recording_writers: dict[str, Any] = {}  # name -> {"writer": VideoWriter|None, "path": str}
@@ -79,23 +87,45 @@ class Orchestrator:
         self._recording_lock = threading.Lock()
         self._recordings_dir = Path("recordings")
 
-        # Tracking data recording (JSONL alongside video)
-        self._data_file: Any = None
+        # Tracking JSONL (always writes when pipeline runs, independent of recording)
+        self._tracking_file: Any = None
+        self._tracking_file_path: str | None = None
         self._data_frame_counter: int = 0
+        # Legacy alias for recording-specific data file
+        self._data_file: Any = None
 
         # Video test
         self._video_test_handle: Optional[_PipelineHandle] = None
         self._video_test_handles: dict[str, _PipelineHandle] = {}  # parallel handles
         self._video_test_detections: dict[str, list[dict]] = {}  # camera_name -> detections
 
-        # Live analytics (bounce detection + rally tracking)
-        self._bounce_detector = BounceDetector()
+        # Debug output — records all pipeline stages for GT comparison
+        self._debug_dir = Path("debug_output")
+        self._debug_data = self._new_debug_data()
+
+        # Live analytics — use batch find_peaks for all modes (validated 30/30 vs GT)
+        self._bounce_detector = PeakBounceDetector(batch_size=10)
         self._rally_tracker = RallyTracker()
         self._live_bounces: list[dict] = []
-        # Enhanced analytics (event-driven state machine)
         self._enhanced_bounce = EnhancedBounceDetector()
         self._hybrid_bounce = HybridBounceDetector()
         self._rally_sm = RallyStateMachine()
+
+        # Auto report: generate after every N completed rallies
+        self._rally_report_interval: int = 10  # 0 = disabled
+        self._rally_completed_count: int = 0
+        self._last_report_rally_count: int = 0
+
+        # MedianBG tracking state (track-first-triangulate-later pipeline)
+        self._is_median_bg = self.config.model.detector_type == "median_bg"
+        self._blob_buffers: dict[str, dict[int, list]] = {}  # cam -> {frame_id: [(cx,cy)]}
+        self._blob_homographies: dict = {}  # cam -> H matrix (lazy init)
+        self._tracker_process_interval = 30  # run tracker every N blob_blocks
+        self._tracker_block_count = 0
+        self._trajectory_3d: list = []  # accumulated 3D trajectory
+        self._emitted_3d_frames: set = set()  # frames already emitted
+        self._emitted_bounce_frames: set = set()
+
 
         # Savitzky-Golay smoothing buffer (matches offline smooth_trajectory_sg)
         self._sg_buffer: list[dict] = []  # raw 3D points with timestamps
@@ -111,11 +141,13 @@ class Orchestrator:
         self._conf_threshold = 0.0  # dynamic, updated from history
 
         # Net crossing speed detection
-        self._prev_3d: Optional[dict] = None  # previous 3D point for speed calc
+        self._prev_3d: Optional[dict] = None
+        self._speed_buffer: deque = deque(maxlen=5)  # recent per-frame speeds for smoothing
         self._latest_net_crossing: Optional[dict] = None
         self._net_crossings: list[dict] = []
-        NET_Y = 11.885  # net position
-        self._NET_Y = NET_Y
+        self._NET_Y = 0.0  # V2: net at y=0
+        self._SPEED_MIN = 30   # km/h — consumer minimum
+        self._SPEED_MAX = 150  # km/h — consumer maximum
 
         # 3D display WebSocket push
         self._ws_bounce_queue: list[dict] = []  # bounces to push
@@ -136,6 +168,11 @@ class Orchestrator:
         self._bounce_detection_enabled: bool = True
         self._net_crossing_enabled: bool = True
         self._ocr_align_enabled: bool = False
+
+        # Rally raw buffer for result export (120s @ 25fps ≈ 3000 frames)
+        self._rally_raw_buffer: deque = deque(maxlen=3000)
+        self._last_frame_speed_kmh: float = 0.0
+        self._last_bounce_ts: float = 0.0  # timestamp of most recent bounce
 
     def _get_camera_positions(self) -> dict[str, list[float]]:
         """Get camera 3D positions, optionally overriding with calibrated values.
@@ -189,6 +226,7 @@ class Orchestrator:
             }
         )
 
+        player_cfg = self.config.player_detection
         handle.process = mp.Process(
             target=run_pipeline,
             kwargs={
@@ -206,6 +244,11 @@ class Orchestrator:
                 "frame_queue": handle.frame_queue,
                 "stop_event": handle.stop_event,
                 "status_dict": handle.status_dict,
+                "detector_type": model_cfg.detector_type,
+                "player_model_path": player_cfg.model_path if player_cfg.enabled else "",
+                "player_device": player_cfg.device,
+                "player_conf": player_cfg.conf,
+                "player_run_every_n": player_cfg.run_every_n_frames,
             },
             daemon=True,
         )
@@ -235,6 +278,13 @@ class Orchestrator:
         self._latest_frames.pop(name, None)
         logger.info("[%s] Pipeline stopped", name)
 
+        # Auto-save debug output if there's data
+        if self._debug_data["trajectory"]:
+            try:
+                self.save_debug_output()
+            except Exception as e:
+                logger.warning("Failed to auto-save debug output: %s", e)
+
     def shutdown(self) -> None:
         self._stopped.set()
         for name in list(self._handles):
@@ -247,6 +297,20 @@ class Orchestrator:
     def _consume_loop(self) -> None:
         logger.info("Consumer thread started")
         self._triangulation_active = True
+
+        # Always write tracking JSONL (independent of recording)
+        if self._tracking_file is None:
+            import datetime as _dt
+            ts = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+            self._recordings_dir.mkdir(parents=True, exist_ok=True)
+            tracking_path = str(self._recordings_dir / f"tracking_{ts}.jsonl")
+            try:
+                self._tracking_file = open(tracking_path, "w", encoding="utf-8")
+                self._tracking_file_path = tracking_path
+                self._data_frame_counter = 0
+                logger.info("Tracking JSONL started: %s", tracking_path)
+            except Exception as e:
+                logger.warning("Failed to open tracking file: %s", e)
 
         # Only cameras with position_3d can do triangulation
         cam_positions = self._get_camera_positions()
@@ -269,6 +333,31 @@ class Orchestrator:
                     try:
                         while not handle.result_queue.empty():
                             det = handle.result_queue.get_nowait()
+
+                            # Player pose detection result
+                            if det.get("type") == "player_pose":
+                                self._handle_player_pose(det, cam_positions)
+                                got_any = True
+                                continue
+
+                            # MedianBG: blob_block → accumulate for tracker
+                            if det.get("type") == "blob_block":
+                                cam = det["camera_name"]
+                                self._blob_buffers.setdefault(cam, {}).update(det["blobs"])
+                                self._tracker_block_count += 1
+                                # Build a minimal latest_detection for dashboard overlay
+                                # (pick first blob of last frame as rough position)
+                                last_fi = max(det["blobs"].keys()) if det["blobs"] else None
+                                if last_fi is not None and det["blobs"][last_fi]:
+                                    cx, cy = det["blobs"][last_fi][0]
+                                    self._latest_detections[cam] = {
+                                        "camera_name": cam, "pixel_x": cx, "pixel_y": cy,
+                                        "timestamp": det["timestamp"],
+                                        "capture_ts": det["capture_ts"],
+                                    }
+                                got_any = True
+                                continue
+
                             self._latest_detections[name] = det
                             # Queue all detections for triangulation (not just latest)
                             if name in tri_cams:
@@ -291,7 +380,17 @@ class Orchestrator:
                     except Exception:
                         pass
 
-            # Triangulate: pair detections from both cameras by capture_ts
+            # ---- MedianBG: track → match → triangulate → events ----
+            if self._is_median_bg and self._tracker_block_count > 0 and len(tri_cams) == 2:
+                # Run every time both cameras have new blocks
+                cam1, cam2 = tri_cams
+                buf1 = self._blob_buffers.get(cam1, {})
+                buf2 = self._blob_buffers.get(cam2, {})
+                if buf1 and buf2:
+                    self._run_tracker_pipeline(cam1, cam2, cam_positions)
+                    self._tracker_block_count = 0
+
+            # ---- TrackNet: pair detections by capture_ts ----
             q1 = self._det_queues.get(tri_cams[0], []) if len(tri_cams) == 2 else []
             q2 = self._det_queues.get(tri_cams[1], []) if len(tri_cams) == 2 else []
 
@@ -335,10 +434,10 @@ class Orchestrator:
                 self._conf_history.append(avg_conf)
                 if len(self._conf_history) > 500:
                     self._conf_history = self._conf_history[-500:]
-                if len(self._conf_history) >= 50:
+                # Update threshold every 50 new pairs (not every pair)
+                if len(self._conf_history) >= 50 and len(self._conf_history) % 50 == 0:
                     sorted_h = sorted(self._conf_history)
-                    idx = int(len(sorted_h) * self._conf_percentile / 100)
-                    self._conf_threshold = sorted_h[idx]
+                    self._conf_threshold = sorted_h[int(len(sorted_h) * self._conf_percentile / 100)]
                 if avg_conf < self._conf_threshold:
                     continue
 
@@ -346,6 +445,8 @@ class Orchestrator:
                     x, y, z = None, None, None
                     _tri_smoothed = None
                     _tri_bounce = None
+                    match = None
+
 
                     if (live_matcher
                             and "candidates" in d1
@@ -367,7 +468,24 @@ class Orchestrator:
                         cam66_world=WorldPoint2D(**d1),
                         cam68_world=WorldPoint2D(**d2),
                     )
+                    self._ball_3d_queue.append({
+                        "x": x, "y": y, "z": z,
+                        "timestamp": time.time(),
+                        "capture_ts": min(
+                            d1.get("capture_ts", d1["timestamp"]),
+                            d2.get("capture_ts", d2["timestamp"]),
+                        ),
+                    })
                     self._last_tri_pair = pair_id
+
+                    # Debug recording
+                    self._debug_data["frame_counter"] += 1
+                    fi = self._debug_data["frame_counter"]
+                    self._debug_record_detection(tri_cams[0], d1, fi)
+                    self._debug_record_detection(tri_cams[1], d2, fi)
+                    rd = match.get("ray_distance", 0) if match else 0
+                    self._debug_record_3d(fi, x, y, z, rd, d1, d2, tri_cams[0], tri_cams[1])
+
 
                     cap_ts1 = d1.get("capture_ts", d1["timestamp"])
                     cap_ts2 = d2.get("capture_ts", d2["timestamp"])
@@ -384,19 +502,24 @@ class Orchestrator:
                     pt = {"x": x, "y": y, "z": z, "timestamp": now,
                           "capture_ts": capture_ts}
                     if self._prev_3d is not None:
+                        # Compute per-frame speed and buffer it
+                        t_delta = now - self._prev_3d["timestamp"]
+                        if t_delta > 0.001:
+                            dx = x - self._prev_3d["x"]
+                            dy = y - self._prev_3d["y"]
+                            dz = z - self._prev_3d["z"]
+                            dist = (dx**2 + dy**2 + dz**2) ** 0.5
+                            self._speed_buffer.append(dist / t_delta * 3.6)  # km/h
+
+                        # Net crossing detection
                         prev_y = self._prev_3d["y"]
                         curr_y = y
                         if (prev_y < self._NET_Y and curr_y >= self._NET_Y) or \
                            (prev_y > self._NET_Y and curr_y <= self._NET_Y):
-                            t_delta = now - self._prev_3d["timestamp"]
-                            if t_delta > 0.001:
-                                dx = x - self._prev_3d["x"]
-                                dy = y - self._prev_3d["y"]
-                                dz = z - self._prev_3d["z"]
-                                dist = (dx**2 + dy**2 + dz**2) ** 0.5
-                                speed_ms = dist / t_delta
-                                speed_kmh = speed_ms * 3.6
-                                if 20 <= speed_kmh <= 250:
+                            # Use median of recent speeds (smoothed, robust to outliers)
+                            if len(self._speed_buffer) >= 2:
+                                speed_kmh = float(np.median(list(self._speed_buffer)))
+                                if self._SPEED_MIN <= speed_kmh <= self._SPEED_MAX:
                                     direction = "near_to_far" if curr_y > prev_y else "far_to_near"
                                     crossing = {
                                         "speed_kmh": round(speed_kmh, 1),
@@ -406,9 +529,18 @@ class Orchestrator:
                                     }
                                     self._latest_net_crossing = crossing
                                     self._net_crossings.append(crossing)
+                                    self._debug_data.setdefault("net_crossings", []).append({
+                                        "frame": fi, "speed_kmh": round(speed_kmh, 1),
+                                        "direction": direction, "x": round(x, 3), "y": round(y, 3), "z": round(z, 3),
+                                    })
                                     if len(self._net_crossings) > 100:
                                         self._net_crossings = self._net_crossings[-100:]
                     self._prev_3d = pt
+
+                    # Track per-frame speed for raw buffer
+                    if self._speed_buffer:
+                        self._last_frame_speed_kmh = float(self._speed_buffer[-1])
+
 
                     cam_dets = {}
                     for cname, det in [(tri_cams[0], d1), (tri_cams[1], d2)]:
@@ -421,19 +553,38 @@ class Orchestrator:
                         }
                     with self._analytics_lock:
                         bounce = self._bounce_detector.update(pt)
-                        self._rally_tracker.update(pt, bounce)
-                        if bounce is not None:
-                            self._live_bounces.append(bounce.to_dict())
-                            if len(self._live_bounces) > 50:
-                                self._live_bounces = self._live_bounces[-50:]
-                            if self._ws_enabled:
-                                bx, by = bounce.x, bounce.y
+                        # PeakBounceDetector may produce multiple bounces per batch
+                        if hasattr(self._bounce_detector, "pop_pending"):
+                            pending_bounces = self._bounce_detector.pop_pending()
+                        else:
+                            pending_bounces = [bounce] if bounce is not None else []
+                        for pb in pending_bounces:
+                            bd = pb.to_dict()
+                            # Match bounce to the most recent UNUSED net crossing within 3s
+                            matched_speed = 0
+                            if self._net_crossings:
+                                for nc in reversed(self._net_crossings):
+                                    if nc.get("_used"):
+                                        continue
+                                    if now - nc["timestamp"] < 3.0:
+                                        bd["speed_kmh"] = nc["speed_kmh"]
+                                        bd["speed_direction"] = nc["direction"]
+                                        matched_speed = nc["speed_kmh"]
+                                        nc["_used"] = True  # consume this crossing
+                                        break
+                            self._live_bounces.append(bd)
+                            self._debug_record_bounce(pb)
+                            if self._ws_enabled and matched_speed > 0:
+                                bx, by = pb.x, pb.y
                                 self._ws_bounce_queue.append({
-                                    "x": (bx - 1.37) / 5.49,
-                                    "y": 1.0 - (by / 23.77),
-                                    "speed": self._latest_net_crossing["speed_kmh"] if self._latest_net_crossing else 0,
+                                    "x": round(bx * 10, 4),
+                                    "y": round(by * 10, 4),
+                                    "speed": matched_speed,
                                     "timestamp": int(now * 1000),
                                 })
+                        if len(self._live_bounces) > 50:
+                            self._live_bounces = self._live_bounces[-50:]
+                        self._rally_tracker.update(pt, bounce)
                         smoothed_pt = self._smooth_latest(pt)
                         _tri_smoothed = smoothed_pt
                         hbounce = self._hybrid_bounce.update(smoothed_pt or pt, cam_dets)
@@ -449,13 +600,58 @@ class Orchestrator:
                                 bd["speed_kmh"] = self._latest_net_crossing["speed_kmh"]
                                 bd["speed_direction"] = self._latest_net_crossing["direction"]
                             self._live_bounces.append(bd)
+                        # Append frame to rally raw buffer
+                        is_bounce_frame = best_bounce is not None
+                        if is_bounce_frame:
+                            self._last_bounce_ts = now
+                        # is_hit: first frame after a bounce where speed rises
+                        is_hit_frame = (
+                            not is_bounce_frame
+                            and now - self._last_bounce_ts < 1.0
+                            and len(self._speed_buffer) >= 2
+                            and self._speed_buffer[-1] > self._speed_buffer[-2]
+                        )
+                        _near_pose = self._latest_player_pose.get(tri_cams[0])
+                        _far_pose = self._latest_player_pose.get(tri_cams[1])
+                        near_player = _near_pose["player"] if _near_pose else None
+                        far_player = _far_pose["player"] if _far_pose else None
+                        self._rally_raw_buffer.append({
+                            "ts": now,
+                            "ball": {"x": x, "y": y, "z": z},
+                            "near_player": near_player,
+                            "far_player": far_player,
+                            "speed_kmh": self._last_frame_speed_kmh,
+                            "is_bounce": is_bounce_frame,
+                            "is_hit": is_hit_frame,
+                        })
+
+
                         if rally_result is not None:
                             self._live_rallies.append(rally_result.to_dict())
                             if len(self._live_rallies) > 20:
                                 self._live_rallies = self._live_rallies[-20:]
+                            # Auto report on rally interval
+                            self._rally_completed_count += 1
+                            if (self._rally_report_interval > 0
+                                    and self._rally_completed_count - self._last_report_rally_count
+                                    >= self._rally_report_interval):
+                                self._auto_generate_report()
+                            # Snapshot frames now (before deque rolls over) then export async
+                            _start_ts = rally_result.start_time
+                            _end_ts = rally_result.end_time
+                            _frames_snapshot = [
+                                fr for fr in self._rally_raw_buffer
+                                if _start_ts <= fr["ts"] <= _end_ts
+                            ]
+                            print(f"[DEBUG] Rally {rally_result.rally_id} 结束，触发 export，frames={len(_frames_snapshot)}")
+                            threading.Thread(
+                                target=self._export_rally,
+                                args=(rally_result, _frames_snapshot),
+                                daemon=True,
+                            ).start()
 
-                    # Write per-frame tracking data (JSONL)
-                    if self._recording and self._data_file is not None:
+                    # Write per-frame tracking data (JSONL — always, not just during recording)
+                    if self._tracking_file is not None:
                         self._write_tracking_frame(
                             d1, d2, tri_cams, x, y, z,
                             _tri_smoothed, _tri_bounce, now, capture_ts,
@@ -464,9 +660,18 @@ class Orchestrator:
                     logger.error("Triangulation/analytics error: %s", e, exc_info=True)
 
             if not got_any:
-                time.sleep(0.005)
+                time.sleep(0.001)  # 1ms — fast response to new detections
 
         self._triangulation_active = False
+        # Close tracking JSONL
+        if self._tracking_file is not None:
+            try:
+                self._tracking_file.close()
+            except Exception:
+                pass
+            logger.info("Tracking JSONL closed: %s (%d frames)",
+                        self._tracking_file_path, self._data_frame_counter)
+            self._tracking_file = None
         logger.info("Consumer thread stopped")
 
     # ------------------------------------------------------------------
@@ -552,6 +757,61 @@ class Orchestrator:
             result = {"status": "stopped", "files": files, "duration_s": round(elapsed, 1)}
             self._recording_info = {}
             return result
+
+    def set_rally_report_interval(self, interval: int) -> dict:
+        """Set how many rallies trigger an auto report. 0 = disabled."""
+        self._rally_report_interval = max(0, interval)
+        return {"interval": self._rally_report_interval}
+
+    def _export_rally(self, rally_result, frames: list) -> None:
+        """Export a completed rally to the configured API endpoint (runs in background thread)."""
+        try:
+            from app.result_exporter import format_rally
+
+            if not frames:
+                logger.warning("Rally %d: no frames in snapshot, skipping export", rally_result.rally_id)
+                print(f"[DEBUG] Rally {rally_result.rally_id} export 跳过: frames 为空")
+                return
+
+            serial_numbers = self.config.serial_numbers
+            serial = serial_numbers.get("cam66") or next(iter(serial_numbers.values()), "UNKNOWN")
+
+            endpoint = self.config.export.endpoint
+            print(f"[DEBUG] Rally {rally_result.rally_id} 正在 POST → {endpoint}")
+            format_rally(rally_result, frames, serial, endpoint)
+        except Exception as e:
+            logger.warning("Rally export error: %s", e)
+            print(f"[DEBUG] Rally export 异常: {e}")
+
+    def _auto_generate_report(self):
+        """Auto-generate report from current tracking JSONL."""
+        self._last_report_rally_count = self._rally_completed_count
+        self.flush_data_file()
+        path = self.get_current_jsonl_path()
+        if not path:
+            return
+        try:
+            from app.report import generate_report
+            result = generate_report(path)
+            logger.info("Auto report generated: %s (%d rallies)",
+                        result.get("report_name"), self._rally_completed_count)
+        except Exception as e:
+            logger.warning("Auto report failed: %s", e)
+
+    def flush_data_file(self) -> None:
+        """Flush the JSONL tracking data file so report module can read it."""
+        if self._tracking_file is not None:
+            try:
+                self._tracking_file.flush()
+            except Exception:
+                pass
+
+    def get_current_jsonl_path(self) -> str | None:
+        """Return path to the current tracking JSONL, or most recent."""
+        if self._tracking_file_path:
+            return self._tracking_file_path
+        jsonls = sorted(Path("recordings").glob("tracking_*.jsonl"), reverse=True)
+        return str(jsonls[0]) if jsonls else None
 
     def get_recording_status(self) -> dict:
         if not self._recording:
@@ -702,6 +962,123 @@ class Orchestrator:
 
     # ------------------------------------------------------------------
     # Status queries (called from FastAPI)
+    def _handle_player_pose(self, msg: dict, cam_positions: dict) -> None:
+        """Process a player_pose message from a camera pipeline subprocess.
+
+        Steps:
+          1. Project each detected player's foot pixel to court (x, y) via homography.
+          2. Filter to this camera's half of the court (derived from camera y position).
+          3. Pick the player nearest to the latest 3D ball position.
+          4. Store in _latest_player_pose and write a JSONL line.
+        """
+        cam_name: str = msg["camera_name"]
+        detections: list[dict] = msg.get("detections", [])
+        if not detections:
+            return
+
+        # Retrieve homography transformer (lazy init, one per camera)
+        if not hasattr(self, "_player_homographies"):
+            self._player_homographies: dict = {}
+        if cam_name not in self._player_homographies:
+            try:
+                cam_cfg = self.config.cameras.get(cam_name)
+                if cam_cfg:
+                    from app.pipeline.homography import HomographyTransformer
+                    self._player_homographies[cam_name] = HomographyTransformer(
+                        self.config.homography.path, cam_cfg.homography_key
+                    )
+            except Exception as e:
+                logger.warning("[%s] Failed to init player homography: %s", cam_name, e)
+                return
+        hom = self._player_homographies.get(cam_name)
+        if hom is None:
+            return
+
+        # Determine which half this camera covers (sign of camera y position)
+        cam_pos = cam_positions.get(cam_name)
+        if cam_pos is None:
+            return
+        cam_y_sign = 1 if cam_pos[1] >= 0 else -1  # +1 → far half (y>0), -1 → near half (y<0)
+        half_slack = 0.5  # metres of tolerance around the net
+
+        # Project each player foot to court and filter by half
+        candidates = []
+        for det in detections:
+            foot_px = det.get("foot_px")
+            if not foot_px:
+                continue
+            try:
+                court_x, court_y = hom.pixel_to_world(foot_px[0], foot_px[1])
+            except Exception:
+                continue
+            # Keep players in this camera's half (+ slack toward net)
+            if cam_y_sign < 0 and court_y > half_slack:
+                continue
+            if cam_y_sign > 0 and court_y < -half_slack:
+                continue
+            candidates.append({**det, "court_x": court_x, "court_y": court_y})
+
+        if not candidates:
+            return
+
+        # Pick player nearest to latest 3D ball position (2D court distance)
+        ball = self._latest_3d
+        if ball is not None and len(candidates) > 1:
+            def _dist(c):
+                return (c["court_x"] - ball.x) ** 2 + (c["court_y"] - ball.y) ** 2
+            nearest = min(candidates, key=_dist)
+            dist_2d = float(_dist(nearest) ** 0.5)
+        else:
+            nearest = candidates[0]
+            dist_2d = float(
+                ((nearest["court_x"] - ball.x) ** 2 + (nearest["court_y"] - ball.y) ** 2) ** 0.5
+            ) if ball is not None else -1.0
+
+        player_record = {
+            "bbox": nearest["bbox"],
+            "conf": nearest["conf"],
+            "foot_px": nearest["foot_px"],
+            "foot_court": [round(nearest["court_x"], 3), round(nearest["court_y"], 3)],
+            "dist_to_ball_2d": round(dist_2d, 3),
+            "keypoints_px": nearest.get("keypoints", []),
+        }
+        self._latest_player_pose[cam_name] = {
+            "timestamp": msg["timestamp"],
+            "capture_ts": msg["capture_ts"],
+            "frame_id": msg["frame_id"],
+            "player": player_record,
+        }
+
+        # Write JSONL
+        if self._tracking_file is not None:
+            ball_snap = (
+                {"x": round(ball.x, 3), "y": round(ball.y, 3), "z": round(ball.z, 3),
+                 "ts": round(ball.timestamp, 4)}
+                if ball is not None else None
+            )
+            row = {
+                "type": "player_pose",
+                "camera": cam_name,
+                "timestamp": round(msg["timestamp"], 4),
+                "capture_ts": round(msg["capture_ts"], 4),
+                "ball_3d": ball_snap,
+                "player": {
+                    "bbox": [round(v, 1) for v in player_record["bbox"]],
+                    "conf": round(player_record["conf"], 3),
+                    "foot_court": player_record["foot_court"],
+                    "dist_to_ball_2d": player_record["dist_to_ball_2d"],
+                    "keypoints_px": [
+                        [round(kp[0], 1), round(kp[1], 1), round(kp[2], 3)]
+                        for kp in player_record["keypoints_px"]
+                    ],
+                },
+            }
+            try:
+                self._tracking_file.write(json.dumps(row, ensure_ascii=False) + "\n")
+                self._tracking_file.flush()
+            except Exception:
+                pass
+
     def _write_tracking_frame(
         self, d1, d2, cam_names, x, y, z, smoothed_pt, bounce, now, capture_ts
     ):
@@ -746,7 +1123,8 @@ class Orchestrator:
         row["state"] = state
 
         try:
-            self._data_file.write(json.dumps(row, ensure_ascii=False) + "\n")
+            self._tracking_file.write(json.dumps(row, ensure_ascii=False) + "\n")
+            self._tracking_file.flush()
             self._data_frame_counter += 1
         except Exception:
             pass
@@ -766,11 +1144,31 @@ class Orchestrator:
 
     def get_system_status(self) -> SystemStatus:
         pipelines = {n: self.get_pipeline_status(n) for n in self._handles}
+        # Extract candidates from latest detections for minimap visualization
+        det_summary = {}
+        for cam_name, det in self._latest_detections.items():
+            if det is None:
+                continue
+            candidates = det.get("candidates", [])
+            det_summary[cam_name] = {
+                "x": det.get("x"),
+                "y": det.get("y"),
+                "pixel_x": det.get("pixel_x"),
+                "pixel_y": det.get("pixel_y"),
+                "candidates": [
+                    {"x": float(c["x"]), "y": float(c["y"]),
+                     "pixel_x": float(c.get("pixel_x", 0)),
+                     "pixel_y": float(c.get("pixel_y", 0)),
+                     "blob_sum": float(c.get("blob_sum", 1.0))}
+                    for c in candidates
+                ],
+            }
         return SystemStatus(
             pipelines=pipelines,
             triangulation_active=self._triangulation_active,
             latest_ball_3d=self._latest_3d,
             analytics=self.get_live_analytics(),
+            latest_detections=det_summary or None,
         )
 
     def get_latest_3d(self) -> Optional[BallPosition3D]:
@@ -790,6 +1188,226 @@ class Orchestrator:
                 "enhanced_state": self._rally_sm.get_state_dict(),
                 "enhanced_rallies": self._enrich_rallies(),
             }
+
+    # ------------------------------------------------------------------
+    # Debug output for GT comparison
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _new_debug_data():
+        return {
+            "detections": {},   # cam_name -> [{frame, pixel_x, pixel_y, confidence, world_x, world_y, n_candidates}]
+            "trajectory": [],   # [{frame, x, y, z, ray_dist, px66, py66, px68, py68, world66, world68}]
+            "bounces": [],      # [{frame, z, x, y, in_court}]
+            "frame_counter": 0,
+        }
+
+    def _debug_record_detection(self, cam: str, det: dict, frame_idx: int = None):
+        """Record a per-camera detection for debug output."""
+        fi = frame_idx if frame_idx is not None else self._debug_data["frame_counter"]
+        self._debug_data["detections"].setdefault(cam, []).append({
+            "frame": fi,
+            "pixel_x": round(det.get("pixel_x", 0), 1),
+            "pixel_y": round(det.get("pixel_y", 0), 1),
+            "confidence": round(det.get("confidence", det.get("blob_sum", 0)), 2),
+            "world_x": round(det.get("x", 0), 4),
+            "world_y": round(det.get("y", 0), 4),
+            "n_candidates": len(det.get("candidates", [])),
+        })
+
+    def _debug_record_3d(self, frame_idx, x, y, z, ray_dist,
+                         d1: dict, d2: dict, cam1: str, cam2: str):
+        """Record a triangulated 3D point for debug output."""
+        self._debug_data["trajectory"].append({
+            "frame": frame_idx,
+            "x": round(x, 4), "y": round(y, 4), "z": round(z, 4),
+            "ray_dist": round(ray_dist, 4) if ray_dist else 0,
+            f"px{cam1[-2:]}": round(d1.get("pixel_x", 0), 1),
+            f"py{cam1[-2:]}": round(d1.get("pixel_y", 0), 1),
+            f"px{cam2[-2:]}": round(d2.get("pixel_x", 0), 1),
+            f"py{cam2[-2:]}": round(d2.get("pixel_y", 0), 1),
+            f"world{cam1[-2:]}": [round(d1.get("x", 0), 4), round(d1.get("y", 0), 4)],
+            f"world{cam2[-2:]}": [round(d2.get("x", 0), 4), round(d2.get("y", 0), 4)],
+        })
+
+    def _debug_record_bounce(self, bounce):
+        """Record a bounce event for debug output."""
+        if isinstance(bounce, dict):
+            self._debug_data["bounces"].append({
+                "frame": bounce.get("frame") or bounce.get("frame_index"),
+                "z": round(bounce.get("z", 0), 4),
+                "x": round(bounce.get("x", 0), 4),
+                "y": round(bounce.get("y", 0), 4),
+                "in_court": bool(bounce.get("in_court", False)),
+            })
+        else:
+            # BounceEvent object
+            self._debug_data["bounces"].append({
+                "frame": bounce.frame_index,
+                "z": round(float(bounce.z), 4),
+                "x": round(float(bounce.x), 4),
+                "y": round(float(bounce.y), 4),
+                "in_court": bool(bounce.in_court),
+            })
+
+    def save_debug_output(self) -> str:
+        """Save accumulated debug data to timestamped directory. Returns path."""
+        import datetime as dt
+        ts = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+        out_dir = self._debug_dir / ts
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        # Config
+        cfg = {
+            "model": self.config.model.model_dump(),
+            "cameras": {n: c.model_dump() for n, c in self.config.cameras.items()},
+            "camera_positions": self._get_camera_positions(),
+            "homography_path": self.config.homography.path,
+        }
+        with open(out_dir / "config.json", "w") as f:
+            json.dump(cfg, f, indent=2, default=str)
+
+        # Per-camera detections
+        for cam, dets in self._debug_data["detections"].items():
+            with open(out_dir / f"detections_{cam}.json", "w") as f:
+                json.dump(dets, f, indent=2)
+
+        # 3D trajectory
+        with open(out_dir / "trajectory_3d.json", "w") as f:
+            json.dump(self._debug_data["trajectory"], f, indent=2)
+
+        # Bounces
+        with open(out_dir / "bounces.json", "w") as f:
+            json.dump(self._debug_data["bounces"], f, indent=2)
+
+        # Summary
+        summary = {
+            "total_detections": {cam: len(d) for cam, d in self._debug_data["detections"].items()},
+            "trajectory_points": len(self._debug_data["trajectory"]),
+            "bounces": len(self._debug_data["bounces"]),
+            "bounce_in": sum(1 for b in self._debug_data["bounces"] if b.get("in_court")),
+            "bounce_out": sum(1 for b in self._debug_data["bounces"] if not b.get("in_court")),
+        }
+        with open(out_dir / "summary.json", "w") as f:
+            json.dump(summary, f, indent=2)
+
+        logger.info("Debug output saved to %s (%d traj points, %d bounces)",
+                     out_dir, summary["trajectory_points"], summary["bounces"])
+
+        # Reset for next session
+        self._debug_data = self._new_debug_data()
+        return str(out_dir)
+
+    def _init_homographies(self):
+        """Lazy-init homography matrices from homography_matrices.json."""
+        if self._blob_homographies:
+            return
+        import json as _json
+        hpath = self.config.homography.path
+        try:
+            with open(hpath, "r", encoding="utf-8") as f:
+                hdata = _json.load(f)
+            for cam_name in self.config.cameras:
+                key = self.config.cameras[cam_name].homography_key
+                if key and key in hdata:
+                    H = np.array(hdata[key], dtype=np.float64)
+                    self._blob_homographies[cam_name] = H
+            logger.info("Loaded homographies for %s", list(self._blob_homographies.keys()))
+        except Exception as e:
+            logger.error("Failed to load homographies: %s", e)
+
+    def _run_tracker_pipeline(self, cam1: str, cam2: str, cam_positions: dict):
+        """Run the full track-first-triangulate-later pipeline on accumulated blobs.
+
+        Steps from research (tracker_3d.py + bounce_detector.py):
+        1. track_single_camera() per camera
+        2. match_and_triangulate() cross-camera
+        3. detect_bounces() / detect_events() on 3D trajectory
+        """
+        from app.pipeline.tracker import track_single_camera, match_and_triangulate
+        from app.pipeline.bounce_detect import detect_bounces
+
+        self._init_homographies()
+        H1 = self._blob_homographies.get(cam1)
+        H2 = self._blob_homographies.get(cam2)
+        if H1 is None or H2 is None:
+            return
+
+        buf1 = self._blob_buffers.get(cam1, {})
+        buf2 = self._blob_buffers.get(cam2, {})
+        if not buf1 or not buf2:
+            return
+
+        now = time.time()
+
+        # Step 1: Single-camera tracking
+        tracks1 = track_single_camera(buf1, max_pixel_dist=80, max_gap=3, min_len=10)
+        tracks2 = track_single_camera(buf2, max_pixel_dist=80, max_gap=3, min_len=10)
+
+        if not tracks1 or not tracks2:
+            return
+
+        # Step 2: Cross-camera matching + 3D triangulation
+        pos1 = cam_positions.get(cam1)
+        pos2 = cam_positions.get(cam2)
+        if not pos1 or not pos2:
+            return
+
+        matched = match_and_triangulate(
+            tracks1, tracks2, H1, H2, pos1, pos2,
+            max_ray_dist=1.0, min_overlap=10, max_tracks=50,
+        )
+
+        if not matched:
+            return
+
+        # Best trajectory
+        best = matched[0]["trajectory"]
+        # (frame, x, y, z, px1, py1, px2, py2, ray_dist)
+
+        # Emit new 3D points
+        for pt in best:
+            fi = pt[0]
+            if fi in self._emitted_3d_frames:
+                continue
+            self._emitted_3d_frames.add(fi)
+
+            x, y, z = pt[1], pt[2], pt[3]
+            self._latest_3d = BallPosition3D(x=x, y=y, z=z)
+
+            d1 = {"pixel_x": pt[4], "pixel_y": pt[5], "x": x, "y": y}
+            d2 = {"pixel_x": pt[6], "pixel_y": pt[7], "x": x, "y": y}
+            self._debug_record_3d(fi, x, y, z, pt[8], d1, d2, cam1, cam2)
+
+            self._latest_detections[cam1] = {
+                "camera_name": cam1, "pixel_x": pt[4], "pixel_y": pt[5],
+                "x": x, "y": y, "timestamp": now,
+            }
+            self._latest_detections[cam2] = {
+                "camera_name": cam2, "pixel_x": pt[6], "pixel_y": pt[7],
+                "x": x, "y": y, "timestamp": now,
+            }
+
+        # Step 3: Bounce detection on trajectory
+        # Convert to tuple format: (frame, x, y, z, ray_dist)
+        traj_tuples = [(pt[0], pt[1], pt[2], pt[3], pt[8]) for pt in best]
+        bounces = detect_bounces(traj_tuples)
+
+        with self._analytics_lock:
+            for b in bounces:
+                if b["frame"] in self._emitted_bounce_frames:
+                    continue
+                self._emitted_bounce_frames.add(b["frame"])
+                self._live_bounces.append(b)
+                self._debug_record_bounce(b)
+                # No 3D push for median_bg bounces (speed=0)
+                logger.info(
+                    "Bounce: frame=%d z=%.3f (%.2f, %.2f) %s",
+                    b["frame"], b["z"], b["x"], b["y"],
+                    "IN" if b["in_court"] else "OUT",
+                )
+            if len(self._live_bounces) > 50:
+                self._live_bounces = self._live_bounces[-50:]
 
     def _smooth_latest(self, pt: dict) -> dict | None:
         """Add a raw 3D point to the SG buffer and return a smoothed point.
@@ -997,7 +1615,6 @@ class Orchestrator:
                             if self._ws_bounce_queue:
                                 bd = self._ws_bounce_queue.pop(0)
                                 msg = json.dumps({
-                                    "room": "general",
                                     "msg": {
                                         "message": "bounce_data",
                                         "data": {
@@ -1143,6 +1760,7 @@ class Orchestrator:
                 "heatmap_mask": [tuple(r) for r in self.config.model.heatmap_mask],
                 "blob_verifier_config": self.config.blob_verifier.model_dump()
                     if self.config.blob_verifier.enabled else None,
+                "detector_type": self.config.model.detector_type,
             },
             daemon=True,
         )
@@ -1240,6 +1858,7 @@ class Orchestrator:
                     "heatmap_mask": [tuple(r) for r in self.config.model.heatmap_mask],
                     "blob_verifier_config": self.config.blob_verifier.model_dump()
                         if self.config.blob_verifier.enabled else None,
+                    "detector_type": self.config.model.detector_type,
                 },
                 daemon=True,
             )

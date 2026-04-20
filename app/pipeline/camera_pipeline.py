@@ -29,6 +29,11 @@ def run_pipeline(
     stop_event: mp.Event,
     status_dict: dict[str, Any],
     frame_queue: Optional[mp.Queue] = None,
+    detector_type: str = "auto",
+    player_model_path: str = "",
+    player_device: str = "cuda",
+    player_conf: float = 0.4,
+    player_run_every_n: int = 5,
 ) -> None:
     """Entry point for a camera pipeline subprocess.
 
@@ -55,13 +60,35 @@ def run_pipeline(
         detector = None
         tracker = None
         homography = None
+        player_detector = None
         try:
-            detector = create_detector(model_path, input_size, frames_in, frames_out, device)
-            tracker = BallTracker(original_size=(1920, 1080), threshold=threshold)
+            detector = create_detector(
+                model_path, input_size, frames_in, frames_out, device,
+                detector_type=detector_type,
+            )
+            # Load per-camera static median background if available
+            if hasattr(detector, "load_static_median"):
+                detector.load_static_median(name)
+            # MedianBGDetector returns blobs directly; no BallTracker needed.
+            tracker = None
+            if not getattr(detector, "returns_blobs", False):
+                tracker = BallTracker(original_size=(1920, 1080), threshold=threshold)
             homography = HomographyTransformer(homography_path, homography_key)
         except Exception as e:
             log.warning("Inference components failed to load, inference disabled: %s", e)
             status_dict["inference_enabled"] = False
+
+        if player_model_path:
+            try:
+                from app.pipeline.player_detector import PlayerPoseDetector
+                player_detector = PlayerPoseDetector(
+                    model_path=player_model_path,
+                    device=player_device,
+                    conf=player_conf,
+                    run_every_n=player_run_every_n,
+                )
+            except Exception as e:
+                log.warning("Player detector failed to load, disabled: %s", e)
 
         status_dict["state"] = "running"
         log.info("Pipeline running")
@@ -73,6 +100,44 @@ def run_pipeline(
         fps_counter = 0
         fps_time = time.time()
 
+        # JPEG encoding in background thread (don't block inference)
+        import threading, queue as _queue
+        _jpeg_q: _queue.Queue = _queue.Queue(maxsize=2)
+
+        def _jpeg_worker():
+            while not stop_event.is_set():
+                try:
+                    item = _jpeg_q.get(timeout=1.0)
+                except _queue.Empty:
+                    continue
+                if item is None:
+                    break
+                raw_frame, is_rec = item
+                try:
+                    h, w = raw_frame.shape[:2]
+                    if is_rec:
+                        _, jpeg = cv2.imencode(".jpg", raw_frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
+                        try:
+                            frame_queue.put(jpeg.tobytes(), timeout=0.5)
+                        except Exception:
+                            pass
+                    else:
+                        preview = cv2.resize(raw_frame, (960, int(h * 960 / w))) if w > 960 else raw_frame
+                        _, jpeg = cv2.imencode(".jpg", preview, [cv2.IMWRITE_JPEG_QUALITY, 75])
+                        # Replace latest preview (non-blocking)
+                        while not frame_queue.empty():
+                            try:
+                                frame_queue.get_nowait()
+                            except Exception:
+                                break
+                        frame_queue.put_nowait(jpeg.tobytes())
+                except Exception:
+                    pass
+
+        if frame_queue is not None:
+            _jpeg_thread = threading.Thread(target=_jpeg_worker, daemon=True)
+            _jpeg_thread.start()
+
         while not stop_event.is_set():
             frame, frame_id, ts = stream.read()
             if frame is None or frame_id == last_frame_id:
@@ -81,37 +146,36 @@ def run_pipeline(
             last_frame_id = frame_id
             capture_ts = time.time()  # wall-clock at frame arrival
 
-            # --- 向 frame_queue 放 JPEG（预览或录像）---
+            # Send clean frame to JPEG thread (before OSD mask)
             if frame_queue is not None:
                 is_recording = status_dict.get("recording_enabled", False)
                 if is_recording or frame_id % 4 == 0:
                     try:
-                        h, w = frame.shape[:2]
-                        if is_recording:
-                            # 录像模式：原画质，不缩放，JPEG quality 95
-                            _, jpeg = cv2.imencode(
-                                ".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 95]
-                            )
-                            try:
-                                frame_queue.put(jpeg.tobytes(), timeout=0.5)
-                            except Exception:
-                                pass  # 队列满超时丢帧
-                        else:
-                            # 预览模式：缩放到 960 宽，JPEG quality 75，只保留最新帧
-                            preview = cv2.resize(frame, (960, int(h * 960 / w))) if w > 960 else frame
-                            _, jpeg = cv2.imencode(
-                                ".jpg", preview, [cv2.IMWRITE_JPEG_QUALITY, 75]
-                            )
-                            while not frame_queue.empty():
-                                try:
-                                    frame_queue.get_nowait()
-                                except Exception:
-                                    break
-                            frame_queue.put_nowait(jpeg.tobytes())
-                    except Exception:
+                        _jpeg_q.put_nowait((frame.copy(), is_recording))
+                    except _queue.Full:
                         pass
 
-            # Mask out timestamp overlay (top-left corner) to avoid interfering with detection
+            # Player pose detection (clean frame, before OSD mask)
+            if player_detector is not None:
+                try:
+                    player_dets = player_detector.detect(frame)
+                    if player_dets:
+                        player_msg = {
+                            "type": "player_pose",
+                            "camera_name": name,
+                            "frame_id": frame_id,
+                            "timestamp": time.time(),
+                            "capture_ts": capture_ts,
+                            "detections": player_dets,
+                        }
+                        try:
+                            result_queue.put_nowait(player_msg)
+                        except Exception:
+                            pass
+                except Exception as e:
+                    log.debug("Player detection error: %s", e)
+
+            # Mask OSD for inference only (after JPEG thread got clean ref)
             frame[0:41, 0:603] = 0
 
             frame_buffer.append(frame)
@@ -137,50 +201,94 @@ def run_pipeline(
                 frame_id_buffer.clear()
                 continue
 
-            # Post-process each output frame — extract top-K blobs (matches offline)
-            for i in range(min(frames_out, len(heatmaps))):
-                blobs = tracker.process_heatmap_multi(heatmaps[i], max_blobs=2)
-                if not blobs:
-                    continue
-
-                # Top-1 blob as primary detection
-                top = blobs[0]
-                px, py, conf = top["pixel_x"], top["pixel_y"], top["blob_sum"]
-                wx, wy = homography.pixel_to_world(px, py)
-
-                # NOTE: No court X filtering here — matches offline pipeline.
-                # MultiBlobMatcher in orchestrator handles court/Z bounds.
-
-                # Build candidates list with world coords for MultiBlobMatcher
-                candidates = []
-                for b in blobs:
-                    bwx, bwy = homography.pixel_to_world(b["pixel_x"], b["pixel_y"])
-                    candidates.append({
-                        "x": bwx, "y": bwy,
-                        "world_x": bwx, "world_y": bwy,
-                        "pixel_x": b["pixel_x"], "pixel_y": b["pixel_y"],
-                        "blob_sum": b["blob_sum"],
-                    })
-
-                detection = {
+            if isinstance(heatmaps, dict):
+                # ---- MedianBG path: send raw blob_block ----
+                blob_block = {}
+                for local_i, blobs in heatmaps.items():
+                    if local_i < len(frame_id_buffer):
+                        blob_block[frame_id_buffer[local_i]] = blobs
+                msg = {
                     "camera_name": name,
-                    "x": wx,
-                    "y": wy,
-                    "pixel_x": px,
-                    "pixel_y": py,
-                    "confidence": conf,
-                    "blob_sum": conf,
-                    "timestamp": time.time(),
+                    "type": "blob_block",
+                    "blobs": blob_block,
                     "capture_ts": capture_ts_buffer[0],
-                    "candidates": candidates,  # top-K for MultiBlobMatcher
+                    "timestamp": time.time(),
                 }
-
                 try:
-                    result_queue.put_nowait(detection)
+                    result_queue.put_nowait(msg)
                 except Exception:
                     pass
-
                 status_dict["last_detection_time"] = time.time()
+            elif isinstance(heatmaps, list) and heatmaps and isinstance(heatmaps[0], list):
+                # ---- BallSelector path: list of blob lists ----
+                for i in range(min(frames_out, len(heatmaps))):
+                    blobs = heatmaps[i]
+                    if not blobs:
+                        continue
+
+                    top = blobs[0]
+                    px, py, conf = top["pixel_x"], top["pixel_y"], top["blob_sum"]
+                    wx, wy = homography.pixel_to_world(px, py)
+
+                    candidates = []
+                    for b in blobs:
+                        bwx, bwy = homography.pixel_to_world(b["pixel_x"], b["pixel_y"])
+                        candidates.append({
+                            "x": bwx, "y": bwy,
+                            "world_x": bwx, "world_y": bwy,
+                            "pixel_x": b["pixel_x"], "pixel_y": b["pixel_y"],
+                            "blob_sum": b["blob_sum"],
+                        })
+
+                    detection = {
+                        "camera_name": name,
+                        "x": wx, "y": wy,
+                        "pixel_x": px, "pixel_y": py,
+                        "confidence": conf, "blob_sum": conf,
+                        "timestamp": time.time(),
+                        "capture_ts": capture_ts_buffer[0],
+                        "candidates": candidates,
+                    }
+                    try:
+                        result_queue.put_nowait(detection)
+                    except Exception:
+                        pass
+                    status_dict["last_detection_time"] = time.time()
+            else:
+                # ---- TrackNet / HRNet path: heatmaps → BallTracker ----
+                for i in range(min(frames_out, len(heatmaps))):
+                    blobs = tracker.process_heatmap_multi(heatmaps[i], max_blobs=2)
+                    if not blobs:
+                        continue
+
+                    top = blobs[0]
+                    px, py, conf = top["pixel_x"], top["pixel_y"], top["blob_sum"]
+                    wx, wy = homography.pixel_to_world(px, py)
+
+                    candidates = []
+                    for b in blobs:
+                        bwx, bwy = homography.pixel_to_world(b["pixel_x"], b["pixel_y"])
+                        candidates.append({
+                            "x": bwx, "y": bwy,
+                            "world_x": bwx, "world_y": bwy,
+                            "pixel_x": b["pixel_x"], "pixel_y": b["pixel_y"],
+                            "blob_sum": b["blob_sum"],
+                        })
+
+                    detection = {
+                        "camera_name": name,
+                        "x": wx, "y": wy,
+                        "pixel_x": px, "pixel_y": py,
+                        "confidence": conf, "blob_sum": conf,
+                        "timestamp": time.time(),
+                        "capture_ts": capture_ts_buffer[0],
+                        "candidates": candidates,
+                    }
+                    try:
+                        result_queue.put_nowait(detection)
+                    except Exception:
+                        pass
+                    status_dict["last_detection_time"] = time.time()
 
             fps_counter += frames_out
             now = time.time()

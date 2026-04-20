@@ -26,10 +26,10 @@ logger = logging.getLogger(__name__)
 GRAVITY = np.array([0.0, 0.0, -9.81])
 
 # Court dimensions (meters) — singles sidelines
-_COURT_X_MIN = 1.37
-_COURT_X_MAX = 6.86
-_COURT_Y = 23.77
-_NET_Y = 11.885
+_COURT_X_MIN = -4.115  # V2
+_COURT_X_MAX = 4.115  # V2
+_COURT_Y = 11.89  # V2: half length
+_NET_Y = 0.0  # V2: net at origin
 
 
 # ========== Stage 0: Per-camera detection cleaning ==========

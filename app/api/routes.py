@@ -234,6 +234,163 @@ async def run_calibration_api():
         raise HTTPException(500, str(e))
 
 
+# ---- Reports ----
+
+@router.post("/api/report/generate")
+async def generate_report_api(request: Request):
+    """Generate match analysis report from JSONL tracking data.
+
+    Body: {"session": "tracking_20260404_093901"} or {} for latest.
+    Works even while recording — flushes data file first.
+    """
+    from app.report import generate_report
+    orch = _get_orch()
+
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+
+    # Flush current recording data so we can read it
+    orch.flush_data_file()
+
+    session = body.get("session")
+    recordings_dir = Path("recordings")
+
+    if session:
+        jsonl_path = recordings_dir / f"{session}.jsonl"
+        if not jsonl_path.exists():
+            jsonl_path = recordings_dir / session
+        if not jsonl_path.exists():
+            raise HTTPException(404, f"JSONL not found: {session}")
+    else:
+        # Try current recording first, then most recent file
+        current = orch.get_current_jsonl_path()
+        if current and Path(current).exists():
+            jsonl_path = Path(current)
+        else:
+            jsonls = sorted(recordings_dir.glob("tracking_*.jsonl"), reverse=True)
+            if not jsonls:
+                raise HTTPException(404, "No tracking JSONL files found in recordings/")
+            jsonl_path = jsonls[0]
+
+    try:
+        result = generate_report(str(jsonl_path))
+        return result
+    except Exception as e:
+        raise HTTPException(500, f"Report generation failed: {e}")
+
+
+@router.post("/api/report/interval")
+async def set_report_interval(request: Request):
+    """Set rally-based auto report interval.
+
+    Body: {"interval": 10}  — generate report every 10 rallies. 0 = disabled.
+    """
+    orch = _get_orch()
+    body = await request.json()
+    interval = body.get("interval", 10)
+    return orch.set_rally_report_interval(interval)
+
+
+@router.get("/api/report/list")
+async def list_reports():
+    """List generated reports."""
+    reports_dir = Path("reports")
+    if not reports_dir.exists():
+        return {"reports": []}
+
+    reports = []
+    for d in sorted(reports_dir.iterdir(), reverse=True):
+        if not d.is_dir():
+            continue
+        viz_path = d / "viz_data.json"
+        summary = {}
+        if viz_path.exists():
+            try:
+                with open(viz_path) as f:
+                    data = json.load(f)
+                summary = data.get("summary", {})
+            except Exception:
+                pass
+        reports.append({"name": d.name, "summary": summary})
+
+    return {"reports": reports}
+
+
+@router.get("/api/report/{name}/data")
+async def get_report_data(name: str):
+    """Get report viz_data.json."""
+    path = Path("reports") / name / "viz_data.json"
+    if not path.exists():
+        raise HTTPException(404, f"Report not found: {name}")
+    with open(path) as f:
+        return json.load(f)
+
+
+# ---- Debug output ----
+
+@router.post("/api/debug/save")
+async def debug_save():
+    """Save accumulated debug data to debug_output/ directory."""
+    orch = _get_orch()
+    path = orch.save_debug_output()
+    return {"status": "ok", "path": path}
+
+
+@router.post("/api/debug/load-gt")
+async def debug_load_gt(request: Request):
+    """Load GT bounce data for live comparison overlay.
+
+    Body: {"path": "D:/tennis/blob_frame_different/bounce_results.json"}
+    or:   {} to load default GT file.
+    """
+    body = await request.json() if request.headers.get("content-type") else {}
+    default_path = "D:/tennis/blob_frame_different/bounce_results.json"
+    gt_path = body.get("path", default_path)
+
+    try:
+        with open(gt_path, "r", encoding="utf-8") as f:
+            gt = json.load(f)
+        bounces = gt.get("bounces", [])
+        return {
+            "status": "ok",
+            "path": gt_path,
+            "bounces": bounces,
+            "trajectory_points": len(gt.get("trajectory", [])),
+            "config": gt.get("config", {}),
+        }
+    except Exception as e:
+        raise HTTPException(400, f"Failed to load GT: {e}")
+
+
+@router.get("/api/debug/list")
+async def debug_list():
+    """List saved debug output directories."""
+    debug_dir = Path("debug_output")
+    if not debug_dir.exists():
+        return {"outputs": []}
+    dirs = sorted([d.name for d in debug_dir.iterdir() if d.is_dir()], reverse=True)
+    results = []
+    for d in dirs[:20]:
+        summary_path = debug_dir / d / "summary.json"
+        summary = {}
+        if summary_path.exists():
+            summary = json.loads(summary_path.read_text())
+        results.append({"name": d, "summary": summary})
+    return {"outputs": results}
+
+
+@router.get("/api/debug/{name}/{filename}")
+async def debug_file(name: str, filename: str):
+    """Download a specific debug output file."""
+    fpath = Path("debug_output") / name / filename
+    if not fpath.exists():
+        raise HTTPException(404, f"Not found: {name}/{filename}")
+    return json.loads(fpath.read_text())
+
+
 @router.get("/api/calibration/status")
 async def calibration_status():
     """Get current calibration data if available."""
@@ -355,6 +512,36 @@ async def apply_calibration(request: Request):
 
 # ---- Pipeline control ----
 
+@router.post("/api/pipeline/start-all")
+async def start_all_pipelines():
+    """Start all non-record-only cameras simultaneously."""
+    orch = _get_orch()
+    started = []
+    for name, cam in orch.config.cameras.items():
+        if cam.record_only:
+            continue
+        try:
+            orch.start_pipeline(name)
+            started.append(name)
+        except Exception:
+            pass
+    return {"status": "ok", "started": started}
+
+
+@router.post("/api/pipeline/stop-all")
+async def stop_all_pipelines():
+    """Stop all running pipelines."""
+    orch = _get_orch()
+    stopped = []
+    for name in list(orch.config.cameras.keys()):
+        try:
+            orch.stop_pipeline(name)
+            stopped.append(name)
+        except Exception:
+            pass
+    return {"status": "ok", "stopped": stopped}
+
+
 @router.post("/api/pipeline/{name}/start")
 async def start_pipeline(name: str):
     orch = _get_orch()
@@ -460,19 +647,32 @@ async def recording_ffmpeg_stop():
 # ---- Camera MJPEG stream ----
 
 @router.get("/api/camera/{name}/stream")
-async def camera_mjpeg_stream(name: str):
-    """将摄像头最新帧以 MJPEG multipart 格式持续推送给浏览器。"""
+async def camera_mjpeg_stream(name: str, delay: float = 0):
+    """MJPEG stream with optional delay (seconds) to sync with bounce detection.
+
+    Use ``?delay=3`` to delay the video by 3 seconds, matching pipeline latency.
+    """
     orch = _get_orch()
+    from collections import deque
+    import time as _time
 
     async def frame_generator():
         _BOUNDARY = b"--frame\r\nContent-Type: image/jpeg\r\n\r\n"
-        prev: bytes | None = None
+        buf: deque = deque()
+
         while True:
             jpeg = orch.get_latest_frame(name)
-            if jpeg is not None and jpeg is not prev:
-                prev = jpeg
-                yield _BOUNDARY + jpeg + b"\r\n"
-            await asyncio.sleep(1 / 25)  # 最高 25 fps
+            if jpeg is not None:
+                now = _time.time()
+                if delay > 0:
+                    buf.append((now, jpeg))
+                    # Emit oldest frame that's at least `delay` seconds old
+                    while buf and now - buf[0][0] >= delay:
+                        _, old_jpeg = buf.popleft()
+                        yield _BOUNDARY + old_jpeg + b"\r\n"
+                else:
+                    yield _BOUNDARY + jpeg + b"\r\n"
+            await asyncio.sleep(1 / 15)
 
     return StreamingResponse(
         frame_generator(),
