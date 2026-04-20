@@ -43,3 +43,4 @@ yolo*.pt
 # Video output
 output/
 *.mp4
+CONTEXT.md
