@@ -19,7 +19,6 @@ from app.pipeline.video_pipeline import run_video_pipeline
 from app.schemas import BallPosition3D, PipelineStatus, SystemStatus, WorldPoint2D
 from app.analytics import (
     BounceDetector,
-    EnhancedBounceDetector,
     HybridBounceDetector,
     PeakBounceDetector,
     RallyStateMachine,
@@ -103,13 +102,23 @@ class Orchestrator:
         self._debug_dir = Path("debug_output")
         self._debug_data = self._new_debug_data()
 
-        # Live analytics — use batch find_peaks for all modes (validated 30/30 vs GT)
-        self._bounce_detector = PeakBounceDetector(batch_size=10)
+        # Live analytics — Hybrid is the sole production source.
+        # Peak runs alongside for evaluation only; its output is walled off in
+        # _peak_bounces_eval and never touches _live_bounces, rally_sm,
+        # _rally_tracker, JSONL, or WebSocket.
+        # Params relaxed vs. the offline defaults — live 3D is sparser
+        # (capture_ts drift + missed pairs break continuity), so the density
+        # / seg-length gates would otherwise eat real bounces.
+        self._hybrid_bounce = HybridBounceDetector(
+            min_seg_len=8,      # was 15
+            min_dense=10,       # was 20
+            dense_range=15,     # was 20
+        )
+        self._bounce_detector = PeakBounceDetector(batch_size=10)   # eval only
         self._rally_tracker = RallyTracker()
-        self._live_bounces: list[dict] = []
-        self._enhanced_bounce = EnhancedBounceDetector()
-        self._hybrid_bounce = HybridBounceDetector()
         self._rally_sm = RallyStateMachine()
+        self._live_bounces: list[dict] = []
+        self._peak_bounces_eval: list[dict] = []   # sidecar, cap 100
 
         # Auto report: generate after every N completed rallies
         self._rally_report_interval: int = 10  # 0 = disabled
@@ -553,71 +562,99 @@ class Orchestrator:
                         self._last_frame_speed_kmh = float(np.median(list(self._speed_buffer)))
 
 
+                    # cam_dets feeds HybridBounceDetector's landing-coord selector.
+                    # Must reflect the blob live_matcher actually chose (may be
+                    # non-top1 ~15% of frames per MultiBlobMatcher stats), not
+                    # whatever top-1 blob happens to be in d1/d2.
                     cam_dets = {}
-                    for cname, det in [(tri_cams[0], d1), (tri_cams[1], d2)]:
-                        cam_dets[cname] = {
-                            "world_x": det.get("x"),
-                            "world_y": det.get("y"),
-                            "pixel_x": det.get("pixel_x"),
-                            "pixel_y": det.get("pixel_y"),
-                            "yolo_conf": det.get("yolo_conf", 0.5),
+                    if match is not None:
+                        c1w = match.get("cam1_world") or [d1.get("x"), d1.get("y")]
+                        c2w = match.get("cam2_world") or [d2.get("x"), d2.get("y")]
+                        c1p = match.get("cam1_pixel") or [d1.get("pixel_x"), d1.get("pixel_y")]
+                        c2p = match.get("cam2_pixel") or [d2.get("pixel_x"), d2.get("pixel_y")]
+                        cam_dets[tri_cams[0]] = {
+                            "world_x": c1w[0], "world_y": c1w[1],
+                            "pixel_x": c1p[0], "pixel_y": c1p[1],
+                            "yolo_conf": d1.get("yolo_conf"),   # None if not provided
+                            "blob_sum": match.get("cam1_blob_sum", d1.get("blob_sum", 0.0)),
                         }
+                        cam_dets[tri_cams[1]] = {
+                            "world_x": c2w[0], "world_y": c2w[1],
+                            "pixel_x": c2p[0], "pixel_y": c2p[1],
+                            "yolo_conf": d2.get("yolo_conf"),
+                            "blob_sum": match.get("cam2_blob_sum", d2.get("blob_sum", 0.0)),
+                        }
+                    else:
+                        # Fallback: no matcher selection available, use top-1 blob
+                        for cname, det in [(tri_cams[0], d1), (tri_cams[1], d2)]:
+                            cam_dets[cname] = {
+                                "world_x": det.get("x"),
+                                "world_y": det.get("y"),
+                                "pixel_x": det.get("pixel_x"),
+                                "pixel_y": det.get("pixel_y"),
+                                "yolo_conf": det.get("yolo_conf"),
+                                "blob_sum": det.get("blob_sum", 0.0),
+                            }
                     with self._analytics_lock:
-                        bounce = self._bounce_detector.update(pt)
-                        # PeakBounceDetector may produce multiple bounces per batch
+                        # --- Peak eval sidecar (isolated — no production impact) ---
+                        self._bounce_detector.update(pt)
                         if hasattr(self._bounce_detector, "pop_pending"):
-                            pending_bounces = self._bounce_detector.pop_pending()
-                        else:
-                            pending_bounces = [bounce] if bounce is not None else []
-                        for pb in pending_bounces:
-                            bd = pb.to_dict()
-                            # Match bounce to the most recent UNUSED net crossing within 3s
-                            matched_speed = 0
-                            if self._net_crossings:
-                                for nc in reversed(self._net_crossings):
-                                    if nc.get("_used"):
-                                        continue
-                                    if now - nc["timestamp"] < 3.0:
-                                        bd["speed_kmh"] = nc["speed_kmh"]
-                                        bd["speed_direction"] = nc["direction"]
-                                        matched_speed = nc["speed_kmh"]
-                                        nc["_used"] = True  # consume this crossing
-                                        break
+                            for pb in self._bounce_detector.pop_pending():
+                                self._peak_bounces_eval.append(pb.to_dict())
+                                self._debug_record_peak_bounce(pb)
+                            if len(self._peak_bounces_eval) > 100:
+                                self._peak_bounces_eval = self._peak_bounces_eval[-100:]
+
+                        # --- Hybrid: sole production source ---
+                        smoothed_pt = self._smooth_latest(pt)
+                        _tri_smoothed = smoothed_pt
+                        hbounce = self._hybrid_bounce.update(smoothed_pt or pt, cam_dets)
+
+                        # --- Gate: dedup once, then fan out the accepted bounce ---
+                        accepted_bounce = None
+                        accepted_bd = None
+                        accepted_matched_speed = 0
+                        if hbounce is not None:
+                            bd = hbounce.to_dict()
+                            bd["capture_ts"] = capture_ts
+                            bd["detect_delay"] = round(now - capture_ts, 2)
+                            # Match to most recent UNUSED net crossing within 3s
+                            for nc in reversed(self._net_crossings):
+                                if nc.get("_used"):
+                                    continue
+                                if now - nc["timestamp"] < 3.0:
+                                    bd["speed_kmh"] = nc["speed_kmh"]
+                                    bd["speed_direction"] = nc["direction"]
+                                    accepted_matched_speed = nc["speed_kmh"]
+                                    nc["_used"] = True
+                                    break
                             if not self._is_duplicate_bounce(bd):
-                                self._live_bounces.append(bd)
-                                self._debug_record_bounce(pb)
-                            if self._ws_enabled and matched_speed > 0:
-                                bx, by = pb.x, pb.y
+                                accepted_bounce = hbounce
+                                accepted_bd = bd
+
+                        # --- Fan out (every production consumer reads accepted_bounce) ---
+                        self._rally_tracker.update(pt, accepted_bounce)
+                        rally_result = self._rally_sm.update(pt, accepted_bounce)
+
+                        _tri_bounce = accepted_bounce
+
+                        if accepted_bounce is not None:
+                            self._live_bounces.append(accepted_bd)
+                            self._debug_record_bounce(accepted_bounce)
+                            if self._ws_enabled and accepted_matched_speed > 0:
+                                bx, by = accepted_bounce.x, accepted_bounce.y
                                 self._ws_bounce_queue.append({
                                     "x": round(bx * 10, 4),
                                     "y": round(by * 10, 4),
-                                    "speed": matched_speed,
+                                    "speed": accepted_matched_speed,
                                     "timestamp": int(now * 1000),
                                 })
-                                # Cap to prevent memory leak if WS is slow/disconnected
                                 if len(self._ws_bounce_queue) > 100:
                                     self._ws_bounce_queue = self._ws_bounce_queue[-100:]
                         if len(self._live_bounces) > 50:
                             self._live_bounces = self._live_bounces[-50:]
-                        self._rally_tracker.update(pt, bounce)
-                        smoothed_pt = self._smooth_latest(pt)
-                        _tri_smoothed = smoothed_pt
-                        hbounce = self._hybrid_bounce.update(smoothed_pt or pt, cam_dets)
-                        ebounce = self._enhanced_bounce.update(pt, cam_dets)
-                        best_bounce = hbounce or ebounce
-                        _tri_bounce = best_bounce
-                        rally_result = self._rally_sm.update(pt, best_bounce)
-                        if best_bounce is not None:
-                            bd = best_bounce.to_dict()
-                            bd["capture_ts"] = capture_ts
-                            bd["detect_delay"] = round(now - capture_ts, 2)
-                            if self._latest_net_crossing and (now - self._latest_net_crossing["timestamp"]) < 3.0:
-                                bd["speed_kmh"] = self._latest_net_crossing["speed_kmh"]
-                                bd["speed_direction"] = self._latest_net_crossing["direction"]
-                            if not self._is_duplicate_bounce(bd):
-                                self._live_bounces.append(bd)
                         # Append frame to rally raw buffer
-                        is_bounce_frame = best_bounce is not None
+                        is_bounce_frame = accepted_bounce is not None
                         if is_bounce_frame:
                             self._last_bounce_ts = now
                         # is_hit: first frame after a bounce where speed rises
@@ -1199,15 +1236,29 @@ class Orchestrator:
         return self._latest_detections.get(name)
 
     def get_live_analytics(self) -> dict:
-        """Return current live bounce/rally state for the dashboard."""
+        """Return current live bounce/rally state for the dashboard.
+
+        The *primary* rally truth is ``RallyStateMachine`` (it handles serve,
+        OUT, NET, DOUBLE_BOUNCE). ``RallyTracker`` is the legacy simpler
+        tracker (net crossings + timeout only) — exposed under ``legacy_*``
+        for reference / migration, not as canonical output.
+
+        ``recent_bounces`` only contains Hybrid-sourced bounces after the
+        dedup gate. ``peak_bounces_eval`` is a read-only sidecar for
+        comparing PeakBounceDetector against Hybrid; do NOT drive any UI
+        decision off it.
+        """
         with self._analytics_lock:
             return {
-                "rally_state": self._rally_tracker.get_state().to_dict(),
+                # Primary truth — RallyStateMachine
+                "rally_state": self._rally_sm.get_state_dict(),
+                "completed_rallies": self._enrich_rallies(),
                 "recent_bounces": list(self._live_bounces[-10:]),
-                "completed_rallies": self._rally_tracker.get_completed_rallies(),
-                # Enhanced analytics
-                "enhanced_state": self._rally_sm.get_state_dict(),
-                "enhanced_rallies": self._enrich_rallies(),
+                # Peak sidecar (eval only)
+                "peak_bounces_eval": list(self._peak_bounces_eval[-10:]),
+                # Legacy simpler tracker — kept for reference
+                "legacy_rally_state": self._rally_tracker.get_state().to_dict(),
+                "legacy_completed_rallies": self._rally_tracker.get_completed_rallies(),
             }
 
     # ------------------------------------------------------------------
@@ -1244,9 +1295,10 @@ class Orchestrator:
     @staticmethod
     def _new_debug_data():
         return {
-            "detections": {},   # cam_name -> [{frame, pixel_x, pixel_y, confidence, world_x, world_y, n_candidates}]
-            "trajectory": [],   # [{frame, x, y, z, ray_dist, px66, py66, px68, py68, world66, world68}]
-            "bounces": [],      # [{frame, z, x, y, in_court}]
+            "detections": {},       # cam_name -> [{frame, pixel_x, pixel_y, confidence, world_x, world_y, n_candidates}]
+            "trajectory": [],       # [{frame, x, y, z, ray_dist, px66, py66, px68, py68, world66, world68}]
+            "bounces": [],          # Hybrid (production): [{frame, z, x, y, in_court}]
+            "peak_bounces": [],     # Peak (eval-only sidecar): same schema as bounces
             "frame_counter": 0,
         }
 
@@ -1278,25 +1330,36 @@ class Orchestrator:
             f"world{cam2[-2:]}": [round(d2.get("x", 0), 4), round(d2.get("y", 0), 4)],
         })
 
-    def _debug_record_bounce(self, bounce):
-        """Record a bounce event for debug output."""
+    @staticmethod
+    def _bounce_to_debug_row(bounce) -> dict:
+        """Convert a BounceEvent or bounce-dict to the shared debug row schema."""
         if isinstance(bounce, dict):
-            self._debug_data["bounces"].append({
+            return {
                 "frame": bounce.get("frame") or bounce.get("frame_index"),
                 "z": round(bounce.get("z", 0), 4),
                 "x": round(bounce.get("x", 0), 4),
                 "y": round(bounce.get("y", 0), 4),
                 "in_court": bool(bounce.get("in_court", False)),
-            })
-        else:
-            # BounceEvent object
-            self._debug_data["bounces"].append({
-                "frame": bounce.frame_index,
-                "z": round(float(bounce.z), 4),
-                "x": round(float(bounce.x), 4),
-                "y": round(float(bounce.y), 4),
-                "in_court": bool(bounce.in_court),
-            })
+            }
+        return {
+            "frame": bounce.frame_index,
+            "z": round(float(bounce.z), 4),
+            "x": round(float(bounce.x), 4),
+            "y": round(float(bounce.y), 4),
+            "in_court": bool(bounce.in_court),
+        }
+
+    def _debug_record_bounce(self, bounce):
+        """Record a Hybrid (production) bounce for debug output."""
+        self._debug_data["bounces"].append(self._bounce_to_debug_row(bounce))
+
+    def _debug_record_peak_bounce(self, bounce):
+        """Record a Peak (eval-only) bounce in a separate bucket so it
+        never mixes with the production ``bounces`` list when diffing
+        debug_output against GT or Hybrid."""
+        self._debug_data.setdefault("peak_bounces", []).append(
+            self._bounce_to_debug_row(bounce)
+        )
 
     def save_debug_output(self) -> str:
         """Save accumulated debug data to timestamped directory. Returns path."""
@@ -1324,9 +1387,12 @@ class Orchestrator:
         with open(out_dir / "trajectory_3d.json", "w") as f:
             json.dump(self._debug_data["trajectory"], f, indent=2)
 
-        # Bounces
+        # Bounces — production (Hybrid) and eval sidecar (Peak) kept separate
         with open(out_dir / "bounces.json", "w") as f:
             json.dump(self._debug_data["bounces"], f, indent=2)
+        peak_bounces = self._debug_data.get("peak_bounces", [])
+        with open(out_dir / "peak_bounces.json", "w") as f:
+            json.dump(peak_bounces, f, indent=2)
 
         # Summary
         summary = {
@@ -1335,6 +1401,7 @@ class Orchestrator:
             "bounces": len(self._debug_data["bounces"]),
             "bounce_in": sum(1 for b in self._debug_data["bounces"] if b.get("in_court")),
             "bounce_out": sum(1 for b in self._debug_data["bounces"] if not b.get("in_court")),
+            "peak_bounces_eval": len(peak_bounces),
         }
         with open(out_dir / "summary.json", "w") as f:
             json.dump(summary, f, indent=2)
@@ -1538,14 +1605,43 @@ class Orchestrator:
         return rallies
 
     def reset_live_analytics(self) -> None:
-        """Reset analytics state (e.g. when starting a new session)."""
+        """Reset every piece of per-session analytics state so the next
+        session starts clean. After this returns, the first frames of the
+        new session produce no rally/bounce events until Hybrid's buffer
+        (60 frames) and Peak's batch (10 frames) refill — this is expected.
+        """
         with self._analytics_lock:
+            # Detectors
+            self._hybrid_bounce.reset()
             self._bounce_detector.reset()
             self._rally_tracker.reset()
-            self._live_bounces.clear()
-            self._enhanced_bounce.reset()
             self._rally_sm.reset()
+
+            # Production + sidecar bounce buffers
+            self._live_bounces.clear()
+            self._peak_bounces_eval.clear()
+
+            # Rally/live buffers
             self._live_rallies.clear()
+            self._rally_raw_buffer.clear()
+
+            # Speed / motion state so the next session doesn't see stale prev_3d
+            self._speed_buffer.clear()
+            self._prev_3d = None
+            self._last_tri_pair = None
+            self._conf_history.clear()
+
+            # Net crossing state (clearing both the history and the "latest")
+            self._net_crossings.clear()
+            self._latest_net_crossing = None
+
+            # WS push queue (stale bounces from prior session would confuse client)
+            self._ws_bounce_queue.clear()
+
+            # Debug recording buckets (keep shape, wipe contents)
+            if isinstance(self._debug_data, dict):
+                self._debug_data["bounces"] = []
+                self._debug_data["peak_bounces"] = []
 
     def get_latest_net_crossing(self) -> Optional[dict]:
         """Return the most recent net crossing event with speed."""

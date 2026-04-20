@@ -999,25 +999,93 @@ class HybridBounceDetector:
                 if det and det.get("pixel_x") is not None:
                     cam_px[cname] = [det["pixel_x"], det["pixel_y"]]
 
-        in_court = (SINGLES_X_MIN <= x_i <= SINGLES_X_MAX
-                    and COURT_Y_MIN <= y_i <= COURT_Y_MAX)
+        # Ported from EnhancedBounceDetector — ground-plane single-camera
+        # homography is more accurate than triangulated 3D at low z.
+        # NB: acceptance above already used triangulated (x_i, y_i); this only
+        # corrects the *emitted* landing position.
+        land_x, land_y, src = self._select_landing_coords(i)
+
+        in_court = (SINGLES_X_MIN <= land_x <= SINGLES_X_MAX
+                    and COURT_Y_MIN <= land_y <= COURT_Y_MAX)
 
         bounce = BounceEvent(
-            x=float(x_i),
-            y=float(y_i),
+            x=float(land_x),
+            y=float(land_y),
             z=float(z_i),
             timestamp=float(pt_ts),
             in_court=in_court,
+            frame_index=self._buf[i]["pt"].get("frame_index"),
             confidence=round(min(1.0, v_score + 0.1 * best_ratio), 3),
-            source_camera="3d",
+            source_camera=src,
             cam_pixels=cam_px,
         )
         logger.info(
-            "HybridBounce: (%.2f, %.2f, z=%.2f) %s v=%.2f p=%.1f spd=%.0f",
-            x_i, y_i, z_i, "IN" if in_court else "OUT",
+            "HybridBounce: (%.2f, %.2f, z=%.2f) %s [%s] v=%.2f p=%.1f spd=%.0f",
+            land_x, land_y, z_i, "IN" if in_court else "OUT", src,
             v_score, best_ratio, speed if dt > 1e-6 else 0,
         )
         return bounce
+
+    def _select_landing_coords(self, i: int) -> tuple[float, float, str]:
+        """Choose landing (x, y) for a bounce at buffer index `i`.
+
+        Priority (ported from EnhancedBounceDetector._get_landing_coords):
+          1. Single-camera homography at frame i — pick the camera with the
+             highest yolo_conf; if yolo_conf is absent (pipeline without YOLO
+             integration), fall back to blob_sum as the signal-strength proxy.
+             No fixed camera preference is injected — each cam's score comes
+             from its actual detection quality.
+          2. Mean of homography coords in frames [i-2, i+2] (exclude i).
+          3. 3D triangulation (xs[i], ys[i]) fallback.
+        """
+        cam_dets = self._buf[i]["cam"]
+
+        def _score(det: dict) -> float:
+            """Confidence for picking a camera. yolo_conf wins if present;
+            otherwise use blob_sum. -inf if nothing usable."""
+            if det is None:
+                return float("-inf")
+            yc = det.get("yolo_conf")
+            if yc is not None:
+                return float(yc)
+            bs = det.get("blob_sum")
+            if bs is not None:
+                return float(bs)
+            return float("-inf")
+
+        # Priority 1: best-confidence single-camera homography at the frame
+        if cam_dets:
+            best_cam = None
+            best_score = float("-inf")
+            for cam_name, det in cam_dets.items():
+                if det and det.get("world_x") is not None:
+                    s = _score(det)
+                    if s > best_score:
+                        best_score = s
+                        best_cam = cam_name
+            if best_cam is not None:
+                det = cam_dets[best_cam]
+                return float(det["world_x"]), float(det["world_y"]), best_cam
+
+        # Priority 2: interpolation from neighbors ±2
+        n = len(self._buf)
+        nearby_wx, nearby_wy = [], []
+        for j in range(max(0, i - 2), min(n, i + 3)):
+            if j == i:
+                continue
+            cd = self._buf[j]["cam"]
+            if not cd:
+                continue
+            for det in cd.values():
+                if det and det.get("world_x") is not None:
+                    nearby_wx.append(det["world_x"])
+                    nearby_wy.append(det["world_y"])
+        if nearby_wx:
+            return float(np.mean(nearby_wx)), float(np.mean(nearby_wy)), "interpolated"
+
+        # Priority 3: 3D triangulation fallback
+        pt = self._buf[i]["pt"]
+        return float(pt["x"]), float(pt["y"]), "3d"
 
 
 # ---------------------------------------------------------------------------
