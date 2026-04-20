@@ -8,16 +8,16 @@ cameras:
     - 0.165      # cam66 x
     - -17.042    # cam66 y: 近端底线后方 (y<0)
     - 6.217      # cam66 z
-    rtsp_url: rtsp://localhost:8554/cam66
-    # rtsp_url: rtsp://admin:motion168@192.168.1.66:554/Streaming/Channels/101
+    # rtsp_url: rtsp://localhost:8554/cam66
+    rtsp_url: rtsp://admin:motion168@192.168.1.66:554/Streaming/Channels/101
   cam68:
     homography_key: cam68
     position_3d:
     - 0.211      # cam68 x
     - 17.156     # cam68 y: 远端底线后方 (y>0)
     - 5.286      # cam68 z
-    rtsp_url: rtsp://localhost:8554/cam68
-    # rtsp_url: rtsp://admin:motion168@192.168.1.68:554/Streaming/Channels/101
+    # rtsp_url: rtsp://localhost:8554/cam68
+    rtsp_url: rtsp://admin:motion168@192.168.1.68:554/Streaming/Channels/101
   # --- Pickleball court (separate court, record-only) ---
   cam67:
     rtsp_url: rtsp://admin:motion168@192.168.1.67:554/Streaming/Channels/101
