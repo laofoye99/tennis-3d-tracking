@@ -637,6 +637,7 @@ class Orchestrator:
                                 fr for fr in self._rally_raw_buffer
                                 if _start_ts <= fr["ts"] <= _end_ts
                             ]
+                            print(f"[DEBUG] Rally {rally_result.rally_id} 结束，触发 export，frames={len(_frames_snapshot)}")
                             threading.Thread(
                                 target=self._export_rally,
                                 args=(rally_result, _frames_snapshot),
@@ -763,15 +764,18 @@ class Orchestrator:
 
             if not frames:
                 logger.warning("Rally %d: no frames in snapshot, skipping export", rally_result.rally_id)
+                print(f"[DEBUG] Rally {rally_result.rally_id} export 跳过: frames 为空")
                 return
 
             serial_numbers = self.config.serial_numbers
             serial = serial_numbers.get("cam66") or next(iter(serial_numbers.values()), "UNKNOWN")
 
             endpoint = self.config.export.endpoint
+            print(f"[DEBUG] Rally {rally_result.rally_id} 正在 POST → {endpoint}")
             format_rally(rally_result, frames, serial, endpoint)
         except Exception as e:
             logger.warning("Rally export error: %s", e)
+            print(f"[DEBUG] Rally export 异常: {e}")
 
     def _auto_generate_report(self):
         """Auto-generate report from current tracking JSONL."""

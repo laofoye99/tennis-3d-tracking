@@ -259,6 +259,18 @@ def format_rally(
                     "Rally %d exported → %s (%d)",
                     rally_result.rally_id, endpoint, resp.status_code,
                 )
+                mete = payload["content"]["mete"]
+                near = mete["nearCount"]
+                far = mete["farCount"]
+                print(
+                    f"\n{'='*50}\n"
+                    f"[Rally {rally_result.rally_id}] 数据已发送\n"
+                    f"  时间: {payload['startTime']} → {payload['endTime']}\n"
+                    f"  球速: 均值={mete['averageHitSpeed']:.1f} km/h  最大={mete['maxHitSpeed']:.1f} km/h\n"
+                    f"  近端球员: 移动距离={near['totalDistance']:.1f}m  均速={near['avgMoveSpeed']:.2f}m/s  最大={near['maxMoveSpeed']:.2f}m/s\n"
+                    f"  远端球员: 移动距离={far['totalDistance']:.1f}m  均速={far['avgMoveSpeed']:.2f}m/s  最大={far['maxMoveSpeed']:.2f}m/s\n"
+                    f"{'='*50}\n"
+                )
             else:
                 logger.warning(
                     "Rally %d export failed: %s %s",
