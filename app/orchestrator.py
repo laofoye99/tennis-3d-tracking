@@ -670,13 +670,35 @@ class Orchestrator:
                                         consumed_nc = None
 
                         # --- Fan out ---
-                        # Legacy RallyTracker gets the bounce (drives the
-                        # simple idle/rally counter exposed via the API).
-                        # rally_result (boundary signal) is no longer produced —
-                        # end-markers, auto-report, and rally export all were
-                        # tied to the removed RallyStateMachine.
+                        # IMPORTANT: do NOT call self._rally_tracker.get_state()
+                        # here — that method has a side-effect: it checks for
+                        # timeout and calls _end_rally() internally, so by the
+                        # time we read _prev it is already "idle".  Read the
+                        # internal _state.state attribute directly instead.
+                        _prev_state_str = self._rally_tracker._state.state
                         self._rally_tracker.update(pt, accepted_bounce)
+                        _curr_state_str = self._rally_tracker._state.state
                         _tri_bounce = accepted_bounce
+
+                        # "rally" → "idle" means a rally just ended
+                        if _prev_state_str == "rally" and _curr_state_str == "idle":
+                            _frames_snapshot = list(self._rally_raw_buffer)
+                            self._rally_raw_buffer.clear()
+                            _completed = self._rally_tracker.get_completed_rallies()
+                            if _completed and _frames_snapshot:
+                                _last_dict = _completed[-1]
+                                class _RallyProxy:
+                                    pass
+                                _proxy = _RallyProxy()
+                                _proxy.rally_id   = _last_dict.get("rally_id", self._rally_completed_count + 1)
+                                _proxy.end_time   = now
+                                _proxy.start_time = now - _last_dict.get("duration", 0.0)
+                                threading.Thread(
+                                    target=self._export_rally,
+                                    args=(_proxy, _frames_snapshot),
+                                    daemon=True,
+                                ).start()
+                            self._rally_completed_count += 1
 
                         if accepted_bounce is not None:
                             self._live_bounces.append(accepted_bd)
