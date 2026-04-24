@@ -621,18 +621,10 @@ class Orchestrator:
                             }
                     with self._analytics_lock:
                         # --- Peak eval sidecar (isolated — no production impact) ---
-                        self._bounce_detector.update(pt)
-                        if hasattr(self._bounce_detector, "pop_pending"):
-                            for pb in self._bounce_detector.pop_pending():
-                                self._peak_bounces_eval.append(pb.to_dict())
-                                self._debug_record_peak_bounce(pb)
-                            if len(self._peak_bounces_eval) > 100:
-                                self._peak_bounces_eval = self._peak_bounces_eval[-100:]
-
-                        # --- Hybrid: sole production source ---
-                        smoothed_pt = self._smooth_latest(pt)
-                        _tri_smoothed = smoothed_pt
-                        hbounce = self._hybrid_bounce.update(smoothed_pt or pt, cam_dets)
+                        _tri_smoothed, hbounce = self._run_live_bounce_detectors_locked(
+                            pt,
+                            cam_dets,
+                        )
 
                         # --- Gate: dedup + precision post-filter, then fan out ---
                         # The gate runs ONCE before any consumer sees the bounce.
@@ -1256,6 +1248,34 @@ class Orchestrator:
     def get_latest_detection(self, name: str) -> Optional[dict]:
         return self._latest_detections.get(name)
 
+    def _run_live_bounce_detectors_locked(
+        self,
+        pt: dict,
+        cam_dets: dict,
+    ) -> tuple[dict | None, Any]:
+        """Run smoothing + bounce detectors for one realtime 3D point.
+
+        Must be called with ``self._analytics_lock`` held.
+        Returns ``(smoothed_pt, hbounce)`` where ``hbounce`` is already
+        gated by ``_bounce_detection_enabled``.
+        """
+        if self._bounce_detection_enabled:
+            self._bounce_detector.update(pt)
+        if self._bounce_detection_enabled and hasattr(self._bounce_detector, "pop_pending"):
+            for pb in self._bounce_detector.pop_pending():
+                self._peak_bounces_eval.append(pb.to_dict())
+                self._debug_record_peak_bounce(pb)
+            if len(self._peak_bounces_eval) > 100:
+                self._peak_bounces_eval = self._peak_bounces_eval[-100:]
+
+        smoothed_pt = self._smooth_latest(pt)
+        hbounce = (
+            self._hybrid_bounce.update(smoothed_pt or pt, cam_dets)
+            if self._bounce_detection_enabled
+            else None
+        )
+        return smoothed_pt, hbounce
+
     def get_live_analytics(self) -> dict:
         """Return current live bounce/rally state for the dashboard.
 
@@ -1312,6 +1332,7 @@ class Orchestrator:
     # default; flip the toggles below after side-by-side eval.
     # ------------------------------------------------------------------
     _POSTFILT_MIN_INTERVAL_S = 0.4      # F2: stricter than dedup's 0.7s
+    _POSTFILT_MIN_INTERVAL_DIST_M = 2.0  # only near-space repeats count as spam
     _POSTFILT_NET_CTX_WINDOW_S = 3.0    # F4: net crossing must be within this
     # F1 (rally-state gating) removed with RallyStateMachine — no rally-sm,
     # no state to gate on. F3 / F4 remain parameterized but off by default.
@@ -1338,7 +1359,15 @@ class Orchestrator:
                 last = self._live_bounces[-1]
                 dt = ts - last.get("timestamp", 0)
                 if 0 <= dt < self._POSTFILT_MIN_INTERVAL_S:
-                    return False, "f2_min_interval"
+                    bx, by = bd.get("x"), bd.get("y")
+                    lx, ly = last.get("x"), last.get("y")
+                    same_side = bd.get("side") == last.get("side")
+                    if None not in (bx, by, lx, ly):
+                        dx = bx - lx
+                        dy = by - ly
+                        dist = (dx * dx + dy * dy) ** 0.5
+                        if same_side and dist < self._POSTFILT_MIN_INTERVAL_DIST_M:
+                            return False, "f2_min_interval"
 
         # F3: speed/height continuity — placeholder. Hybrid's internal
         # v_window + min_speed already cover the primary signal; a more
@@ -1679,6 +1708,7 @@ class Orchestrator:
 
             # Speed / motion state so the next session doesn't see stale prev_3d
             self._speed_buffer.clear()
+            self._sg_buffer.clear()
             self._prev_3d = None
             self._last_tri_pair = None
             self._conf_history.clear()
@@ -1765,6 +1795,14 @@ class Orchestrator:
     # Feature toggles: bounce detection, net crossing, OCR align
     # ------------------------------------------------------------------
     def set_bounce_detection_enabled(self, enabled: bool) -> dict:
+        enabled = bool(enabled)
+        if self._bounce_detection_enabled != enabled:
+            with self._analytics_lock:
+                # Switching bounce detection on/off should not reuse stale
+                # SG or detector state from the previous mode.
+                self._hybrid_bounce.reset()
+                self._bounce_detector.reset()
+                self._sg_buffer.clear()
         self._bounce_detection_enabled = enabled
         return {"enabled": self._bounce_detection_enabled}
 

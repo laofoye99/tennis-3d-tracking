@@ -1212,6 +1212,7 @@ class RallyStateMachine:
         self._pending_points: list[dict] = []
         self._pending_baseline_count: int = 0
         self._pending_start_ts: float = 0.0
+        self._pending_start_frame: Optional[int] = None
 
         # Serve-rule tracking (1st/2nd attempt, let, service-box validation)
         self._serve_attempt: int = 1                    # 1 or 2
@@ -1271,6 +1272,8 @@ class RallyStateMachine:
             self._state = self.State.IDLE
             self._pending_points = []
             self._pending_baseline_count = 0
+            self._pending_start_ts = 0.0
+            self._pending_start_frame = None
 
         # ─── IDLE → PENDING ─────────────────────────────────────────
         # Two entry paths (both gated by "no active state yet"):
@@ -1294,6 +1297,7 @@ class RallyStateMachine:
                 self._pending_points = []
                 self._pending_baseline_count = 0
                 self._pending_start_ts = now
+                self._pending_start_frame = fi
                 self._just_ended_rally = False  # consume the flag
                 # IMPORTANT: reset _prev_y/_prev_z on IDLE→PENDING so
                 # net-crossing detection doesn't fire across the gap.
@@ -1314,10 +1318,12 @@ class RallyStateMachine:
             if self._prev_y is not None:
                 net_crossed_pending = (self._prev_y < NET_Y <= y) or (self._prev_y >= NET_Y > y)
             if net_crossed_pending:
-                self._start_rally(now, fi, "")
+                start_now, start_fi = self._get_pending_start(now, fi)
+                self._start_rally(start_now, start_fi, "")
                 self._stroke_count = 1
                 self._last_side = current_side
             elif len(self._pending_points) >= self.serve_confirm_frames:
+                start_now, start_fi = self._get_pending_start(now, fi)
                 # Enough evidence accumulated. If most points are in the
                 # baseline zone, call it SERVING; otherwise the ball is
                 # already in the middle → RALLY.
@@ -1328,9 +1334,9 @@ class RallyStateMachine:
                 if majority_baseline:
                     first_y = self._pending_points[0]["y"]
                     first_side = "near" if first_y < NET_Y else "far"
-                    self._start_serving(now, fi, first_side)
+                    self._start_serving(start_now, start_fi, first_side)
                 else:
-                    self._start_rally(now, fi, "")
+                    self._start_rally(start_now, start_fi, "")
 
         # ─── Net crossing detection (only in SERVING / RALLY) ────────
         if self._prev_y is not None and self._state in (self.State.SERVING, self.State.RALLY):
@@ -1448,6 +1454,8 @@ class RallyStateMachine:
         self._completed.clear()
         self._pending_points = []
         self._pending_baseline_count = 0
+        self._pending_start_ts = 0.0
+        self._pending_start_frame = None
         self._serve_attempt = 1
         self._serve_net_touched = False
         self._awaiting_first_serve_bounce = False
@@ -1527,6 +1535,12 @@ class RallyStateMachine:
 
     # ---- internals ----
 
+    def _get_pending_start(self, now: float, fi: int) -> tuple[float, int]:
+        """Return the first-activity timestamp/frame for a PENDING point."""
+        start_now = self._pending_start_ts or now
+        start_fi = self._pending_start_frame if self._pending_start_frame is not None else fi
+        return start_now, start_fi
+
     def _start_serving(self, now: float, fi: int, side: str) -> None:
         self._rally_id += 1
         self._state = self.State.SERVING
@@ -1542,6 +1556,10 @@ class RallyStateMachine:
         self._serve_net_touched = False
         self._awaiting_first_serve_bounce = False
         self._let_count = 0
+        self._pending_points = []
+        self._pending_baseline_count = 0
+        self._pending_start_ts = 0.0
+        self._pending_start_frame = None
         # Reset prev tracking so stale y/z from previous rally can't trigger
         # spurious net-crossing or net-hit detection on the first frame.
         self._prev_y = None
@@ -1564,6 +1582,10 @@ class RallyStateMachine:
         self._serve_net_touched = False
         self._awaiting_first_serve_bounce = False
         self._let_count = 0
+        self._pending_points = []
+        self._pending_baseline_count = 0
+        self._pending_start_ts = 0.0
+        self._pending_start_frame = None
         self._prev_y = None
         self._prev_z = None
         logger.info("Rally %d: started (frame %d)", self._rally_id, fi)
@@ -1613,6 +1635,8 @@ class RallyStateMachine:
         self._last_bounce_side = ""
         self._pending_points = []
         self._pending_baseline_count = 0
+        self._pending_start_ts = 0.0
+        self._pending_start_frame = None
         self._serve_attempt = 1
         self._serve_net_touched = False
         self._awaiting_first_serve_bounce = False
