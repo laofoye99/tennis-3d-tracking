@@ -2,36 +2,6 @@
 
 Converts a completed rally's raw frame buffer into the standard result JSON
 and POSTs it to the configured endpoint.
-
-Fix log (vs. original):
-  1. _compute_ball_speed_stats: was averaging ALL frames with speed>0 (including
-     "running" frames), producing inflated avg/max. Now only counts frames that
-     are hit or bounce events, and clamps to [10, 250] km/h to drop physics-
-     impossible spikes before they reach max_ball_speed.
-  2. _compute_player_stats: maxMoveSpeed was raw per-frame (noisy, no cap).
-     Now capped at _MAX_PLAYER_SPEED_MS (7.0 m/s ≈ 25 km/h, realistic amateur
-     upper limit). avgMoveSpeed consistency guaranteed: totalDistance /
-     duration is stored as avgMoveSpeed so the identity
-     totalDistance == avgMoveSpeed * duration always holds.
-  3. _build_result_matrix: "serve" type was never emitted (only hit/bounce),
-     and "serve" handType was silently produced. Now: the first hit of a rally
-     (ball in near-court, y_norm < 0.5) is classified as "serve"; handType
-     "serve" is replaced with "forehand" for bounce entries (spec forbids
-     "serve" as a handType on bounce rows).
-  4. _build_result_matrix: bounce entries inherited the player nearest to the
-     ball's *world_y*, which is correct for hand-type inference on hit events
-     but meaningless for a bounce (no player hits the ball). handType is now
-     always "forehand" for bounce rows (matches spec example).
-  5. _build_track_matrix: player positions were left as (0.0, 0.0) when pose
-     data was missing (foot_court absent). Now carries forward the last known
-     position (last-value-carry) instead of resetting to origin, so the
-     frontend doesn't see players teleporting to (0,0).
-  6. _side_block: totalShots, baselineShotRate, netPointRate, netApproaches,
-     avgBallSpeed, maxBallSpeed were all hardcoded 0. Now computed from
-     result_matrix entries for the correct side.
-  7. _compute_advanced_stats: new helper that derives all the [必填] per-side
-     statistics (serve rates, baseline/net rates, ace count, etc.) from the
-     result_matrix instead of leaving them as placeholder zeros.
 """
 
 import datetime
