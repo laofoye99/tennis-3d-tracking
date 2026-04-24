@@ -62,7 +62,7 @@ class PlayerDetectionConfig(BaseModel):
     model_path: str = "model_weight/yolo26x-pose.pt"
     device: str = "cuda"
     conf: float = 0.4
-    run_every_n_frames: int = 5  # ~6 fps at 30 fps source
+    run_every_n_frames: int = 1  # ~6 fps at 30 fps source
 
 
 class ExportConfig(BaseModel):

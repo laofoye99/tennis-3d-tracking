@@ -754,6 +754,30 @@ class Orchestrator:
 
             if not got_any:
                 time.sleep(0.001)  # 1ms — fast response to new detections
+                # Timeout-triggered rally end: when no new points arrive,
+                # update() is never called, so the "rally"->idle transition
+                # only happens inside get_state(). Poll here to catch it.
+                with self._analytics_lock:
+                    if self._rally_tracker._state.state == "rally":
+                        _after = self._rally_tracker.get_state().state
+                        if _after == "idle":
+                            _frames_snapshot = list(self._rally_raw_buffer)
+                            self._rally_raw_buffer.clear()
+                            _completed = self._rally_tracker.get_completed_rallies()
+                            if _completed and _frames_snapshot:
+                                _last_dict = _completed[-1]
+                                class _RallyProxy:
+                                    pass
+                                _proxy = _RallyProxy()
+                                _proxy.rally_id   = _last_dict.get("rally_id", self._rally_completed_count + 1)
+                                _proxy.end_time   = time.time()
+                                _proxy.start_time = _proxy.end_time - _last_dict.get("duration", 0.0)
+                                threading.Thread(
+                                    target=self._export_rally,
+                                    args=(_proxy, _frames_snapshot),
+                                    daemon=True,
+                                ).start()
+                            self._rally_completed_count += 1
 
         self._triangulation_active = False
         # Close tracking JSONL
