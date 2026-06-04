@@ -531,7 +531,13 @@ body{font-family:'Lato',sans-serif;background:var(--bg);color:var(--text);height
 
         <!-- Mini Map -->
         <div class="minimap-section">
-          <div class="section-title">Mini Map</div>
+          <div class="section-title" style="display:flex;align-items:center;justify-content:space-between;gap:8px">
+            <span>Mini Map</span>
+            <span style="display:flex;gap:4px">
+              <button onclick="flipMinimap()" title="Flip minimap direction" style="height:22px;border:1px solid #555;background:#202020;color:#ccc;border-radius:4px;cursor:pointer;font-size:11px;line-height:18px;padding:0 8px">Flip</button>
+              <button onclick="clearMinimapEvents()" title="Refresh minimap markers" style="width:22px;height:22px;border:1px solid #555;background:#202020;color:#ccc;border-radius:4px;cursor:pointer;font-size:13px;line-height:18px">&#8635;</button>
+            </span>
+          </div>
           <canvas id="minimap" width="300" height="500"></canvas>
           <div class="minimap-footer" style="flex-direction:column;align-items:stretch;gap:6px">
             <div style="display:flex;align-items:center;gap:8px">
@@ -1132,6 +1138,10 @@ body{font-family:'Lato',sans-serif;background:var(--bg);color:var(--text);height
 // ============================================================
 const COURT_W=8.23,COURT_L=23.78,NET_Y=0.0,SRV_N=-6.4,SRV_F=6.4,CX=0.0,HL=11.89,HW=4.115;
 const MAX_DASHBOARD_BOUNCES=500;
+let _minimapLatestBounces=[];
+let _minimapLatestHits=[];
+let _minimapClearCutoff={sequence:-Infinity,timestamp:-Infinity,frame:-Infinity};
+let _minimapFlipped=localStorage.getItem('tennis_minimap_flipped')==='1';
 
 const TEST_BALLS=[
   {label:'B1',x:2.694,y:-10.069, z:0.177,color:'#4f88fa'},
@@ -1547,6 +1557,61 @@ function updateGTStats(liveBounces) {
 }
 
 // ---- Mini Map ----
+function _minimapEventNumber(value){
+  const n=Number(value);
+  return Number.isFinite(n)?n:null;
+}
+
+function _minimapFrameValue(event){
+  return _minimapEventNumber(event?.frame_index ?? event?.frame);
+}
+
+function _isMinimapEventAfterClear(event){
+  if(!event) return false;
+  if(!Number.isFinite(Number(event.x))||!Number.isFinite(Number(event.y))) return false;
+  const seq=_minimapEventNumber(event.sequence);
+  if(seq!==null&&Number.isFinite(_minimapClearCutoff.sequence)){
+    return seq>_minimapClearCutoff.sequence;
+  }
+  const ts=_minimapEventNumber(event.timestamp);
+  if(ts!==null&&Number.isFinite(_minimapClearCutoff.timestamp)){
+    return ts>_minimapClearCutoff.timestamp;
+  }
+  const frame=_minimapFrameValue(event);
+  if(frame!==null&&Number.isFinite(_minimapClearCutoff.frame)){
+    return frame>_minimapClearCutoff.frame;
+  }
+  return true;
+}
+
+function filterMinimapEvents(events){
+  return (events||[]).filter(_isMinimapEventAfterClear);
+}
+
+function clearMinimapEvents(){
+  const events=[...(_minimapLatestBounces||[]),...(_minimapLatestHits||[])]
+    .filter(e=>e&&Number.isFinite(Number(e.x))&&Number.isFinite(Number(e.y)));
+  const seqs=events.map(e=>_minimapEventNumber(e.sequence)).filter(v=>v!==null);
+  const timestamps=events.map(e=>_minimapEventNumber(e.timestamp)).filter(v=>v!==null);
+  const frames=events.map(e=>_minimapFrameValue(e)).filter(v=>v!==null);
+  _minimapClearCutoff={
+    sequence:seqs.length?Math.max(...seqs):_minimapClearCutoff.sequence,
+    timestamp:timestamps.length?Math.max(...timestamps):_minimapClearCutoff.timestamp,
+    frame:frames.length?Math.max(...frames):_minimapClearCutoff.frame,
+  };
+  drawCourt(document.getElementById('minimap'),[],[]);
+}
+
+function flipMinimap(){
+  _minimapFlipped=!_minimapFlipped;
+  localStorage.setItem('tennis_minimap_flipped',_minimapFlipped?'1':'0');
+  drawCourt(
+    document.getElementById('minimap'),
+    filterMinimapEvents(_minimapLatestBounces),
+    filterMinimapEvents(_minimapLatestHits)
+  );
+}
+
 function drawCourt(canvas, bounces, hits){
   const ctx=canvas.getContext('2d'),W=canvas.width,H=canvas.height;
   // V2 coords with padding so out-of-court bounces are visible
@@ -1555,6 +1620,11 @@ function drawCourt(canvas, bounces, hits){
   const margin=4, dw=W-2*margin, dh=H-2*margin;
   function tx(x){return margin+((HW+PAD_X+x)/VW)*dw}
   function ty(y){return margin+((HL+PAD_Y-y)/VH)*dh}
+  function eventPoint(x,y){
+    const mx=_minimapFlipped?-Number(x):Number(x);
+    const my=_minimapFlipped?-Number(y):Number(y);
+    return {x:tx(mx),y:ty(my)};
+  }
 
   const SHW=HW;  // singles = full court width for this project
   ctx.clearRect(0,0,W,H);
@@ -1591,7 +1661,8 @@ function drawCourt(canvas, bounces, hits){
     const visibleBounces = bounces.slice(-MAX_DASHBOARD_BOUNCES);
     const firstSeqFallback = Math.max(1, bounces.length - visibleBounces.length + 1);
     visibleBounces.forEach((b,i)=>{
-      const bx=tx(b.x),by=ty(b.y);
+      const pt=eventPoint(b.x,b.y);
+      const bx=pt.x,by=pt.y;
       const isSynthetic = b.synthetic === true;
       const isIn = b.in_court;
       const age = visibleBounces.length - 1 - i;
@@ -1648,7 +1719,8 @@ function drawCourt(canvas, bounces, hits){
     const visibleHits = hits.slice(-MAX_DASHBOARD_BOUNCES);
     visibleHits.forEach((h,i)=>{
       if(h.x===undefined||h.y===undefined) return;
-      const hx=tx(h.x), hy=ty(h.y);
+      const pt=eventPoint(h.x,h.y);
+      const hx=pt.x, hy=pt.y;
       const age = visibleHits.length - 1 - i;
       const r = age === 0 ? 8 : 6;
       ctx.globalAlpha = age === 0 ? 1.0 : age === 1 ? 0.75 : age === 2 ? 0.55 : 0.35;
@@ -1674,7 +1746,8 @@ function drawCourt(canvas, bounces, hits){
   // --- GT bounces: blue diamonds (drawn underneath live bounces) ---
   if(_gtLoaded && _gtBounces.length){
     _gtBounces.forEach((gb,i)=>{
-      const gx=tx(gb.x), gy=ty(gb.y);
+      const pt=eventPoint(gb.x,gb.y);
+      const gx=pt.x, gy=pt.y;
       const r=5;
       // Check if matched by any live bounce
       let isMatched = false;
@@ -2358,8 +2431,12 @@ async function poll(){
     const b=d.latest_ball_3d;
     const latestDets=d.latest_detections||null;
     rememberBallOverlaySnapshot(latestDets);
-    drawCourt(document.getElementById('minimap'),recentBounces,showHitsOnMinimap?recentHits:[]);
-    updateGTStats(recentBounces);
+    _minimapLatestBounces=recentBounces;
+    _minimapLatestHits=showHitsOnMinimap?recentHits:[];
+    const visibleBounces=filterMinimapEvents(_minimapLatestBounces);
+    const visibleHits=filterMinimapEvents(_minimapLatestHits);
+    drawCourt(document.getElementById('minimap'),visibleBounces,visibleHits);
+    updateGTStats(visibleBounces);
 
     // Update rally state display
     const stateEl=document.getElementById('rally-state');
