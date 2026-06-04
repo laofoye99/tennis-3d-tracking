@@ -59,6 +59,22 @@ bounce_detection:
     sg_poly: 3
     max_frame_gap: 5
     max_gap_s: 0.75
+hit_bounce_refiner:
+  enabled: true
+  show_hits_on_minimap: true
+  lookback_frames: 50
+  release_delay_frames: 50
+  hit_suppression_frames: 3
+  hit_angle_thresh: 45.0
+  top_hit_dist_px: 50.0
+  bottom_hit_dist_px_net: 100.0
+  bottom_hit_dist_px_base: 250.0
+  top_hit_dist_m: 1.2
+  bottom_hit_dist_m_net: 1.2
+  bottom_hit_dist_m_base: 2.5
+  clean_time_frames: 25
+  clean_space_meters: 1.5
+  history_frames: 150
 blob_verifier:
   enabled: true
   model_path: model_weight/blob_verifier_yolo.pt

@@ -19,12 +19,14 @@ from app.pipeline.camera_pipeline import run_pipeline
 from app.pipeline.video_pipeline import run_video_pipeline
 from app.schemas import BallPosition3D, PipelineStatus, SystemStatus, WorldPoint2D
 from app.analytics import (
+    BounceEvent,
     BounceDetector,
     HybridBounceDetector,
     PeakBounceDetector,
     RallyTracker,
     run_batch_analytics,
 )
+from app.realtime_hit_bounce import HitBounceRefiner
 from app.trajectory import clean_detections, find_offset_and_triangulate, fit_trajectory, segment_rallies
 from app.pipeline.multi_blob_matcher import MultiBlobMatcher
 from app.triangulation import triangulate
@@ -159,8 +161,12 @@ class Orchestrator:
         # batch analytics (run_batch_analytics, FusionCoordinator).
         self._rally_tracker = RallyTracker()
         self._live_bounces: list[dict] = []   # real Hybrid bounces only
+        self._live_hits: list[dict] = []
         self._total_live_bounces: int = 0
         self._peak_bounces_eval: list[dict] = []   # sidecar, cap 100
+        self._hit_bounce_refiner = HitBounceRefiner(self.config.hit_bounce_refiner)
+        self._last_smoothed_cam_dets: dict = {}
+        self._last_refiner_result: dict = {}
         # Post-filter telemetry — counts per reason (incl. "accepted") so we
         # can tune thresholds from live data without re-running eval.
         from collections import Counter as _Counter
@@ -745,6 +751,8 @@ class Orchestrator:
                                         "speed_kmh": speed_kmh_int,
                                         "direction": direction,
                                         "timestamp": now,
+                                        "capture_ts": capture_ts,
+                                        "frame_index": fi,
                                         "x": x, "y": y, "z": z,
                                     }
                                     self._latest_net_crossing = crossing
@@ -809,33 +817,62 @@ class Orchestrator:
                             cam_dets,
                         )
 
-                        # --- Gate: dedup + precision post-filter, then fan out ---
-                        # The gate runs ONCE before any consumer sees the bounce.
-                        # Net-crossing consumption is tracked via `consumed_nc`
-                        # (object reference, NOT via speed_kmh matching) so the
-                        # rollback on rejection undoes exactly the same entry
-                        # we marked used. Both the dedup path and the post-
-                        # filter-reject path roll back; previously only the
-                        # latter did, so duplicates silently stole crossings.
-                        accepted_bounce = None
-                        accepted_bd = None
+                        raw_bd = None
                         if hbounce is not None:
-                            bd = hbounce.to_dict()
-                            event_capture_ts = bd.get("capture_ts")
+                            raw_bd = hbounce.to_dict()
+                            event_capture_ts = raw_bd.get("capture_ts")
                             if event_capture_ts is None:
                                 event_capture_ts = getattr(hbounce, "capture_ts", None)
                             if event_capture_ts is None:
                                 event_capture_ts = capture_ts
-                            event_capture_ts = float(event_capture_ts)
-                            bd["capture_ts"] = event_capture_ts
-                            bd["detect_delay"] = round(now - event_capture_ts, 2)
-                            accepted_bd = self._gate_live_bounce_candidate_locked(
-                                bd,
+                            raw_bd["capture_ts"] = float(event_capture_ts)
+                            raw_bd["detect_delay"] = round(now - float(event_capture_ts), 2)
+
+                        accepted_bounces: list[BounceEvent] = []
+                        accepted_bds: list[dict] = []
+                        new_hits: list[dict] = []
+                        refiner_result = {
+                            "new_hits": [],
+                            "new_final_bounces": [],
+                            "suppressed_bounces": [],
+                            "stats": {},
+                        }
+                        if _tri_smoothed is not None:
+                            refiner_result = self._hit_bounce_refiner.update(
+                                _tri_smoothed,
+                                raw_bounce=raw_bd,
+                                players=self._build_hit_bounce_player_snapshot(now),
+                                net_crossing=dict(self._latest_net_crossing) if self._latest_net_crossing else None,
+                                cam_dets=self._last_smoothed_cam_dets,
                                 now=now,
-                                match_speed=True,
                             )
-                            if accepted_bd is not None:
-                                accepted_bounce = hbounce
+                            self._last_refiner_result = refiner_result
+                            for hit in refiner_result.get("new_hits", []):
+                                self._record_live_hit_locked(hit)
+                                new_hits.append(hit)
+
+                            for final_bd in refiner_result.get("new_final_bounces", []):
+                                event_capture_ts = float(
+                                    final_bd.get("capture_ts")
+                                    or final_bd.get("timestamp")
+                                    or capture_ts
+                                )
+                                final_bd["capture_ts"] = event_capture_ts
+                                final_bd["detect_delay"] = round(now - event_capture_ts, 2)
+                                gated_bd = self._gate_live_bounce_candidate_locked(
+                                    final_bd,
+                                    now=now,
+                                    match_speed=True,
+                                )
+                                if gated_bd is None:
+                                    continue
+                                gated_bd = self._normalize_live_bounce_dict(
+                                    gated_bd,
+                                    fallback_ts=now,
+                                    fallback_speed_kmh=0,
+                                )
+                                accepted_bds.append(gated_bd)
+                                accepted_bounces.append(self._bounce_dict_to_event(gated_bd))
 
                         # --- Fan out ---
                         # Legacy RallyTracker gets the bounce (drives the
@@ -845,6 +882,8 @@ class Orchestrator:
                         # tied to the removed RallyStateMachine.
                         _prev_state_str = self._rally_tracker._state.state
                         _prev_completed_count = len(self._rally_tracker.get_completed_rallies())
+                        accepted_bounce = accepted_bounces[-1] if accepted_bounces else None
+                        accepted_bd = accepted_bds[-1] if accepted_bds else None
                         self._rally_tracker.update(pt, accepted_bounce)
                         _curr_state_str = self._rally_tracker._state.state
                         if _prev_state_str == "idle" and _curr_state_str == "rally":
@@ -888,36 +927,31 @@ class Orchestrator:
                                     ).start()
                         _tri_bounce = accepted_bounce
 
-                        if accepted_bounce is not None:
-                            accepted_bd = self._normalize_live_bounce_dict(
-                                accepted_bd,
-                                fallback_ts=now,
-                                fallback_speed_kmh=0,
-                            )
+                        for idx, bd in enumerate(accepted_bds):
                             self._record_live_bounce_locked(
-                                accepted_bd,
-                                debug_source=accepted_bounce,
+                                bd,
+                                debug_source=accepted_bounces[idx],
                             )
 
                         # Rally-raw buffer still accumulates ball+player per
                         # frame so offline /api/report/generate still has
                         # data, but there's no longer an automatic rally-end
                         # trigger that flushes it to the export endpoint.
-                        is_bounce_frame = accepted_bounce is not None
-                        if is_bounce_frame and accepted_bd is not None:
-                            self._last_bounce_ts = float(accepted_bd.get("timestamp", capture_ts))
-                        is_hit_frame = (
-                            not is_bounce_frame
-                            and capture_ts - self._last_bounce_ts < 1.0
-                            and len(self._speed_buffer) >= 2
-                            and self._speed_buffer[-1] > self._speed_buffer[-2]
+                        is_bounce_frame = bool(
+                            accepted_bd is not None
+                            and accepted_bd.get("frame_index") == fi
                         )
+                        if accepted_bd is not None:
+                            self._last_bounce_ts = float(accepted_bd.get("timestamp", capture_ts))
+                        is_hit_frame = any(h.get("frame_index") == fi for h in new_hits)
                         _near_pose = self._latest_player_pose.get(tri_cams[0])
                         _far_pose = self._latest_player_pose.get(tri_cams[1])
                         near_player = _near_pose["player"] if _near_pose else None
                         far_player = _far_pose["player"] if _far_pose else None
                         self._rally_raw_buffer.append({
                             "ts": now,
+                            "frame_index": fi,
+                            "capture_ts": capture_ts,
                             "ball": {"x": x, "y": y, "z": z},
                             "near_player": near_player,
                             "far_player": far_player,
@@ -925,6 +959,10 @@ class Orchestrator:
                             "is_bounce": is_bounce_frame,
                             "is_hit": is_hit_frame,
                         })
+                        for hit in new_hits:
+                            self._mark_rally_buffer_event_locked(hit, "hit")
+                        for bd in accepted_bds:
+                            self._mark_rally_buffer_event_locked(bd, "bounce")
 
                     # Write per-frame tracking data (JSONL — always, not just during recording)
                     if self._tracking_file is not None:
@@ -1577,16 +1615,37 @@ class Orchestrator:
             foot_px = det.get("foot_px")
             if not foot_px:
                 continue
+            bbox = det.get("bbox") or []
+            hit_anchor_px = None
+            hit_anchor_court = None
+            if len(bbox) >= 4:
+                x1, y1, x2, y2 = [float(v) for v in bbox[:4]]
+                hit_anchor_px = [
+                    (x1 + x2) / 2.0,
+                    y1 + (y2 - y1) * 0.3,
+                ]
             try:
                 court_x, court_y = hom.pixel_to_world(foot_px[0], foot_px[1])
             except Exception:
                 continue
+            if hit_anchor_px is not None:
+                try:
+                    ax, ay = hom.pixel_to_world(hit_anchor_px[0], hit_anchor_px[1])
+                    hit_anchor_court = [round(ax, 3), round(ay, 3)]
+                except Exception:
+                    hit_anchor_court = None
             # Keep players in this camera's half (+ slack toward net)
             if cam_y_sign < 0 and court_y > half_slack:
                 continue
             if cam_y_sign > 0 and court_y < -half_slack:
                 continue
-            candidates.append({**det, "court_x": court_x, "court_y": court_y})
+            candidates.append({
+                **det,
+                "court_x": court_x,
+                "court_y": court_y,
+                "hit_anchor_px": hit_anchor_px,
+                "hit_anchor_court": hit_anchor_court,
+            })
 
         if not candidates:
             return
@@ -1608,6 +1667,8 @@ class Orchestrator:
             "bbox": nearest["bbox"],
             "conf": nearest["conf"],
             "foot_px": nearest["foot_px"],
+            "hit_anchor_px": nearest.get("hit_anchor_px"),
+            "hit_anchor_court": nearest.get("hit_anchor_court"),
             "foot_court": [round(nearest["court_x"], 3), round(nearest["court_y"], 3)],
             "dist_to_ball_2d": round(dist_2d, 3),
             "keypoints_px": nearest.get("keypoints", []),
@@ -1635,6 +1696,10 @@ class Orchestrator:
                 "bbox": [round(v, 1) for v in player_record["bbox"]],
                 "conf": round(player_record["conf"], 3),
                 "foot_court": player_record["foot_court"],
+                "hit_anchor_px": [
+                    round(v, 1) for v in player_record["hit_anchor_px"]
+                ] if player_record.get("hit_anchor_px") else None,
+                "hit_anchor_court": player_record.get("hit_anchor_court"),
                 "dist_to_ball_2d": player_record["dist_to_ball_2d"],
                 "keypoints_px": [
                     [round(kp[0], 1), round(kp[1], 1), round(kp[2], 3)]
@@ -1682,7 +1747,7 @@ class Orchestrator:
 
         if bounce is not None:
             state = "bounce"
-            row["bounce"] = bounce.to_dict()
+            row["bounce"] = bounce.to_dict() if hasattr(bounce, "to_dict") else dict(bounce)
 
         row["state"] = state
 
@@ -1769,6 +1834,7 @@ class Orchestrator:
             if self._bounce_detection_enabled and smoothed_pt is not None
             else None
         )
+        self._last_smoothed_cam_dets = smoothed_cam_dets or {}
         return smoothed_pt, hbounce
 
     def get_live_analytics(self) -> dict:
@@ -1789,6 +1855,14 @@ class Orchestrator:
                 "ws_pending_bounces": len(self._ws_bounce_queue),
                 "last_frame_speed_kmh": int(round(float(self._last_frame_speed_kmh or 0.0))),
                 "latest_net_crossing": dict(self._latest_net_crossing) if self._latest_net_crossing else None,
+                "recent_hits": list(self._live_hits),
+                "raw_bounce_candidate_count": self._hit_bounce_refiner.get_stats().get(
+                    "raw_bounce_candidate_count", 0
+                ),
+                "suppressed_bounces_by_hit": self._hit_bounce_refiner.get_stats().get(
+                    "suppressed_bounces_by_hit", 0
+                ),
+                "hit_bounce_refiner_stats": self._hit_bounce_refiner.get_stats(),
                 # Peak sidecar (eval only)
                 "peak_bounces_eval": list(self._peak_bounces_eval[-10:]),
                 # Post-filter telemetry — count per rejection reason plus "accepted".
@@ -1851,6 +1925,88 @@ class Orchestrator:
             "speed": speed_val,
             "timestamp": int(round(float(ts) * 1000)),
         })
+
+    def _build_hit_bounce_player_snapshot(self, now: float) -> list[dict]:
+        """Return current player anchors in the shape expected by the refiner."""
+        players = []
+        for cam_name, pose in self._latest_player_pose.items():
+            player = dict(pose.get("player") or {})
+            foot = player.get("foot_court")
+            if not foot or len(foot) < 2:
+                continue
+            try:
+                foot_y = float(foot[1])
+            except (TypeError, ValueError):
+                continue
+            timestamp = float(pose.get("timestamp", now) or now)
+            if now - timestamp > 2.0:
+                continue
+            players.append({
+                **player,
+                "camera_name": cam_name,
+                "timestamp": timestamp,
+                "capture_ts": pose.get("capture_ts"),
+                "frame_index": pose.get("frame_id"),
+                "side": "near" if foot_y < 0 else "far",
+            })
+        return players
+
+    @staticmethod
+    def _bounce_dict_to_event(bd: dict) -> BounceEvent:
+        return BounceEvent(
+            x=float(bd.get("x", 0.0) or 0.0),
+            y=float(bd.get("y", 0.0) or 0.0),
+            z=float(bd.get("z", 0.0) or 0.0),
+            timestamp=float(bd.get("timestamp", time.time()) or time.time()),
+            capture_ts=float(bd.get("capture_ts", bd.get("timestamp", time.time())) or time.time()),
+            in_court=bool(bd.get("in_court", False)),
+            frame_index=bd.get("frame_index") or bd.get("frame"),
+            confidence=float(bd.get("confidence", 1.0) or 1.0),
+            source_camera=str(bd.get("source_camera", bd.get("refiner_source", "3d"))),
+            side=str(bd.get("side", "")),
+            cam_pixels=dict(bd.get("cam_pixels") or {}),
+        )
+
+    def _record_live_hit_locked(self, hit: dict) -> None:
+        """Publish one HIT to realtime analytics/debug/report buffers only."""
+        self._live_hits.append(dict(hit))
+        if len(self._live_hits) > self._LIVE_BOUNCE_HISTORY_LIMIT:
+            self._live_hits = self._live_hits[-self._LIVE_BOUNCE_HISTORY_LIMIT:]
+        self._debug_record_hit(hit)
+
+    def _mark_rally_buffer_event_locked(self, event: dict, event_type: str) -> None:
+        """Backfill delayed refiner events onto their original raw-buffer frame."""
+        frame = event.get("frame_index", event.get("frame"))
+        if frame is None:
+            return
+        try:
+            frame = int(frame)
+        except (TypeError, ValueError):
+            return
+        target = None
+        for row in reversed(self._rally_raw_buffer):
+            row_frame = row.get("frame_index")
+            if row_frame is None:
+                continue
+            if int(row_frame) == frame:
+                target = row
+                break
+            if frame - int(row_frame) > 3:
+                break
+        if target is None:
+            return
+        event_ball = {
+            "x": event.get("x"),
+            "y": event.get("y"),
+            "z": event.get("z", target.get("ball", {}).get("z", 0.0)),
+        }
+        if event_type == "hit":
+            target["is_hit"] = True
+            target["hit_event"] = dict(event)
+        else:
+            target["is_bounce"] = True
+            target["bounce_event"] = dict(event)
+        target["event_ball"] = event_ball
 
     def _record_live_bounce_locked(self, bd: dict, *, debug_source=None) -> None:
         """Publish one accepted bounce to every realtime consumer from one source dict."""
@@ -2091,6 +2247,7 @@ class Orchestrator:
             "detections": {},       # cam_name -> [{frame, pixel_x, pixel_y, confidence, world_x, world_y, n_candidates}]
             "trajectory": [],       # [{frame, x, y, z, ray_dist, px66, py66, px68, py68, world66, world68}]
             "bounces": [],          # Hybrid (production): [{frame, z, x, y, in_court}]
+            "hits": [],             # Refiner HIT events
             "peak_bounces": [],     # Peak (eval-only sidecar): same schema as bounces
             "frame_counter": 0,
         }
@@ -2146,6 +2303,18 @@ class Orchestrator:
         """Record a Hybrid (production) bounce for debug output."""
         self._debug_data["bounces"].append(self._bounce_to_debug_row(bounce))
 
+    def _debug_record_hit(self, hit: dict):
+        """Record one refiner HIT event for debug output."""
+        self._debug_data.setdefault("hits", []).append({
+            "frame": hit.get("frame_index") or hit.get("frame"),
+            "x": round(float(hit.get("x", 0.0) or 0.0), 4),
+            "y": round(float(hit.get("y", 0.0) or 0.0), 4),
+            "source": hit.get("source"),
+            "side": hit.get("side"),
+            "distance": hit.get("distance"),
+            "distance_unit": hit.get("distance_unit"),
+        })
+
     def _debug_record_peak_bounce(self, bounce):
         """Record a Peak (eval-only) bounce in a separate bucket so it
         never mixes with the production ``bounces`` list when diffing
@@ -2186,12 +2355,16 @@ class Orchestrator:
         peak_bounces = self._debug_data.get("peak_bounces", [])
         with open(out_dir / "peak_bounces.json", "w") as f:
             json.dump(peak_bounces, f, indent=2)
+        hits = self._debug_data.get("hits", [])
+        with open(out_dir / "hits.json", "w") as f:
+            json.dump(hits, f, indent=2)
 
         # Summary
         summary = {
             "total_detections": {cam: len(d) for cam, d in self._debug_data["detections"].items()},
             "trajectory_points": len(self._debug_data["trajectory"]),
             "bounces": len(self._debug_data["bounces"]),
+            "hits": len(hits),
             "bounce_in": sum(1 for b in self._debug_data["bounces"] if b.get("in_court")),
             "bounce_out": sum(1 for b in self._debug_data["bounces"] if not b.get("in_court")),
             "peak_bounces_eval": len(peak_bounces),
@@ -2287,6 +2460,7 @@ class Orchestrator:
                 frame_capture_ts[fi] = float(sum(ts_candidates) / len(ts_candidates))
 
         # Emit new 3D points
+        new_refiner_points = []
         for pt in best:
             fi = pt[0]
             if fi in self._emitted_3d_frames:
@@ -2310,6 +2484,21 @@ class Orchestrator:
                 "x": x, "y": y, "timestamp": now,
                 "capture_ts": frame_capture_ts.get(int(fi), now),
             }
+            point_capture_ts = frame_capture_ts.get(int(fi), now)
+            new_refiner_points.append((
+                {
+                    "x": x,
+                    "y": y,
+                    "z": z,
+                    "timestamp": point_capture_ts,
+                    "capture_ts": point_capture_ts,
+                    "frame_index": int(fi),
+                },
+                {
+                    cam1: {"pixel_x": pt[4], "pixel_y": pt[5], "world_x": x, "world_y": y},
+                    cam2: {"pixel_x": pt[6], "pixel_y": pt[7], "world_x": x, "world_y": y},
+                },
+            ))
 
         # Step 3: Bounce detection on trajectory
         # Convert to tuple format: (frame, x, y, z, ray_dist)
@@ -2317,6 +2506,34 @@ class Orchestrator:
         bounces = detect_bounces(traj_tuples)
 
         with self._analytics_lock:
+            for point, cam_dets in new_refiner_points:
+                refiner_result = self._hit_bounce_refiner.update(
+                    point,
+                    players=self._build_hit_bounce_player_snapshot(now),
+                    net_crossing=dict(self._latest_net_crossing) if self._latest_net_crossing else None,
+                    cam_dets=cam_dets,
+                    now=now,
+                )
+                for hit in refiner_result.get("new_hits", []):
+                    self._record_live_hit_locked(hit)
+                for final_bd in refiner_result.get("new_final_bounces", []):
+                    gated_bd = self._gate_live_bounce_candidate_locked(
+                        final_bd,
+                        now=now,
+                        match_speed=False,
+                    )
+                    if gated_bd is None:
+                        continue
+                    gated_bd = self._normalize_live_bounce_dict(
+                        gated_bd,
+                        fallback_ts=now,
+                        fallback_speed_kmh=0,
+                    )
+                    self._record_live_bounce_locked(
+                        gated_bd,
+                        debug_source=self._bounce_dict_to_event(gated_bd),
+                    )
+
             for b in bounces:
                 if b["frame"] in self._emitted_bounce_frames:
                     continue
@@ -2333,22 +2550,38 @@ class Orchestrator:
                     else bounce_capture_ts
                 )
                 bd["detect_delay"] = round(now - float(bd["capture_ts"]), 2)
-                accepted_bd = self._gate_live_bounce_candidate_locked(
-                    bd,
+                refiner_result = self._hit_bounce_refiner.update(
+                    None,
+                    raw_bounce=bd,
                     now=now,
-                    match_speed=False,
                 )
-                if accepted_bd is None:
-                    continue
-                self._record_live_bounce_locked(
-                    accepted_bd,
-                    debug_source=b,
-                )
-                logger.info(
-                    "Bounce: frame=%d z=%.3f (%.2f, %.2f) %s",
-                    b["frame"], b["z"], b["x"], b["y"],
-                    "IN" if b["in_court"] else "OUT",
-                )
+                for hit in refiner_result.get("new_hits", []):
+                    self._record_live_hit_locked(hit)
+                for final_bd in refiner_result.get("new_final_bounces", []):
+                    accepted_bd = self._gate_live_bounce_candidate_locked(
+                        final_bd,
+                        now=now,
+                        match_speed=False,
+                    )
+                    if accepted_bd is None:
+                        continue
+                    accepted_bd = self._normalize_live_bounce_dict(
+                        accepted_bd,
+                        fallback_ts=now,
+                        fallback_speed_kmh=0,
+                    )
+                    self._record_live_bounce_locked(
+                        accepted_bd,
+                        debug_source=self._bounce_dict_to_event(accepted_bd),
+                    )
+                    logger.info(
+                        "Bounce: frame=%d z=%.3f (%.2f, %.2f) %s",
+                        accepted_bd.get("frame_index", b["frame"]),
+                        accepted_bd.get("z", b["z"]),
+                        accepted_bd.get("x", b["x"]),
+                        accepted_bd.get("y", b["y"]),
+                        "IN" if accepted_bd.get("in_court") else "OUT",
+                    )
 
     def _smooth_latest(self, pt: dict, cam_dets: dict | None = None) -> tuple[dict | None, dict | None]:
         """Add a raw 3D point to the SG buffer and return a smoothed point.
@@ -2445,9 +2678,13 @@ class Orchestrator:
 
             # Production + sidecar bounce buffers
             self._live_bounces.clear()
+            self._live_hits.clear()
             self._total_live_bounces = 0
             self._peak_bounces_eval.clear()
             self._post_filter_stats.clear()
+            self._hit_bounce_refiner.reset()
+            self._last_refiner_result = {}
+            self._last_smoothed_cam_dets = {}
 
             # Rally buffers (kept for offline report/export code paths)
             self._live_rallies.clear()
@@ -2482,6 +2719,7 @@ class Orchestrator:
             # Debug recording buckets (keep shape, wipe contents)
             if isinstance(self._debug_data, dict):
                 self._debug_data["bounces"] = []
+                self._debug_data["hits"] = []
                 self._debug_data["peak_bounces"] = []
 
     _TRACKING_FSYNC_INTERVAL_S = 1.0

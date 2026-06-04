@@ -1527,7 +1527,7 @@ function updateGTStats(liveBounces) {
 }
 
 // ---- Mini Map ----
-function drawCourt(canvas, bounces){
+function drawCourt(canvas, bounces, hits){
   const ctx=canvas.getContext('2d'),W=canvas.width,H=canvas.height;
   // V2 coords with padding so out-of-court bounces are visible
   const PAD_X=2.0, PAD_Y=3.0;
@@ -1618,6 +1618,34 @@ function drawCourt(canvas, bounces){
           ctx.fillStyle='#ff9800';ctx.font='bold 8px Lato';
           ctx.fillText(b.end_reason.toUpperCase(),bx+r+4,by+14);
         }
+      }
+      ctx.globalAlpha=1.0;
+    });
+  }
+
+  // --- HIT markers: temporary comparison layer from realtime refiner.
+  if(hits&&hits.length){
+    const visibleHits = hits.slice(-MAX_DASHBOARD_BOUNCES);
+    visibleHits.forEach((h,i)=>{
+      if(h.x===undefined||h.y===undefined) return;
+      const hx=tx(h.x), hy=ty(h.y);
+      const age = visibleHits.length - 1 - i;
+      const r = age === 0 ? 8 : 6;
+      ctx.globalAlpha = age === 0 ? 1.0 : age === 1 ? 0.75 : age === 2 ? 0.55 : 0.35;
+      ctx.strokeStyle='#ff9800';
+      ctx.lineWidth=age===0?2.5:1.6;
+      ctx.beginPath();
+      ctx.moveTo(hx,hy-r);ctx.lineTo(hx+r,hy);
+      ctx.lineTo(hx,hy+r);ctx.lineTo(hx-r,hy);
+      ctx.closePath();
+      ctx.stroke();
+      ctx.beginPath();ctx.moveTo(hx-r*0.65,hy);ctx.lineTo(hx+r*0.65,hy);ctx.stroke();
+      ctx.beginPath();ctx.moveTo(hx,hy-r*0.65);ctx.lineTo(hx,hy+r*0.65);ctx.stroke();
+      if(age===0){
+        ctx.beginPath();ctx.arc(hx,hy,r+4,0,Math.PI*2);
+        ctx.strokeStyle='rgba(255,152,0,.55)';
+        ctx.lineWidth=2;
+        ctx.stroke();
       }
       ctx.globalAlpha=1.0;
     });
@@ -2205,6 +2233,8 @@ async function poll(){
     // Extract analytics data from status
     const analytics=d.analytics||{};
     const recentBounces=analytics.recent_bounces||[];
+    const recentHits=analytics.recent_hits||[];
+    const showHitsOnMinimap=(analytics.hit_bounce_refiner_stats||{}).show_hits_on_minimap!==false;
     const totalBounces=analytics.total_bounces ?? recentBounces.length;
     const rallyState=analytics.rally_state||{};
     const latestCrossing=analytics.latest_net_crossing||null;
@@ -2213,7 +2243,7 @@ async function poll(){
     const b=d.latest_ball_3d;
     const latestDets=d.latest_detections||null;
     rememberBallOverlaySnapshot(latestDets);
-    drawCourt(document.getElementById('minimap'),recentBounces);
+    drawCourt(document.getElementById('minimap'),recentBounces,showHitsOnMinimap?recentHits:[]);
     updateGTStats(recentBounces);
 
     // Update rally state display
@@ -2241,7 +2271,7 @@ async function poll(){
 }
 
 // Init
-drawCourt(document.getElementById('minimap'),[]);
+drawCourt(document.getElementById('minimap'),[],[]);
 requestAnimationFrame(_ballOverlayLoop);
 setInterval(poll,500);
 syncRecordingStatus();

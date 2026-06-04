@@ -93,6 +93,24 @@ class BounceDetectionConfig(BaseModel):
     smoothing: BounceSmoothingConfig = BounceSmoothingConfig()
 
 
+class HitBounceRefinerConfig(BaseModel):
+    enabled: bool = True
+    show_hits_on_minimap: bool = True
+    lookback_frames: int = 50
+    release_delay_frames: int = 50
+    hit_suppression_frames: int = 3
+    hit_angle_thresh: float = 45.0
+    top_hit_dist_px: float = 50.0
+    bottom_hit_dist_px_net: float = 100.0
+    bottom_hit_dist_px_base: float = 250.0
+    top_hit_dist_m: float = 1.2
+    bottom_hit_dist_m_net: float = 1.2
+    bottom_hit_dist_m_base: float = 2.5
+    clean_time_frames: int = 25
+    clean_space_meters: float = 1.5
+    history_frames: int = 150
+
+
 class AppConfig(BaseModel):
     cameras: dict[str, CameraConfig]
     model: ModelConfig
@@ -105,6 +123,7 @@ class AppConfig(BaseModel):
     serial_numbers: dict[str, str] = {}
     export: ExportConfig = ExportConfig()
     bounce_detection: BounceDetectionConfig = BounceDetectionConfig()
+    hit_bounce_refiner: HitBounceRefinerConfig = HitBounceRefinerConfig()
 
 
 def load_config(config_path: str = "config.yaml") -> AppConfig:

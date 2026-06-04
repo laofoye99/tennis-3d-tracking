@@ -118,6 +118,25 @@ def test_live_bounce_history_keeps_true_total_after_rollover(orch):
     assert [b["sequence"] for b in analytics["recent_bounces"]] == [3, 4, 5]
 
 
+def test_live_hit_analytics_does_not_enqueue_3d_push(orch):
+    orch._ws_enabled = True
+
+    orch._record_live_hit_locked({
+        "event_type": "hit",
+        "frame_index": 10,
+        "timestamp": 1.0,
+        "x": 0.2,
+        "y": 6.0,
+        "source": "bottom_up_lookback",
+    })
+
+    analytics = orch.get_live_analytics()
+
+    assert len(analytics["recent_hits"]) == 1
+    assert analytics["recent_hits"][0]["source"] == "bottom_up_lookback"
+    assert len(orch._ws_bounce_queue) == 0
+
+
 def test_post_filter_f2_allows_quick_but_distant_bounce(orch):
     orch._live_bounces = [
         {"timestamp": 10.0, "x": -3.0, "y": -8.0, "side": "near", "in_court": True}
@@ -162,8 +181,8 @@ def test_live_detectors_respect_bounce_toggle_and_reset_buffers(orch, monkeypatc
     def fake_pop_pending():
         return []
 
-    def fake_smooth(point):
-        return point
+    def fake_smooth(point, cam_dets=None):
+        return point, cam_dets
 
     def fake_hybrid_update(_point, _cam_dets):
         calls["hybrid"] += 1

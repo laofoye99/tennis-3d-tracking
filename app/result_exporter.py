@@ -216,7 +216,7 @@ def _build_result_matrix(frames: list) -> list:
         is_hit    = fr.get("is_hit",    False)
         if not is_bounce and not is_hit:
             continue
-        ball = fr.get("ball")
+        ball = fr.get("event_ball") or fr.get("ball")
         if ball is None:
             continue
 
@@ -523,10 +523,9 @@ def format_rally(
         )
         return {}
 
-    # Realtime mainline currently does not produce a reliable is_hit / serve
-    # signal. If the matrix contains only bounce rows, the downstream miniapp
-    # service tends to 500 on business assumptions about stroke events.
-    # Until hit inference is restored, suppress export for bounce-only rallies.
+    # The realtime mainline now receives HIT events from HitBounceRefiner. If a
+    # rally still contains only bounce rows, suppress export because downstream
+    # business logic expects at least one stroke event.
     has_stroke_event = any(
         entry.get("type") in ("hit", "serve")
         for entry in result_matrix
