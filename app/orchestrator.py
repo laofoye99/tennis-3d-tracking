@@ -62,6 +62,9 @@ class Orchestrator:
     """Manages camera pipelines, triangulation, and exposes state for the API."""
 
     _LIVE_BOUNCE_HISTORY_LIMIT = 500
+    _YOLO_FUZZY_BUFFER_SIZE = 240
+    _YOLO_FUZZY_EMIT_DELAY_FRAMES = 5
+    _YOLO_FUZZY_COOLDOWN_FRAMES = 10
 
     def __init__(self, config: AppConfig):
         self.config = config
@@ -93,6 +96,10 @@ class Orchestrator:
 
         # Latest player pose per camera (nearest player to ball)
         self._latest_player_pose: dict[str, dict] = {}
+        self._live_player_poses: dict[str, deque[dict]] = {
+            cam: deque(maxlen=400) for cam in config.cameras
+        }
+        self._event_homography_cache: dict[str, Any] = {}
 
         # 录像
         self._recording: bool = False
@@ -163,6 +170,42 @@ class Orchestrator:
         self._live_bounces: list[dict] = []   # real Hybrid bounces only
         self._live_hits: list[dict] = []
         self._total_live_bounces: int = 0
+        self._total_live_hits: int = 0
+        self._live_speed_events: list[dict] = []
+        self._total_live_speed_events: int = 0
+        self._yolo_fuzzy_live_detections: dict[str, deque[dict]] = {
+            "cam68": deque(maxlen=self._YOLO_FUZZY_BUFFER_SIZE),
+            "cam66": deque(maxlen=self._YOLO_FUZZY_BUFFER_SIZE),
+        }
+        self._yolo_fuzzy_emitted_frames: dict[str, deque[int]] = {
+            "cam68": deque(maxlen=50),
+            "cam66": deque(maxlen=50),
+        }
+        self._yolo_fuzzy_emitted_hit_frames: dict[str, deque[int]] = {
+            "cam68": deque(maxlen=50),
+            "cam66": deque(maxlen=50),
+        }
+        self._yolo_fuzzy_emitted_speed_frames: dict[str, deque[int]] = {
+            "cam68": deque(maxlen=50),
+            "cam66": deque(maxlen=50),
+        }
+        self._yolo_fuzzy_last_emitted_frame: dict[str, int | None] = {
+            "cam68": None,
+            "cam66": None,
+        }
+        self._yolo_fuzzy_last_emitted_hit_frame: dict[str, int | None] = {
+            "cam68": None,
+            "cam66": None,
+        }
+        self._yolo_fuzzy_last_emitted_speed_frame: dict[str, int | None] = {
+            "cam68": None,
+            "cam66": None,
+        }
+        self._yolo_fuzzy_live_stats: dict[str, dict[str, Any]] = {
+            "cam68": {},
+            "cam66": {},
+        }
+        self._reset_yolo_fuzzy_live_locked()
         self._peak_bounces_eval: list[dict] = []   # sidecar, cap 100
         self._hit_bounce_refiner = HitBounceRefiner(self.config.hit_bounce_refiner)
         self._last_smoothed_cam_dets: dict = {}
@@ -561,6 +604,9 @@ class Orchestrator:
                                 )
                                 self._det_queues.setdefault(name, []).append(det)
                             self._latest_detections[name] = det
+                            if self._is_yolo_roadmap_active() and name == "cam68":
+                                with self._analytics_lock:
+                                    self._run_yolo_fuzzy_single_cam_locked(name, det)
                             if name.startswith("_video_test"):
                                 cam = det.get("camera_name", "unknown")
                                 self._video_test_detections.setdefault(cam, []).append(det)
@@ -1586,6 +1632,7 @@ class Orchestrator:
         detections: list[dict] = msg.get("detections", [])
         if not detections:
             return
+        self._live_player_poses.setdefault(cam_name, deque(maxlen=400)).append(dict(msg))
 
         # Retrieve homography transformer (lazy init, one per camera)
         if not hasattr(self, "_player_homographies"):
@@ -1844,6 +1891,304 @@ class Orchestrator:
         self._last_smoothed_cam_dets = smoothed_cam_dets or {}
         return smoothed_pt, hbounce
 
+    def _is_yolo_roadmap_active(self) -> bool:
+        detector_type = (self.config.model.detector_type or "").lower()
+        model_path = (self.config.model.path or "").replace("\\", "/").lower()
+        return detector_type in {"yolo", "yolo_roadmap"} or "yolo_roadmap/" in model_path
+
+    def _reset_yolo_fuzzy_live_locked(self) -> None:
+        for cam, buf in self._yolo_fuzzy_live_detections.items():
+            buf.clear()
+            self._yolo_fuzzy_emitted_frames.setdefault(cam, deque(maxlen=50)).clear()
+            self._yolo_fuzzy_emitted_hit_frames.setdefault(cam, deque(maxlen=50)).clear()
+            self._yolo_fuzzy_emitted_speed_frames.setdefault(cam, deque(maxlen=50)).clear()
+            self._yolo_fuzzy_last_emitted_frame[cam] = None
+            self._yolo_fuzzy_last_emitted_hit_frame[cam] = None
+            self._yolo_fuzzy_last_emitted_speed_frame[cam] = None
+            self._yolo_fuzzy_live_stats[cam] = {
+                "detector": "yolo_events_single_cam",
+                "detections": 0,
+                "buffered": 0,
+                "candidate_bounces": 0,
+                "candidate_hits": 0,
+                "candidate_speed_events": 0,
+                "accepted": 0,
+                "accepted_hits": 0,
+                "accepted_speed_events": 0,
+                "last_frame": None,
+                "last_candidate_frame": None,
+                "last_hit_frame": None,
+                "last_speed_frame": None,
+                "last_reject_reason": "",
+                "player_pose_buffered": 0,
+            }
+
+    @staticmethod
+    def _nearest_detection_for_frame(detections: list[dict], frame_index: int) -> dict | None:
+        if not detections:
+            return None
+        return min(
+            detections,
+            key=lambda d: abs(int(d.get("frame_index", frame_index)) - frame_index),
+        )
+
+    def _event_homography_for_camera(self, cam_name: str):
+        if cam_name in self._event_homography_cache:
+            return self._event_homography_cache[cam_name]
+        cam_cfg = self.config.cameras.get(cam_name)
+        if cam_cfg is None:
+            self._event_homography_cache[cam_name] = None
+            return None
+        try:
+            from app.pipeline.homography import HomographyTransformer
+            homography = HomographyTransformer(
+                self.config.homography.path,
+                cam_cfg.homography_key,
+            )
+        except Exception as e:
+            logger.warning("Live event homography unavailable for %s: %s", cam_name, e)
+            homography = None
+        self._event_homography_cache[cam_name] = homography
+        return homography
+
+    def _can_emit_yolo_event(
+        self,
+        *,
+        event_frame: int,
+        latest_frame: int,
+        last_emitted_frame: int | None,
+        seen_frames: deque[int],
+    ) -> bool:
+        if latest_frame - event_frame < self._YOLO_FUZZY_EMIT_DELAY_FRAMES:
+            return False
+        if (
+            last_emitted_frame is not None
+            and event_frame <= last_emitted_frame + self._YOLO_FUZZY_COOLDOWN_FRAMES
+        ):
+            return False
+        return not any(
+            abs(event_frame - old_frame) <= self._YOLO_FUZZY_COOLDOWN_FRAMES
+            for old_frame in seen_frames
+        )
+
+    @staticmethod
+    def _event_frame(event: dict) -> int | None:
+        frame = event.get("frame_index", event.get("frame"))
+        if frame is None:
+            return None
+        try:
+            return int(frame)
+        except Exception:
+            return None
+
+    def _event_capture_ts(self, buffered: list[dict], event_frame: int, now: float) -> float:
+        src_det = self._nearest_detection_for_frame(buffered, event_frame)
+        if src_det is None:
+            return now
+        event_capture_ts = src_det.get("capture_ts", src_det.get("timestamp", now))
+        return float(event_capture_ts if event_capture_ts is not None else now)
+
+    def _run_yolo_fuzzy_single_cam_locked(self, cam_name: str, det: dict | None) -> dict | None:
+        """Run the cam68/cam66 YOLO roadmap single-camera event chain."""
+        if not self._bounce_detection_enabled or det is None:
+            return None
+        frame_index = det.get("frame_index")
+        if frame_index is None:
+            return None
+        try:
+            frame_index = int(frame_index)
+        except Exception:
+            return None
+
+        buf = self._yolo_fuzzy_live_detections.setdefault(
+            cam_name,
+            deque(maxlen=self._YOLO_FUZZY_BUFFER_SIZE),
+        )
+        seen = self._yolo_fuzzy_emitted_frames.setdefault(cam_name, deque(maxlen=50))
+        seen_hits = self._yolo_fuzzy_emitted_hit_frames.setdefault(cam_name, deque(maxlen=50))
+        seen_speeds = self._yolo_fuzzy_emitted_speed_frames.setdefault(cam_name, deque(maxlen=50))
+        last_emitted_frame = self._yolo_fuzzy_last_emitted_frame.get(cam_name)
+        last_hit_frame = self._yolo_fuzzy_last_emitted_hit_frame.get(cam_name)
+        last_speed_frame = self._yolo_fuzzy_last_emitted_speed_frame.get(cam_name)
+        stats = self._yolo_fuzzy_live_stats.setdefault(cam_name, {})
+        buf.append(det)
+        stats["detector"] = "yolo_events_single_cam"
+        stats["detections"] = int(stats.get("detections", 0)) + 1
+        stats["buffered"] = len(buf)
+        stats["last_frame"] = frame_index
+
+        from app.pipeline.yolo_bounce_filter import detect_single_camera_events
+
+        player_poses = list(self._live_player_poses.get(cam_name, []))
+        result = detect_single_camera_events(
+            list(buf),
+            camera_name=cam_name,
+            player_pose_messages=player_poses,
+            homography=self._event_homography_for_camera(cam_name),
+        )
+        bounce_events = result.get("bounces", [])
+        hit_events = result.get("hits", [])
+        speed_events = result.get("speed_events", [])
+        stats["candidate_bounces"] = int(result.get("count", len(bounce_events)) or 0)
+        stats["candidate_hits"] = int(result.get("hit_count", len(hit_events)) or 0)
+        stats["candidate_speed_events"] = int(result.get("speed_count", len(speed_events)) or 0)
+        stats["player_pose_buffered"] = len(player_poses)
+
+        emitted = None
+        latest_frame = frame_index
+        buffered = list(buf)
+        for event in bounce_events:
+            event_frame = self._event_frame(event)
+            if event_frame is None:
+                continue
+            if not self._can_emit_yolo_event(
+                event_frame=event_frame,
+                latest_frame=latest_frame,
+                last_emitted_frame=last_emitted_frame,
+                seen_frames=seen,
+            ):
+                continue
+
+            now = time.time()
+            event_capture_ts = self._event_capture_ts(buffered, event_frame, now)
+            bd = {
+                "frame": event_frame,
+                "frame_index": event_frame,
+                "x": event.get("x"),
+                "y": event.get("y"),
+                "z": 0.0,
+                "pixel_x": event.get("pixel_x"),
+                "pixel_y": event.get("pixel_y"),
+                "camera": cam_name,
+                "camera_name": cam_name,
+                "type": event.get("type", "IN"),
+                "in_court": bool(event.get("in_court", True)),
+                "confidence": event.get("confidence", 0.0),
+                "timestamp": event_capture_ts,
+                "capture_ts": event_capture_ts,
+                "detect_delay": round(now - event_capture_ts, 2),
+                "bounce_mode": f"mono_{cam_name}",
+                "source": event.get("source", "yolo_fuzzy_single_cam"),
+                "angle": event.get("angle"),
+                "delta_v": event.get("delta_v"),
+                "y_reversal": event.get("y_reversal"),
+            }
+            accepted_bd = self._gate_live_bounce_candidate_locked(
+                bd,
+                now=now,
+                match_speed=False,
+            )
+            if accepted_bd is None:
+                stats["last_candidate_frame"] = event_frame
+                stats["last_reject_reason"] = "post_filter"
+                seen.append(event_frame)
+                if last_emitted_frame is None or event_frame > last_emitted_frame:
+                    self._yolo_fuzzy_last_emitted_frame[cam_name] = event_frame
+                    last_emitted_frame = event_frame
+                continue
+
+            accepted_bd = self._normalize_live_bounce_dict(
+                accepted_bd,
+                fallback_ts=now,
+                fallback_speed_kmh=0,
+            )
+            self._record_live_bounce_locked(accepted_bd, debug_source=accepted_bd)
+            seen.append(event_frame)
+            self._yolo_fuzzy_last_emitted_frame[cam_name] = event_frame
+            last_emitted_frame = event_frame
+            stats["accepted"] = int(stats.get("accepted", 0)) + 1
+            stats["last_candidate_frame"] = event_frame
+            stats["last_reject_reason"] = ""
+            emitted = accepted_bd
+
+        for event in hit_events:
+            event_frame = self._event_frame(event)
+            if event_frame is None:
+                continue
+            if not self._can_emit_yolo_event(
+                event_frame=event_frame,
+                latest_frame=latest_frame,
+                last_emitted_frame=last_hit_frame,
+                seen_frames=seen_hits,
+            ):
+                continue
+            now = time.time()
+            event_capture_ts = self._event_capture_ts(buffered, event_frame, now)
+            hit = {
+                "frame": event_frame,
+                "frame_index": event_frame,
+                "x": event.get("x"),
+                "y": event.get("y"),
+                "pixel_x": event.get("pixel_x"),
+                "pixel_y": event.get("pixel_y"),
+                "camera": cam_name,
+                "camera_name": cam_name,
+                "type": "HIT",
+                "kind": "hit",
+                "confidence": event.get("confidence", 0.0),
+                "timestamp": event_capture_ts,
+                "capture_ts": event_capture_ts,
+                "detect_delay": round(now - event_capture_ts, 2),
+                "bounce_mode": f"mono_{cam_name}",
+                "source": event.get("source", "yolo_fuzzy_player_hit"),
+                "angle": event.get("angle"),
+                "delta_v": event.get("delta_v"),
+                "y_reversal": event.get("y_reversal"),
+                "player_frame": event.get("player_frame"),
+                "player_distance_px": event.get("player_distance_px"),
+                "player_threshold_px": event.get("player_threshold_px"),
+                "player_court_x": event.get("player_court_x"),
+                "player_court_y": event.get("player_court_y"),
+                "player_conf": event.get("player_conf"),
+            }
+            self._record_live_hit_locked(hit)
+            seen_hits.append(event_frame)
+            self._yolo_fuzzy_last_emitted_hit_frame[cam_name] = event_frame
+            last_hit_frame = event_frame
+            stats["accepted_hits"] = int(stats.get("accepted_hits", 0)) + 1
+            stats["last_hit_frame"] = event_frame
+
+        for event in speed_events:
+            event_frame = self._event_frame(event)
+            if event_frame is None:
+                continue
+            if not self._can_emit_yolo_event(
+                event_frame=event_frame,
+                latest_frame=latest_frame,
+                last_emitted_frame=last_speed_frame,
+                seen_frames=seen_speeds,
+            ):
+                continue
+            now = time.time()
+            event_capture_ts = self._event_capture_ts(buffered, event_frame, now)
+            speed_event = {
+                "frame": event_frame,
+                "frame_index": event_frame,
+                "x": event.get("x"),
+                "y": event.get("y"),
+                "pixel_x": event.get("pixel_x"),
+                "pixel_y": event.get("pixel_y"),
+                "camera": cam_name,
+                "camera_name": cam_name,
+                "type": "SPEED",
+                "kind": "speed",
+                "speed_kmh": int(round(float(event.get("speed_kmh", 0) or 0))),
+                "direction": event.get("direction"),
+                "timestamp": event_capture_ts,
+                "capture_ts": event_capture_ts,
+                "detect_delay": round(now - event_capture_ts, 2),
+                "bounce_mode": f"mono_{cam_name}",
+                "source": event.get("source", "single_cam_speed_crossing"),
+            }
+            self._record_live_speed_event_locked(speed_event)
+            seen_speeds.append(event_frame)
+            self._yolo_fuzzy_last_emitted_speed_frame[cam_name] = event_frame
+            last_speed_frame = event_frame
+            stats["accepted_speed_events"] = int(stats.get("accepted_speed_events", 0)) + 1
+            stats["last_speed_frame"] = event_frame
+
+        return emitted
+
     def get_live_analytics(self) -> dict:
         """Return current live bounce/rally state for the dashboard.
 
@@ -1863,6 +2208,13 @@ class Orchestrator:
                 "last_frame_speed_kmh": int(round(float(self._last_frame_speed_kmh or 0.0))),
                 "latest_net_crossing": dict(self._latest_net_crossing) if self._latest_net_crossing else None,
                 "recent_hits": list(self._live_hits),
+                "total_hits": self._total_live_hits,
+                "recent_speed_events": list(self._live_speed_events),
+                "total_speed_events": self._total_live_speed_events,
+                "latest_single_cam_speed_event": (
+                    dict(self._live_speed_events[-1]) if self._live_speed_events else None
+                ),
+                "single_cam_bounce_stats": dict(self._yolo_fuzzy_live_stats),
                 "raw_bounce_candidate_count": self._hit_bounce_refiner.get_stats().get(
                     "raw_bounce_candidate_count", 0
                 ),
@@ -1976,10 +2328,23 @@ class Orchestrator:
 
     def _record_live_hit_locked(self, hit: dict) -> None:
         """Publish one HIT to realtime analytics/debug/report buffers only."""
+        self._total_live_hits += 1
+        hit["sequence"] = self._total_live_hits
         self._live_hits.append(dict(hit))
         if len(self._live_hits) > self._LIVE_BOUNCE_HISTORY_LIMIT:
             self._live_hits = self._live_hits[-self._LIVE_BOUNCE_HISTORY_LIMIT:]
         self._debug_record_hit(hit)
+
+    def _record_live_speed_event_locked(self, event: dict) -> None:
+        self._total_live_speed_events += 1
+        event["sequence"] = self._total_live_speed_events
+        self._live_speed_events.append(dict(event))
+        if len(self._live_speed_events) > self._LIVE_BOUNCE_HISTORY_LIMIT:
+            self._live_speed_events = self._live_speed_events[-self._LIVE_BOUNCE_HISTORY_LIMIT:]
+        try:
+            self._last_frame_speed_kmh = float(event.get("speed_kmh", 0.0) or 0.0)
+        except Exception:
+            pass
 
     def _mark_rally_buffer_event_locked(self, event: dict, event_type: str) -> None:
         """Backfill delayed refiner events onto their original raw-buffer frame."""
@@ -2686,10 +3051,14 @@ class Orchestrator:
             # Production + sidecar bounce buffers
             self._live_bounces.clear()
             self._live_hits.clear()
+            self._live_speed_events.clear()
             self._total_live_bounces = 0
+            self._total_live_hits = 0
+            self._total_live_speed_events = 0
             self._peak_bounces_eval.clear()
             self._post_filter_stats.clear()
             self._hit_bounce_refiner.reset()
+            self._reset_yolo_fuzzy_live_locked()
             self._last_refiner_result = {}
             self._last_smoothed_cam_dets = {}
 
@@ -3013,6 +3382,8 @@ class Orchestrator:
         self.config.model.frames_out = selected["frames_out"]
         self.config.model.detector_type = selected["detector_type"]
         self._is_median_bg = self.config.model.detector_type == "median_bg"
+        with self._analytics_lock:
+            self._reset_yolo_fuzzy_live_locked()
 
         for name in running_live_cameras:
             self.start_pipeline(name)

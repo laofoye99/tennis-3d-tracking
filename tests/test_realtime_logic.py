@@ -229,3 +229,55 @@ def test_switch_model_sets_matching_detector_type_and_yolo_roadmap_weight(orch):
     assert yolo["frames_out"] == 1
     assert yolo["detector_type"] == "yolo_roadmap"
     assert orch.get_current_model()["model"] == "yolo_roadmap"
+
+
+def test_yolo_roadmap_single_cam_chain_publishes_bounce(orch, monkeypatch):
+    orch.switch_model("yolo_roadmap")
+
+    def fake_events(_detections, **_kwargs):
+        return {
+            "bounces": [
+                {
+                    "frame_index": 10,
+                    "x": 1.0,
+                    "y": -5.0,
+                    "pixel_x": 900.0,
+                    "pixel_y": 500.0,
+                    "in_court": True,
+                    "confidence": 0.8,
+                    "source": "test_yolo_single_cam",
+                }
+            ],
+            "hits": [],
+            "speed_events": [],
+            "count": 1,
+        }
+
+    monkeypatch.setattr(
+        "app.pipeline.yolo_bounce_filter.detect_single_camera_events",
+        fake_events,
+    )
+
+    with orch._analytics_lock:
+        for frame in range(16):
+            orch._run_yolo_fuzzy_single_cam_locked(
+                "cam68",
+                {
+                    "camera_name": "cam68",
+                    "frame_index": frame,
+                    "timestamp": float(frame),
+                    "capture_ts": float(frame),
+                    "pixel_x": 800.0 + frame,
+                    "pixel_y": 500.0,
+                    "x": 0.0,
+                    "y": -5.0,
+                    "yolo_conf": 0.9,
+                },
+            )
+
+    analytics = orch.get_live_analytics()
+
+    assert analytics["total_bounces"] == 1
+    assert analytics["recent_bounces"][0]["source"] == "test_yolo_single_cam"
+    assert analytics["recent_bounces"][0]["bounce_mode"] == "mono_cam68"
+    assert analytics["single_cam_bounce_stats"]["cam68"]["accepted"] == 1

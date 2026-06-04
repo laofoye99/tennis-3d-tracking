@@ -534,7 +534,7 @@ body{font-family:'Lato',sans-serif;background:var(--bg);color:var(--text);height
           <div class="section-title" style="display:flex;align-items:center;justify-content:space-between;gap:8px">
             <span>Mini Map</span>
             <span style="display:flex;gap:4px">
-              <button onclick="flipMinimap()" title="Flip minimap direction" style="height:22px;border:1px solid #555;background:#202020;color:#ccc;border-radius:4px;cursor:pointer;font-size:11px;line-height:18px;padding:0 8px">Flip</button>
+              <button onclick="flipMinimap()" title="Flip minimap horizontally" style="height:22px;border:1px solid #555;background:#202020;color:#ccc;border-radius:4px;cursor:pointer;font-size:11px;line-height:18px;padding:0 8px">Flip X</button>
               <button onclick="clearMinimapEvents()" title="Refresh minimap markers" style="width:22px;height:22px;border:1px solid #555;background:#202020;color:#ccc;border-radius:4px;cursor:pointer;font-size:13px;line-height:18px">&#8635;</button>
             </span>
           </div>
@@ -1141,7 +1141,8 @@ const MAX_DASHBOARD_BOUNCES=500;
 let _minimapLatestBounces=[];
 let _minimapLatestHits=[];
 let _minimapClearCutoff={sequence:-Infinity,timestamp:-Infinity,frame:-Infinity};
-let _minimapFlipped=localStorage.getItem('tennis_minimap_flipped')==='1';
+const _storedMinimapFlipX=localStorage.getItem('tennis_minimap_flip_x');
+let _minimapFlipX=_storedMinimapFlipX===null?true:_storedMinimapFlipX==='1';
 
 const TEST_BALLS=[
   {label:'B1',x:2.694,y:-10.069, z:0.177,color:'#4f88fa'},
@@ -1603,8 +1604,8 @@ function clearMinimapEvents(){
 }
 
 function flipMinimap(){
-  _minimapFlipped=!_minimapFlipped;
-  localStorage.setItem('tennis_minimap_flipped',_minimapFlipped?'1':'0');
+  _minimapFlipX=!_minimapFlipX;
+  localStorage.setItem('tennis_minimap_flip_x',_minimapFlipX?'1':'0');
   drawCourt(
     document.getElementById('minimap'),
     filterMinimapEvents(_minimapLatestBounces),
@@ -1621,8 +1622,8 @@ function drawCourt(canvas, bounces, hits){
   function tx(x){return margin+((HW+PAD_X+x)/VW)*dw}
   function ty(y){return margin+((HL+PAD_Y-y)/VH)*dh}
   function eventPoint(x,y){
-    const mx=_minimapFlipped?-Number(x):Number(x);
-    const my=_minimapFlipped?-Number(y):Number(y);
+    const mx=_minimapFlipX?-Number(x):Number(x);
+    const my=Number(y);
     return {x:tx(mx),y:ty(my)};
   }
 
@@ -2426,6 +2427,7 @@ async function poll(){
     const totalBounces=analytics.total_bounces ?? recentBounces.length;
     const rallyState=analytics.rally_state||{};
     const latestCrossing=analytics.latest_net_crossing||null;
+    const latestSingleCamSpeed=analytics.latest_single_cam_speed_event||null;
     const lastFrameSpeed=Number(analytics.last_frame_speed_kmh||0);
 
     const b=d.latest_ball_3d;
@@ -2455,6 +2457,10 @@ async function poll(){
       if(latestCrossing && Number.isFinite(Number(latestCrossing.speed_kmh||0))){
         const crossingAge=(Date.now()/1000)-Number(latestCrossing.timestamp||0);
         if(crossingAge <= 3.0) speedToShow=Number(latestCrossing.speed_kmh||0);
+      }
+      if(speedToShow <= 0 && latestSingleCamSpeed && Number.isFinite(Number(latestSingleCamSpeed.speed_kmh||0))){
+        const singleCamAge=(Date.now()/1000)-Number(latestSingleCamSpeed.timestamp||0);
+        if(singleCamAge <= 3.0) speedToShow=Number(latestSingleCamSpeed.speed_kmh||0);
       }
       if(speedToShow <= 0 && Number.isFinite(lastFrameSpeed)) speedToShow=lastFrameSpeed;
       speedEl.textContent=speedToShow > 0 ? `${Math.round(speedToShow)} km/h` : '- km/h';
