@@ -34,11 +34,11 @@ model:
   input_size:
   - 288
   - 512
-  path: model_weight/TrackNet_finetuned.pt
+  path: model_weight/TrackNet_finetuned.onnx
   threshold: 0.52
   heatmap_mask:
   - [0, 0, 620, 40]
-  detector_type: auto
+  detector_type: tracknet
   # detector_type: median_bg     # 切换时同时改 frames_in: 30, frames_out: 30
 bounce_detection:
   hybrid:

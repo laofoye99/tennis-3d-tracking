@@ -28,6 +28,9 @@ Thumbs.db
 
 # Test output
 image_test/test_result.jpg
+debug_output/
+logs/
+reports/
 
 # Data (large video/image files)
 uploads/
@@ -39,6 +42,11 @@ runs/
 
 # YOLO weights
 yolo*.pt
+yolo_roadmap/*.pt
+
+# Local media server binaries
+tools/mediamtx/*.exe
+tools/mediamtx/*.zip
 
 # Video output
 output/

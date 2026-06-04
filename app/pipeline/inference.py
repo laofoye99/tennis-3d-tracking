@@ -2,7 +2,7 @@
 
 Supports three detector backends:
     - BallDetector:      ONNX-based HRNet (frames_in=3, frames_out=3)
-    - TrackNetDetector:  PyTorch-based TrackNet (seq_len=8, bg_mode='concat')
+    - TrackNetDetector:  ONNX/PyTorch TrackNet (seq_len=8, bg_mode='concat')
     - MedianBGDetector:  Median background subtraction (frames_in=30, no GPU)
 
 Use ``create_detector()`` factory to select backend.  Default auto-selects by
@@ -122,8 +122,6 @@ class TrackNetDetector:
         device: str = "cuda",
         bg_mode: str = "concat",
     ):
-        from app.pipeline.tracknet import TrackNet
-
         self.input_h, self.input_w = input_size
         self.frames_in = frames_in
         self.frames_out = frames_out
@@ -144,24 +142,51 @@ class TrackNetDetector:
         else:
             in_dim = frames_in * 3
 
-        onnx_path = model_path.replace('.pt', '.onnx')
+        import os
+
+        is_onnx_model = model_path.lower().endswith(".onnx")
+        is_pt_model = model_path.lower().endswith(".pt")
+        onnx_path = model_path if is_onnx_model else model_path.replace(".pt", ".onnx")
         self._use_onnx = False
         self.model = None
 
-        import os
-        if os.path.exists(onnx_path):
+        if is_onnx_model or os.path.exists(onnx_path):
             try:
                 import onnxruntime as ort
-                providers = ['CUDAExecutionProvider', 'CPUExecutionProvider'] if device == 'cuda' else ['CPUExecutionProvider']
+
+                available = ort.get_available_providers()
+                providers = (
+                    ["CUDAExecutionProvider", "CPUExecutionProvider"]
+                    if device == "cuda" and "CUDAExecutionProvider" in available
+                    else ["CPUExecutionProvider"]
+                )
                 self._ort_session = ort.InferenceSession(onnx_path, providers=providers)
                 self._ort_input_name = self._ort_session.get_inputs()[0].name
                 self._use_onnx = True
                 actual = self._ort_session.get_providers()
                 logger.info("TrackNet using ONNX Runtime (%s): %s", actual[0], onnx_path)
+            except ImportError as e:
+                message = (
+                    "onnxruntime is required for ONNX TrackNet model "
+                    f"({onnx_path}). Install onnxruntime-gpu or onnxruntime."
+                )
+                if is_onnx_model:
+                    raise RuntimeError(message) from e
+                logger.warning("%s Falling back to PyTorch checkpoint: %s", message, model_path)
             except Exception as e:
+                if is_onnx_model:
+                    raise RuntimeError(
+                        f"Failed to load ONNX TrackNet model with ONNX Runtime ({onnx_path}): {e}"
+                    ) from e
                 logger.warning("ONNX Runtime failed, falling back to PyTorch: %s", e)
 
         if not self._use_onnx:
+            if not is_pt_model:
+                raise RuntimeError(f"TrackNet model path must be .onnx or .pt, got: {model_path}")
+            if not os.path.exists(model_path):
+                raise FileNotFoundError(f"TrackNet PyTorch checkpoint not found: {model_path}")
+            from app.pipeline.tracknet import TrackNet
+
             # PyTorch fallback
             self.model = TrackNet(in_dim=in_dim, out_dim=frames_in)
             ckpt = torch.load(model_path, map_location="cpu", weights_only=False)
@@ -538,6 +563,7 @@ def create_detector(
 
     Args:
         detector_type: ``"auto"`` selects TrackNet/HRNet by extension,
+            ``"tracknet"`` forces TrackNetDetector for .onnx or .pt,
             ``"median_bg"`` uses MedianBGDetector,
             ``"ball_selector"`` uses TrackNet + CandidateTransformer.
     """
@@ -556,6 +582,15 @@ def create_detector(
             input_size=input_size,
             frames_in=8,
             frames_out=8,
+            device=device,
+        )
+    if detector_type == "tracknet":
+        logger.info("Using TrackNetDetector")
+        return TrackNetDetector(
+            model_path=model_path,
+            input_size=input_size,
+            frames_in=frames_in,
+            frames_out=frames_out,
             device=device,
         )
     # Auto-select by file extension
