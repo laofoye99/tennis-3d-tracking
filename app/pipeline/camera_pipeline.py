@@ -13,6 +13,17 @@ from app.pipeline.postprocess import BallTracker
 
 logger = logging.getLogger(__name__)
 
+YOLO_META_KEYS = (
+    "yolo_conf",
+    "bbox",
+    "track_id",
+    "pseudo_track_id",
+    "static_count",
+    "static_status",
+    "static_zone_id",
+    "source",
+)
+
 
 def run_pipeline(
     name: str,
@@ -34,6 +45,7 @@ def run_pipeline(
     player_device: str = "cuda",
     player_conf: float = 0.4,
     player_run_every_n: int = 5,
+    preview_stride: int = 2,
 ) -> None:
     """Entry point for a camera pipeline subprocess.
 
@@ -45,9 +57,12 @@ def run_pipeline(
     )
     log = logging.getLogger(name)
     log.info("Pipeline starting...")
+    preview_stride = max(1, int(preview_stride or 2))
 
     status_dict["state"] = "starting"
     status_dict["error_msg"] = ""
+    status_dict["inference_ready"] = False
+    status_dict["inference_error"] = ""
 
     stream: CameraStream | None = None
     try:
@@ -74,9 +89,14 @@ def run_pipeline(
             if not getattr(detector, "returns_blobs", False):
                 tracker = BallTracker(original_size=(1920, 1080), threshold=threshold)
             homography = HomographyTransformer(homography_path, homography_key)
+            status_dict["inference_ready"] = True
+            status_dict["inference_error"] = ""
         except Exception as e:
             log.warning("Inference components failed to load, inference disabled: %s", e)
             status_dict["inference_enabled"] = False
+            status_dict["inference_ready"] = False
+            status_dict["inference_error"] = str(e)
+            status_dict["error_msg"] = f"Inference disabled: {e}"
 
         if player_model_path:
             try:
@@ -125,7 +145,7 @@ def run_pipeline(
                     continue
                 if item is None:
                     break
-                raw_frame, is_rec = item
+                raw_frame, is_rec, payload_frame_id, payload_capture_ts = item
                 try:
                     h, w = raw_frame.shape[:2]
                     preview = cv2.resize(raw_frame, (960, int(h * 960 / w))) if w > 960 else raw_frame
@@ -135,11 +155,15 @@ def run_pipeline(
                         _push_latest_frame_payload({
                             "preview": preview_jpeg.tobytes(),
                             "recording": recording_jpeg.tobytes(),
+                            "frame_id": payload_frame_id,
+                            "capture_ts": payload_capture_ts,
                         })
                     else:
                         _push_latest_frame_payload({
                             "preview": preview_jpeg.tobytes(),
                             "recording": None,
+                            "frame_id": payload_frame_id,
+                            "capture_ts": payload_capture_ts,
                         })
                 except Exception:
                     pass
@@ -160,9 +184,9 @@ def run_pipeline(
             # Send clean frame to JPEG thread (before OSD mask)
             if frame_queue is not None:
                 is_recording = status_dict.get("recording_enabled", False)
-                if is_recording or frame_id % 4 == 0:
+                if is_recording or frame_id % preview_stride == 0:
                     try:
-                        _jpeg_q.put_nowait((raw_frame.copy(), is_recording))
+                        _jpeg_q.put_nowait((raw_frame.copy(), is_recording, frame_id, capture_ts))
                     except _queue.Full:
                         pass
 
@@ -199,7 +223,11 @@ def run_pipeline(
                 continue
 
             # 推理开关关闭或模型未加载时直接跳过 GPU 调用
-            if detector is None or not status_dict.get("inference_enabled", True):
+            if (
+                detector is None
+                or not status_dict.get("inference_enabled", True)
+                or not status_dict.get("inference_ready", detector is not None)
+            ):
                 frame_buffer.clear()
                 raw_frame_buffer.clear()
                 frame_id_buffer.clear()
@@ -209,6 +237,8 @@ def run_pipeline(
             # Inference on the buffer
             try:
                 heatmaps = detector.infer(frame_buffer)
+                if hasattr(detector, "get_runtime_stats"):
+                    status_dict["detector_stats"] = detector.get_runtime_stats()
             except Exception as e:
                 log.error("Inference error: %s", e)
                 frame_buffer.clear()
@@ -254,12 +284,16 @@ def run_pipeline(
                     candidates = []
                     for b in blobs:
                         bwx, bwy = homography.pixel_to_world(b["pixel_x"], b["pixel_y"])
-                        candidates.append({
+                        candidate = {
                             "x": bwx, "y": bwy,
                             "world_x": bwx, "world_y": bwy,
                             "pixel_x": b["pixel_x"], "pixel_y": b["pixel_y"],
                             "blob_sum": b["blob_sum"],
-                        })
+                        }
+                        for key in YOLO_META_KEYS:
+                            if b.get(key) is not None:
+                                candidate[key] = b[key]
+                        candidates.append(candidate)
 
                     detection = {
                         "camera_name": name,
@@ -271,6 +305,13 @@ def run_pipeline(
                         "frame_index": frame_id_buffer[i] if i < len(frame_id_buffer) else 0,
                         "candidates": candidates,
                     }
+                    if top.get("yolo_conf") is not None:
+                        detection["yolo_conf"] = top["yolo_conf"]
+                    if top.get("source") is not None:
+                        detection["source"] = top["source"]
+                    for key in ("static_count", "static_status", "static_zone_id"):
+                        if top.get(key) is not None:
+                            detection[key] = top[key]
                     try:
                         result_queue.put_nowait(detection)
                     except Exception:
@@ -295,12 +336,16 @@ def run_pipeline(
                     candidates = []
                     for b in blobs:
                         bwx, bwy = homography.pixel_to_world(b["pixel_x"], b["pixel_y"])
-                        candidates.append({
+                        candidate = {
                             "x": bwx, "y": bwy,
                             "world_x": bwx, "world_y": bwy,
                             "pixel_x": b["pixel_x"], "pixel_y": b["pixel_y"],
                             "blob_sum": b["blob_sum"],
-                        })
+                        }
+                        for key in YOLO_META_KEYS:
+                            if b.get(key) is not None:
+                                candidate[key] = b[key]
+                        candidates.append(candidate)
 
                     detection = {
                         "camera_name": name,
@@ -312,6 +357,13 @@ def run_pipeline(
                         "frame_index": frame_id_buffer[i] if i < len(frame_id_buffer) else 0,
                         "candidates": candidates,
                     }
+                    if top.get("yolo_conf") is not None:
+                        detection["yolo_conf"] = top["yolo_conf"]
+                    if top.get("source") is not None:
+                        detection["source"] = top["source"]
+                    for key in ("static_count", "static_status", "static_zone_id"):
+                        if top.get(key) is not None:
+                            detection[key] = top[key]
                     try:
                         result_queue.put_nowait(detection)
                     except Exception:

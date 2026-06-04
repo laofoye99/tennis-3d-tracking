@@ -211,7 +211,7 @@ def test_live_detectors_respect_bounce_toggle_and_reset_buffers(orch, monkeypatc
     assert calls == {"peak": 1, "hybrid": 1}
 
 
-def test_switch_model_sets_matching_detector_type_and_existing_weights(orch):
+def test_switch_model_sets_matching_detector_type_and_yolo_roadmap_weight(orch):
     tracknet = orch.switch_model("tracknet")
 
     assert tracknet["model"] == "tracknet"
@@ -221,11 +221,11 @@ def test_switch_model_sets_matching_detector_type_and_existing_weights(orch):
     assert tracknet["detector_type"] == "tracknet"
     assert orch.get_current_model()["model"] == "tracknet"
 
-    hrnet = orch.switch_model("hrnet")
+    yolo = orch.switch_model("yolo_roadmap")
 
-    assert hrnet["model"] == "hrnet"
-    assert hrnet["path"] == "model_weight/hrnet_tennis.onnx"
-    assert hrnet["frames_in"] == 3
-    assert hrnet["frames_out"] == 3
-    assert hrnet["detector_type"] == "auto"
-    assert orch.get_current_model()["model"] == "hrnet"
+    assert yolo["model"] == "yolo_roadmap"
+    assert yolo["path"] == "yolo_roadmap/best.pt"
+    assert yolo["frames_in"] == 1
+    assert yolo["frames_out"] == 1
+    assert yolo["detector_type"] == "yolo_roadmap"
+    assert orch.get_current_model()["model"] == "yolo_roadmap"

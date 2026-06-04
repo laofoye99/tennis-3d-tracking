@@ -48,6 +48,10 @@ class PipelineStatus(BaseModel):
     fps: float = 0.0
     last_detection_time: Optional[float] = None
     error_msg: Optional[str] = None
+    inference_enabled: bool = True
+    inference_ready: bool = True
+    inference_error: Optional[str] = None
+    detector_stats: Optional[dict] = None
 
 
 class SystemStatus(BaseModel):

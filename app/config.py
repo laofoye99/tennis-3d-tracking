@@ -22,7 +22,7 @@ class ModelConfig(BaseModel):
     threshold: float = 0.3  # not needed for median_bg
     device: str = "cuda"  # not needed for median_bg
     heatmap_mask: list[list[int]] = []
-    detector_type: str = "auto"  # "auto" (HRNet ONNX) | "tracknet" | "median_bg" | "ball_selector"
+    detector_type: str = "auto"  # "auto" | "tracknet" | "median_bg" | "ball_selector" | "yolo_roadmap"
 
 
 class ServerConfig(BaseModel):

@@ -4,13 +4,16 @@ Supports three detector backends:
     - BallDetector:      ONNX-based HRNet (frames_in=3, frames_out=3)
     - TrackNetDetector:  ONNX/PyTorch TrackNet (seq_len=8, bg_mode='concat')
     - MedianBGDetector:  Median background subtraction (frames_in=30, no GPU)
+    - YoloRoadmapDetector: Ultralytics YOLO roadmap detector
 
 Use ``create_detector()`` factory to select backend.  Default auto-selects by
 model file extension; pass ``detector_type="median_bg"`` to use MedianBGDetector.
 """
 
 import logging
-from typing import Optional
+from collections import deque
+from dataclasses import dataclass, field
+from typing import Any, Optional
 
 import cv2
 import numpy as np
@@ -548,6 +551,460 @@ class BallSelectorDetector:
 
 
 # ---------------------------------------------------------------------------
+# YOLO Roadmap detector
+# ---------------------------------------------------------------------------
+
+@dataclass
+class _YoloTrackState:
+    key: int | str
+    last_seen: int = 0
+    last_x: float | None = None
+    last_y: float | None = None
+    last_w: float = 0.0
+    last_h: float = 0.0
+    static_count: int = 0
+    speed_streak: int = 0
+    recent_step: float = 0.0
+    recent_displacement: float = 0.0
+    positions: deque[tuple[float, float]] = field(default_factory=lambda: deque(maxlen=8))
+
+
+@dataclass
+class _StaticZone:
+    zone_id: int
+    x: float
+    y: float
+    radius: float
+    created_frame: int
+    last_seen_frame: int
+    source_track: int | str
+    hits: int = 0
+    blocked: int = 0
+    released: int = 0
+
+    def distance_to(self, x: float, y: float) -> float:
+        return float(np.hypot(x - self.x, y - self.y))
+
+    def contains(self, x: float, y: float) -> bool:
+        return self.distance_to(x, y) <= self.radius
+
+    def to_dict(self, current_frame: int) -> dict[str, Any]:
+        return {
+            "id": self.zone_id,
+            "x": round(self.x, 1),
+            "y": round(self.y, 1),
+            "radius": round(self.radius, 1),
+            "age_frames": max(0, current_frame - self.created_frame),
+            "last_seen_age": max(0, current_frame - self.last_seen_frame),
+            "source_track": self.source_track,
+            "hits": self.hits,
+            "blocked": self.blocked,
+            "released": self.released,
+        }
+
+
+class YoloRoadmapDetector:
+    """Ultralytics YOLO detector from ``yolo_roadmap/best.pt``.
+
+    This backend mirrors the prototype in ``yolo_roadmap``: run YOLO directly
+    on each frame, keep active tracked boxes, and suppress objects that stay
+    nearly static for several consecutive frames.
+    """
+
+    returns_blobs = True
+    already_verified = True
+
+    def __init__(
+        self,
+        model_path: str = "yolo_roadmap/best.pt",
+        input_size: tuple[int, int] = (288, 512),
+        frames_in: int = 1,
+        frames_out: int = 1,
+        device: str = "cuda",
+        conf: float = 0.25,
+        imgsz: int = 960,
+        move_threshold: float = 5.0,
+        static_frame_limit: int = 10,
+        static_zone_radius: float = 28.0,
+        static_zone_ttl_frames: int = 150,
+        static_zone_max: int = 8,
+        static_release_speed: float = 8.0,
+        static_release_displacement: float = 24.0,
+        static_release_frames: int = 2,
+        static_starvation_frames: int = 90,
+        **_kwargs,
+    ):
+        from ultralytics import YOLO
+
+        self.input_h, self.input_w = input_size
+        self.frames_in = max(1, int(frames_in or 1))
+        self.frames_out = self.frames_in
+        self.conf = conf
+        self.imgsz = imgsz
+        self.move_threshold = move_threshold
+        self.static_frame_limit = static_frame_limit
+        self.static_zone_radius = static_zone_radius
+        self.static_zone_ttl_frames = static_zone_ttl_frames
+        self.static_zone_max = static_zone_max
+        self.static_release_speed = static_release_speed
+        self.static_release_displacement = static_release_displacement
+        self.static_release_frames = static_release_frames
+        self.static_starvation_frames = static_starvation_frames
+        self.device = self._resolve_device(device)
+
+        self.model = YOLO(model_path)
+        self._target_classes = None
+
+        self._track_available = True
+        self._frame_counter = 0
+        self._track_history: dict[int | str, _YoloTrackState] = {}
+        self._last_seen: dict[int | str, int] = {}
+        self._static_zones: dict[int, _StaticZone] = {}
+        self._next_static_zone_id = 1
+        self._next_pseudo_track_id = 1
+        self._static_starvation_count = 0
+        self._static_fail_open_until = 0
+        self._static_stats: dict[str, int] = {
+            "raw_detections": 0,
+            "kept_detections": 0,
+            "static_blocked": 0,
+            "static_zones_created": 0,
+            "static_zones_expired": 0,
+            "motion_released": 0,
+            "fail_open_kept": 0,
+            "untracked_kept": 0,
+            "pseudo_tracked": 0,
+        }
+
+        logger.info(
+            "YoloRoadmapDetector ready (model=%s, conf=%.2f, imgsz=%d, device=%s, static=%d frames, ttl=%d)",
+            model_path,
+            conf,
+            imgsz,
+            self.device,
+            static_frame_limit,
+            static_zone_ttl_frames,
+        )
+
+    @staticmethod
+    def _resolve_device(device: str):
+        if isinstance(device, str) and device.startswith("cuda"):
+            if torch.cuda.is_available():
+                return 0 if device == "cuda" else device
+            logger.warning("CUDA not available, falling back to CPU for YOLO")
+            return "cpu"
+        return device
+
+    def infer(self, frames: list[np.ndarray]) -> list[list[dict]]:
+        """Run YOLO on each frame and return dashboard-compatible blob lists."""
+        outputs: list[list[dict]] = []
+        for frame in frames:
+            self._frame_counter += 1
+            if self._track_available:
+                try:
+                    results = self.model.track(
+                        frame,
+                        persist=True,
+                        conf=self.conf,
+                        imgsz=self.imgsz,
+                        device=self.device,
+                        verbose=False,
+                    )
+                except Exception as exc:
+                    self._track_available = False
+                    logger.warning(
+                        "YOLO tracking unavailable, falling back to predict(): %s",
+                        exc,
+                    )
+                    results = self.model.predict(
+                        frame,
+                        conf=self.conf,
+                        imgsz=self.imgsz,
+                        device=self.device,
+                        verbose=False,
+                    )
+            else:
+                results = self.model.predict(
+                    frame,
+                    conf=self.conf,
+                    imgsz=self.imgsz,
+                    device=self.device,
+                    verbose=False,
+                )
+
+            result = results[0] if results else None
+            outputs.append(self._result_to_blobs(result))
+            self._prune_track_history()
+
+        return outputs
+
+    def _result_to_blobs(self, result) -> list[dict]:
+        if result is None or result.boxes is None or len(result.boxes) == 0:
+            self._expire_static_zones()
+            self._update_static_starvation(raw_count=0, kept_count=0)
+            return []
+
+        boxes = result.boxes
+        xywh = boxes.xywh.cpu().numpy()
+        confs = boxes.conf.cpu().numpy()
+        classes = boxes.cls.cpu().numpy() if boxes.cls is not None else np.zeros(len(xywh))
+        track_ids = (
+            boxes.id.int().cpu().numpy().tolist()
+            if boxes.id is not None
+            else [None] * len(xywh)
+        )
+
+        blobs: list[dict] = []
+        raw_count = 0
+        claimed_pseudo_tracks: set[int | str] = set()
+        for box, conf, cls_id, track_id in zip(xywh, confs, classes, track_ids):
+            if self._target_classes is not None and int(cls_id) not in self._target_classes:
+                continue
+
+            x, y, w, h = [float(v) for v in box]
+            raw_count += 1
+            has_real_track = track_id is not None
+            track_key = (
+                int(track_id)
+                if has_real_track
+                else self._assign_pseudo_track(x, y, claimed_pseudo_tracks)
+            )
+            if not has_real_track:
+                self._static_stats["pseudo_tracked"] += 1
+            state = self._update_track_state(track_key, x, y, w, h)
+            keep, static_status, zone = self._apply_static_gate(state, x, y)
+
+            blob = {
+                "pixel_x": x,
+                "pixel_y": y,
+                "blob_sum": float(conf),
+                "blob_max": float(conf),
+                "blob_area": int(max(1.0, w * h)),
+                "yolo_conf": float(conf),
+                "bbox": [
+                    x - w / 2.0,
+                    y - h / 2.0,
+                    x + w / 2.0,
+                    y + h / 2.0,
+                ],
+                "track_id": int(track_id) if has_real_track else None,
+                "pseudo_track_id": track_key if not has_real_track else None,
+                "static_count": state.static_count if state is not None else 0,
+                "static_status": static_status,
+                "static_zone_id": zone.zone_id if zone is not None else None,
+                "source": "yolo_roadmap",
+            }
+            if keep:
+                blobs.append(blob)
+
+        blobs.sort(key=lambda b: b["yolo_conf"], reverse=True)
+        self._expire_static_zones()
+        self._update_static_starvation(raw_count=raw_count, kept_count=len(blobs))
+        self._static_stats["raw_detections"] += raw_count
+        self._static_stats["kept_detections"] += len(blobs)
+        return blobs
+
+    def _assign_pseudo_track(
+        self,
+        x: float,
+        y: float,
+        claimed: set[int | str],
+    ) -> str:
+        best_key = None
+        best_dist = 45.0
+        for key, state in self._track_history.items():
+            if not isinstance(key, str) or not key.startswith("u"):
+                continue
+            if key in claimed or self._frame_counter - state.last_seen > 5:
+                continue
+            if state.last_x is None or state.last_y is None:
+                continue
+            dist = float(np.hypot(x - state.last_x, y - state.last_y))
+            if dist < best_dist:
+                best_dist = dist
+                best_key = key
+
+        if best_key is None:
+            best_key = f"u{self._next_pseudo_track_id}"
+            self._next_pseudo_track_id += 1
+        claimed.add(best_key)
+        return best_key
+
+    def _update_track_state(
+        self,
+        track_key: int | str,
+        x: float,
+        y: float,
+        w: float,
+        h: float,
+    ) -> _YoloTrackState:
+        state = self._track_history.get(track_key)
+        if state is None:
+            state = _YoloTrackState(key=track_key)
+            self._track_history[track_key] = state
+
+        if state.last_x is None or state.last_y is None:
+            step = 0.0
+        else:
+            step = float(np.hypot(x - state.last_x, y - state.last_y))
+
+        state.recent_step = step
+        state.static_count = state.static_count + 1 if step < self.move_threshold else 0
+        state.speed_streak = state.speed_streak + 1 if step >= self.static_release_speed else 0
+        state.last_seen = self._frame_counter
+        state.last_x = x
+        state.last_y = y
+        state.last_w = w
+        state.last_h = h
+        state.positions.append((x, y))
+        if len(state.positions) >= 3:
+            px, py = state.positions[-3]
+            state.recent_displacement = float(np.hypot(x - px, y - py))
+        else:
+            state.recent_displacement = step
+
+        if state.static_count >= self.static_frame_limit:
+            self._upsert_static_zone(state)
+
+        self._last_seen[track_key] = self._frame_counter
+        return state
+
+    def _zone_radius_for_track(self, state: _YoloTrackState) -> float:
+        box_radius = max(state.last_w, state.last_h) * 0.75 + 10.0
+        return float(max(self.static_zone_radius, min(70.0, box_radius)))
+
+    def _find_static_zone(self, x: float, y: float) -> _StaticZone | None:
+        matches = [zone for zone in self._static_zones.values() if zone.contains(x, y)]
+        if not matches:
+            return None
+        return min(matches, key=lambda zone: zone.distance_to(x, y))
+
+    def _upsert_static_zone(self, state: _YoloTrackState) -> _StaticZone | None:
+        if state.last_x is None or state.last_y is None:
+            return None
+
+        radius = self._zone_radius_for_track(state)
+        zone = self._find_static_zone(state.last_x, state.last_y)
+        if zone is None:
+            if len(self._static_zones) >= self.static_zone_max:
+                oldest_id = min(
+                    self._static_zones,
+                    key=lambda zid: self._static_zones[zid].last_seen_frame,
+                )
+                self._static_zones.pop(oldest_id, None)
+                self._static_stats["static_zones_expired"] += 1
+            zone = _StaticZone(
+                zone_id=self._next_static_zone_id,
+                x=state.last_x,
+                y=state.last_y,
+                radius=radius,
+                created_frame=self._frame_counter,
+                last_seen_frame=self._frame_counter,
+                source_track=state.key,
+                hits=1,
+            )
+            self._static_zones[zone.zone_id] = zone
+            self._next_static_zone_id += 1
+            self._static_stats["static_zones_created"] += 1
+            return zone
+
+        zone.x = float(0.85 * zone.x + 0.15 * state.last_x)
+        zone.y = float(0.85 * zone.y + 0.15 * state.last_y)
+        zone.radius = max(zone.radius, radius)
+        zone.last_seen_frame = self._frame_counter
+        zone.hits += 1
+        return zone
+
+    def _has_static_release_evidence(self, state: _YoloTrackState, zone: _StaticZone) -> bool:
+        if state.static_count >= max(2, self.static_frame_limit // 2):
+            return False
+        if state.speed_streak >= self.static_release_frames:
+            return True
+        if state.recent_displacement >= self.static_release_displacement:
+            return True
+        if state.last_x is not None and state.last_y is not None:
+            if zone.distance_to(state.last_x, state.last_y) >= zone.radius + self.move_threshold:
+                return True
+        return False
+
+    def _apply_static_gate(
+        self,
+        state: _YoloTrackState | None,
+        x: float,
+        y: float,
+    ) -> tuple[bool, str, _StaticZone | None]:
+        if state is None:
+            self._static_stats["untracked_kept"] += 1
+            return True, "untracked", None
+
+        zone = self._find_static_zone(x, y)
+        if zone is None:
+            return True, "moving" if state.static_count < self.static_frame_limit else "static_candidate", None
+
+        if self._frame_counter < self._static_fail_open_until:
+            self._static_stats["fail_open_kept"] += 1
+            return True, "fail_open", zone
+
+        if self._has_static_release_evidence(state, zone):
+            zone.released += 1
+            self._static_stats["motion_released"] += 1
+            return True, "motion_released", zone
+
+        zone.last_seen_frame = self._frame_counter
+        zone.blocked += 1
+        self._static_stats["static_blocked"] += 1
+        return False, "static_blocked", zone
+
+    def _expire_static_zones(self) -> None:
+        expired = [
+            zone_id
+            for zone_id, zone in self._static_zones.items()
+            if self._frame_counter - zone.last_seen_frame > self.static_zone_ttl_frames
+        ]
+        for zone_id in expired:
+            self._static_zones.pop(zone_id, None)
+        if expired:
+            self._static_stats["static_zones_expired"] += len(expired)
+
+    def _update_static_starvation(self, raw_count: int, kept_count: int) -> None:
+        if raw_count > 0 and kept_count == 0 and self._static_zones:
+            self._static_starvation_count += 1
+        else:
+            self._static_starvation_count = 0
+
+        if self._static_starvation_count >= self.static_starvation_frames:
+            # Fail open briefly instead of deleting masks. This prevents a
+            # full detector blackout while keeping static zones intact.
+            self._static_fail_open_until = self._frame_counter + 10
+            self._static_starvation_count = 0
+
+    def get_runtime_stats(self) -> dict[str, Any]:
+        return {
+            "type": "yolo_roadmap",
+            "track_available": self._track_available,
+            "frame": self._frame_counter,
+            "active_static_zones": len(self._static_zones),
+            "static_starvation": self._static_starvation_count,
+            "static_fail_open_remaining": max(0, self._static_fail_open_until - self._frame_counter),
+            **self._static_stats,
+            "zones": [
+                zone.to_dict(self._frame_counter)
+                for zone in sorted(self._static_zones.values(), key=lambda z: z.zone_id)
+            ],
+        }
+
+    def _prune_track_history(self) -> None:
+        stale_after = 150
+        stale = [
+            tid for tid, last_seen in self._last_seen.items()
+            if self._frame_counter - last_seen > stale_after
+        ]
+        for tid in stale:
+            self._last_seen.pop(tid, None)
+            self._track_history.pop(tid, None)
+
+
+# ---------------------------------------------------------------------------
 # Factory function
 # ---------------------------------------------------------------------------
 
@@ -558,15 +1015,16 @@ def create_detector(
     frames_out: int = 3,
     device: str = "cuda",
     detector_type: str = "auto",
-) -> "BallDetector | TrackNetDetector | MedianBGDetector | BallSelectorDetector":
+) -> "BallDetector | TrackNetDetector | MedianBGDetector | BallSelectorDetector | YoloRoadmapDetector":
     """Select detector backend.
 
     Args:
         detector_type: ``"auto"`` selects TrackNet/HRNet by extension,
-            ``"tracknet"`` forces TrackNetDetector for .onnx or .pt,
             ``"median_bg"`` uses MedianBGDetector,
+            ``"yolo_roadmap"`` uses the Ultralytics YOLO prototype backend,
             ``"ball_selector"`` uses TrackNet + CandidateTransformer.
     """
+    normalized_path = model_path.replace("\\", "/").lower()
     if detector_type == "median_bg":
         logger.info("Using MedianBGDetector (median background subtraction)")
         return MedianBGDetector(
@@ -592,6 +1050,21 @@ def create_detector(
             frames_in=frames_in,
             frames_out=frames_out,
             device=device,
+        )
+    if (
+        detector_type in {"yolo", "yolo_roadmap"}
+        or (detector_type == "auto" and "/yolo_roadmap/" in normalized_path)
+    ):
+        logger.info("Using YoloRoadmapDetector")
+        return YoloRoadmapDetector(
+            model_path=model_path or "yolo_roadmap/best.pt",
+            input_size=input_size,
+            frames_in=frames_in,
+            frames_out=frames_out,
+            device=device,
+            conf=0.15,
+            imgsz=960,
+            static_frame_limit=20,
         )
     # Auto-select by file extension
     if model_path.endswith(".pt"):

@@ -408,6 +408,9 @@ class Orchestrator:
                 "last_detection_time": None,
                 "error_msg": "",
                 "inference_enabled": self._inference_enabled,
+                "inference_ready": False,
+                "inference_error": "",
+                "detector_stats": None,
             }
         )
 
@@ -1763,6 +1766,10 @@ class Orchestrator:
                 fps=handle.status_dict.get("fps", 0.0),
                 last_detection_time=handle.status_dict.get("last_detection_time"),
                 error_msg=handle.status_dict.get("error_msg") or None,
+                inference_enabled=bool(handle.status_dict.get("inference_enabled", True)),
+                inference_ready=bool(handle.status_dict.get("inference_ready", True)),
+                inference_error=handle.status_dict.get("inference_error") or None,
+                detector_stats=handle.status_dict.get("detector_stats"),
             )
         return PipelineStatus(name=name, state="stopped")
 
@@ -2959,31 +2966,37 @@ class Orchestrator:
         return self._inference_enabled
 
     def switch_model(self, model_name: str) -> dict:
-        """Switch between HRNet and TrackNet models at runtime.
+        """Switch between TrackNet and YOLO roadmap models at runtime.
 
         Args:
-            model_name: "hrnet" or "tracknet"
+            model_name: "tracknet" or "yolo_roadmap"
 
         Returns:
             Dict with new model config info.
         """
         model_name = model_name.lower().strip()
         configs = {
-            "hrnet": {
-                "path": "model_weight/hrnet_tennis.onnx",
-                "frames_in": 3,
-                "frames_out": 3,
-                "detector_type": "auto",
-            },
             "tracknet": {
                 "path": "model_weight/TrackNet_finetuned.onnx",
                 "frames_in": 8,
                 "frames_out": 8,
                 "detector_type": "tracknet",
             },
+            "yolo": {
+                "path": "yolo_roadmap/best.pt",
+                "frames_in": 1,
+                "frames_out": 1,
+                "detector_type": "yolo_roadmap",
+            },
+            "yolo_roadmap": {
+                "path": "yolo_roadmap/best.pt",
+                "frames_in": 1,
+                "frames_out": 1,
+                "detector_type": "yolo_roadmap",
+            },
         }
         if model_name not in configs:
-            raise ValueError(f"Unknown model: {model_name}. Use 'hrnet' or 'tracknet'")
+            raise ValueError(f"Unknown model: {model_name}. Use 'tracknet' or 'yolo_roadmap'")
 
         running_live_cameras = [
             name
@@ -2994,6 +3007,7 @@ class Orchestrator:
             self.stop_pipeline(name)
 
         selected = configs[model_name]
+        public_model_name = "yolo_roadmap" if selected["detector_type"] == "yolo_roadmap" else model_name
         self.config.model.path = selected["path"]
         self.config.model.frames_in = selected["frames_in"]
         self.config.model.frames_out = selected["frames_out"]
@@ -3005,14 +3019,14 @@ class Orchestrator:
 
         logger.info(
             "Model switched to %s: %s (detector=%s, frames=%d, restarted=%s)",
-            model_name,
+            public_model_name,
             self.config.model.path,
             self.config.model.detector_type,
             self.config.model.frames_in,
             running_live_cameras,
         )
         return {
-            "model": model_name,
+            "model": public_model_name,
             "path": self.config.model.path,
             "frames_in": self.config.model.frames_in,
             "frames_out": self.config.model.frames_out,
@@ -3024,7 +3038,11 @@ class Orchestrator:
         """Return current model info."""
         path = self.config.model.path
         path_name = Path(path).name.lower()
-        if self.config.model.detector_type == "tracknet" or "tracknet" in path_name:
+        detector_type = (self.config.model.detector_type or "").lower()
+        normalized_path = path.replace("\\", "/").lower()
+        if detector_type in {"yolo", "yolo_roadmap"} or "yolo_roadmap/" in normalized_path:
+            name = "yolo_roadmap"
+        elif detector_type == "tracknet" or "tracknet" in path_name:
             name = "tracknet"
         elif "hrnet" in path_name:
             name = "hrnet"

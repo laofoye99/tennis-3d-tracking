@@ -117,6 +117,7 @@ body{font-family:'Lato',sans-serif;background:var(--bg);color:var(--text);height
 .state-badge.error{background:rgba(239,68,68,.2);color:#ef4444}
 .state-badge.starting{background:rgba(234,179,8,.2);color:#eab308}
 .state-badge.completed{background:rgba(95,177,223,.2);color:var(--accent)}
+.state-badge.noinfer{background:rgba(234,179,8,.18);color:#ffb74d}
 
 /* ---- Video grid ---- */
 #video-container{width:100%;height:100%;display:grid;gap:2px;background:#000;overflow:hidden}
@@ -514,11 +515,12 @@ body{font-family:'Lato',sans-serif;background:var(--bg);color:var(--text);height
               <div class="func-control">
                 <select id="live-model-select" class="func-select" onchange="switchLiveModel(this.value)" title="Live ball detector model">
                   <option value="tracknet">TrackNet ONNX</option>
-                  <option value="hrnet">HRNet</option>
+                  <option value="yolo_roadmap">YOLO Roadmap</option>
                 </select>
                 <span id="live-model-status" class="func-status">-</span>
               </div>
             </div>
+            <div class="func-item"><span>YOLO Static</span><span class="func-status" id="yolo-static-status">-</span></div>
             <div class="func-item"><span>ML Rally</span><div class="toggle" id="tog-ml-rally" onclick="toggleMLRally(this)"></div></div>
             <div class="func-item"><span>Bounce Det.</span><div class="toggle on" id="tog-bounce" onclick="toggleBounce(this)"></div></div>
             <div class="func-item"><span>Net Speed</span><div class="toggle on" id="tog-net-crossing" onclick="toggleNetCrossing(this)"></div></div>
@@ -719,10 +721,10 @@ body{font-family:'Lato',sans-serif;background:var(--bg);color:var(--text);height
           <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">
             <span style="font-size:10px;color:var(--text-muted)">Model:</span>
             <div id="vt-model-switch" style="display:flex;border-radius:4px;overflow:hidden;border:1px solid #555;font-size:10px">
-              <button class="vt-model-btn active" data-model="hrnet" onclick="vtSwitchModel('hrnet')"
-                style="padding:3px 10px;border:none;cursor:pointer;font-size:10px;font-weight:600;background:#4caf50;color:#fff">HRNet</button>
-              <button class="vt-model-btn" data-model="tracknet" onclick="vtSwitchModel('tracknet')"
-                style="padding:3px 10px;border:none;cursor:pointer;font-size:10px;font-weight:600;background:var(--card-bg);color:#aaa">TrackNet</button>
+              <button class="vt-model-btn active" data-model="tracknet" onclick="vtSwitchModel('tracknet')"
+                style="padding:3px 10px;border:none;cursor:pointer;font-size:10px;font-weight:600;background:#4caf50;color:#fff">TrackNet ONNX</button>
+              <button class="vt-model-btn" data-model="yolo_roadmap" onclick="vtSwitchModel('yolo_roadmap')"
+                style="padding:3px 10px;border:none;cursor:pointer;font-size:10px;font-weight:600;background:var(--card-bg);color:#aaa">YOLO</button>
             </div>
           </div>
 
@@ -1982,8 +1984,29 @@ function setModelUiState(data,state='ok'){
     b.style.background=active?'#4caf50':'var(--card-bg)';
     b.style.color=active?'#fff':'#aaa';
   });
-  const label=model==='tracknet'?'TrackNet':(model==='hrnet'?'HRNet':model||'-');
+  const label=model==='tracknet'?'TrackNet':(model==='yolo_roadmap'?'YOLO':(model==='hrnet'?'HRNet':model||'-'));
   setLiveModelStatus(label,state);
+}
+
+function updateYoloStaticStatus(pipelines){
+  const el=document.getElementById('yolo-static-status');
+  if(!el) return;
+  const stats=Object.values(pipelines||{})
+    .map(p=>p.detector_stats)
+    .filter(s=>s&&s.type==='yolo_roadmap');
+  if(!stats.length){
+    el.textContent='-';
+    el.className='func-status';
+    el.title='';
+    return;
+  }
+  const raw=stats.reduce((n,s)=>n+Number(s.raw_detections||0),0);
+  const kept=stats.reduce((n,s)=>n+Number(s.kept_detections||0),0);
+  const blocked=stats.reduce((n,s)=>n+Number(s.static_blocked||0),0);
+  const zones=stats.reduce((n,s)=>n+Number(s.active_static_zones||0),0);
+  el.textContent=`${kept}/${raw} kept`;
+  el.className='func-status '+(blocked>0?'warn':'ok');
+  el.title=`YOLO static filter: raw=${raw}, kept=${kept}, blocked=${blocked}, zones=${zones}`;
 }
 
 async function syncLiveModel(){
@@ -2300,10 +2323,27 @@ async function poll(){
       if(name.startsWith('_')) continue; // skip internal pipelines
       const badge=document.getElementById('badge-'+name);
       const fpsEl=document.getElementById('fps-'+name);
-      if(badge){badge.className='state-badge '+p.state;badge.textContent=p.state}
+      if(badge){
+        const ready=p.inference_ready!==false;
+        const enabled=p.inference_enabled!==false;
+        if(p.state==='running'&&!ready){
+          badge.className='state-badge noinfer';
+          badge.textContent='NO MODEL';
+          badge.title=p.inference_error||p.error_msg||'Inference model is not ready';
+        }else if(p.state==='running'&&!enabled){
+          badge.className='state-badge noinfer';
+          badge.textContent='TRACK OFF';
+          badge.title='';
+        }else{
+          badge.className='state-badge '+p.state;
+          badge.textContent=p.state;
+          badge.title='';
+        }
+      }
       if(fpsEl)fpsEl.textContent=p.fps.toFixed(1);
     }
     renderVideoArea(d.pipelines);
+    updateYoloStaticStatus(d.pipelines);
 
     // Extract analytics data from status
     const analytics=d.analytics||{};
