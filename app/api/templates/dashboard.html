@@ -534,7 +534,7 @@ body{font-family:'Lato',sans-serif;background:var(--bg);color:var(--text);height
           <div class="section-title" style="display:flex;align-items:center;justify-content:space-between;gap:8px">
             <span>Mini Map</span>
             <span style="display:flex;gap:4px">
-              <button onclick="flipMinimap()" title="Flip minimap horizontally" style="height:22px;border:1px solid #555;background:#202020;color:#ccc;border-radius:4px;cursor:pointer;font-size:11px;line-height:18px;padding:0 8px">Flip X</button>
+              <button onclick="flipMinimap()" title="Rotate minimap 180 degrees" style="height:22px;border:1px solid #555;background:#202020;color:#ccc;border-radius:4px;cursor:pointer;font-size:11px;line-height:18px;padding:0 8px">180</button>
               <button onclick="clearMinimapEvents()" title="Refresh minimap markers" style="width:22px;height:22px;border:1px solid #555;background:#202020;color:#ccc;border-radius:4px;cursor:pointer;font-size:13px;line-height:18px">&#8635;</button>
             </span>
           </div>
@@ -1141,8 +1141,8 @@ const MAX_DASHBOARD_BOUNCES=500;
 let _minimapLatestBounces=[];
 let _minimapLatestHits=[];
 let _minimapClearCutoff={sequence:-Infinity,timestamp:-Infinity,frame:-Infinity};
-const _storedMinimapFlipX=localStorage.getItem('tennis_minimap_flip_x');
-let _minimapFlipX=_storedMinimapFlipX===null?true:_storedMinimapFlipX==='1';
+const _storedMinimapRotate180=localStorage.getItem('tennis_minimap_rotate180');
+let _minimapRotate180=_storedMinimapRotate180===null?true:_storedMinimapRotate180==='1';
 
 const TEST_BALLS=[
   {label:'B1',x:2.694,y:-10.069, z:0.177,color:'#4f88fa'},
@@ -1604,8 +1604,8 @@ function clearMinimapEvents(){
 }
 
 function flipMinimap(){
-  _minimapFlipX=!_minimapFlipX;
-  localStorage.setItem('tennis_minimap_flip_x',_minimapFlipX?'1':'0');
+  _minimapRotate180=!_minimapRotate180;
+  localStorage.setItem('tennis_minimap_rotate180',_minimapRotate180?'1':'0');
   drawCourt(
     document.getElementById('minimap'),
     filterMinimapEvents(_minimapLatestBounces),
@@ -1622,8 +1622,8 @@ function drawCourt(canvas, bounces, hits){
   function tx(x){return margin+((HW+PAD_X+x)/VW)*dw}
   function ty(y){return margin+((HL+PAD_Y-y)/VH)*dh}
   function eventPoint(x,y){
-    const mx=_minimapFlipX?-Number(x):Number(x);
-    const my=Number(y);
+    const mx=_minimapRotate180?-Number(x):Number(x);
+    const my=_minimapRotate180?-Number(y):Number(y);
     return {x:tx(mx),y:ty(my)};
   }
 
