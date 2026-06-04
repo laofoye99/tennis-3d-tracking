@@ -75,6 +75,14 @@ body{font-family:'Lato',sans-serif;background:var(--bg);color:var(--text);height
 .func-list{background:var(--card-bg);padding:12px 14px;display:flex;flex-direction:column;gap:8px}
 .func-item{display:flex;align-items:center;justify-content:space-between}
 .func-item span{font-size:12px}
+.func-control{display:flex;align-items:center;justify-content:flex-end;gap:6px;min-width:0}
+.func-select{background:#202020;border:1px solid #444;color:var(--text);border-radius:4px;font-size:11px;padding:3px 6px;outline:none;cursor:pointer;max-width:132px}
+.func-select:focus{border-color:var(--accent)}
+.func-select:disabled{opacity:.6;cursor:wait}
+.func-item .func-status{font-size:10px;color:var(--text-muted);max-width:92px;text-align:right;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.func-item .func-status.ok{color:#4caf50}
+.func-item .func-status.warn{color:#ff9800}
+.func-item .func-status.error{color:#ff8a80}
 .toggle{width:36px;height:18px;background:#555;border-radius:9px;position:relative;cursor:pointer;transition:background .2s}
 .toggle.on{background:var(--cam-green)}
 .toggle::after{content:'';position:absolute;top:2px;left:2px;width:14px;height:14px;background:#fff;border-radius:50%;transition:left .2s}
@@ -501,6 +509,16 @@ body{font-family:'Lato',sans-serif;background:var(--bg);color:var(--text);height
           <div class="section-title">Function</div>
           <div class="func-list">
             <div class="func-item"><span>Track</span><div class="toggle on" id="tog-track" onclick="toggleTrackBall(this)"></div></div>
+            <div class="func-item">
+              <span>Model</span>
+              <div class="func-control">
+                <select id="live-model-select" class="func-select" onchange="switchLiveModel(this.value)" title="Live ball detector model">
+                  <option value="tracknet">TrackNet ONNX</option>
+                  <option value="hrnet">HRNet</option>
+                </select>
+                <span id="live-model-status" class="func-status">-</span>
+              </div>
+            </div>
             <div class="func-item"><span>ML Rally</span><div class="toggle" id="tog-ml-rally" onclick="toggleMLRally(this)"></div></div>
             <div class="func-item"><span>Bounce Det.</span><div class="toggle on" id="tog-bounce" onclick="toggleBounce(this)"></div></div>
             <div class="func-item"><span>Net Speed</span><div class="toggle on" id="tog-net-crossing" onclick="toggleNetCrossing(this)"></div></div>
@@ -1944,6 +1962,63 @@ async function ctrlAllPipelines(action){
   try{await fetch(`/api/pipeline/${action}-all`,{method:'POST'})}catch(e){console.error(e)}
 }
 
+function setLiveModelStatus(text,state=''){
+  const el=document.getElementById('live-model-status');
+  if(!el) return;
+  el.textContent=text||'-';
+  el.classList.remove('ok','warn','error');
+  if(state) el.classList.add(state);
+}
+
+function setModelUiState(data,state='ok'){
+  if(!data) return;
+  const model=data.model||'';
+  const select=document.getElementById('live-model-select');
+  if(select && model){
+    select.value=model;
+  }
+  document.querySelectorAll('#vt-model-switch button').forEach(b=>{
+    const active=b.dataset.model===model;
+    b.style.background=active?'#4caf50':'var(--card-bg)';
+    b.style.color=active?'#fff':'#aaa';
+  });
+  const label=model==='tracknet'?'TrackNet':(model==='hrnet'?'HRNet':model||'-');
+  setLiveModelStatus(label,state);
+}
+
+async function syncLiveModel(){
+  try{
+    const r=await fetch('/api/model/current');
+    const d=await r.json();
+    if(!r.ok) throw new Error(d.detail||'model status failed');
+    setModelUiState(d,'ok');
+  }catch(e){
+    setLiveModelStatus('unavailable','error');
+    console.warn('syncLiveModel failed:',e);
+  }
+}
+
+async function switchLiveModel(name){
+  const select=document.getElementById('live-model-select');
+  if(select) select.disabled=true;
+  setLiveModelStatus('switching','warn');
+  try{
+    const r=await fetch('/api/model/switch/'+encodeURIComponent(name),{method:'POST'});
+    const d=await r.json();
+    if(!r.ok) throw new Error(d.detail||'model switch failed');
+    setModelUiState(d,'ok');
+    if(Array.isArray(d.restarted_live_cameras) && d.restarted_live_cameras.length){
+      setLiveModelStatus(`${d.model} restarted`,'ok');
+    }
+  }catch(e){
+    console.error('switchLiveModel failed:',e);
+    await syncLiveModel();
+    setLiveModelStatus('failed','error');
+  }finally{
+    if(select) select.disabled=false;
+  }
+}
+
 async function toggleTrackBall(el){
   el.classList.toggle('on');
   const state = el.classList.contains('on') ? 'on' : 'off';
@@ -2276,6 +2351,7 @@ requestAnimationFrame(_ballOverlayLoop);
 setInterval(poll,500);
 syncRecordingStatus();
 setInterval(syncRecordingStatus,2000);
+syncLiveModel();
 
 // Sync toggle states from server on load
 (async function syncToggles(){
@@ -3337,30 +3413,8 @@ function vtFormatTime(s){
 
 // ---- Model switch ----
 async function vtSwitchModel(name){
-  try{
-    const r=await fetch('/api/model/switch/'+name,{method:'POST'});
-    const d=await r.json();
-    // Update button states
-    document.querySelectorAll('#vt-model-switch button').forEach(b=>{
-      if(b.dataset.model===name){
-        b.style.background='#4caf50'; b.style.color='#fff';
-      } else {
-        b.style.background='var(--card-bg)'; b.style.color='#aaa';
-      }
-    });
-    console.log('Model switched to',d.model,d.path);
-  }catch(e){console.error('Model switch failed:',e)}
+  await switchLiveModel(name);
 }
-// Load current model state on init
-fetch('/api/model/current').then(r=>r.json()).then(d=>{
-  document.querySelectorAll('#vt-model-switch button').forEach(b=>{
-    if(b.dataset.model===d.model){
-      b.style.background='#4caf50'; b.style.color='#fff';
-    } else {
-      b.style.background='var(--card-bg)'; b.style.color='#aaa';
-    }
-  });
-}).catch(()=>{});
 
 // ---- Run / Stop (sequential dual-video processing) ----
 async function vtToggleRun(){

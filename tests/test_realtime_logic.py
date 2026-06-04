@@ -209,3 +209,23 @@ def test_live_detectors_respect_bounce_toggle_and_reset_buffers(orch, monkeypatc
     assert smoothed_pt == pt
     assert hbounce is None
     assert calls == {"peak": 1, "hybrid": 1}
+
+
+def test_switch_model_sets_matching_detector_type_and_existing_weights(orch):
+    tracknet = orch.switch_model("tracknet")
+
+    assert tracknet["model"] == "tracknet"
+    assert tracknet["path"] == "model_weight/TrackNet_finetuned.onnx"
+    assert tracknet["frames_in"] == 8
+    assert tracknet["frames_out"] == 8
+    assert tracknet["detector_type"] == "tracknet"
+    assert orch.get_current_model()["model"] == "tracknet"
+
+    hrnet = orch.switch_model("hrnet")
+
+    assert hrnet["model"] == "hrnet"
+    assert hrnet["path"] == "model_weight/hrnet_tennis.onnx"
+    assert hrnet["frames_in"] == 3
+    assert hrnet["frames_out"] == 3
+    assert hrnet["detector_type"] == "auto"
+    assert orch.get_current_model()["model"] == "hrnet"

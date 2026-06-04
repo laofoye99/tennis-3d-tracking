@@ -589,7 +589,7 @@ async def set_track_ball(state: str):
 
 @router.post("/api/model/switch/{model_name}")
 async def switch_model(model_name: str):
-    """Switch detection model: model_name = 'hrnet' | 'tracknet'"""
+    """Switch detection model: model_name = 'hrnet' | 'tracknet'."""
     orch = _get_orch()
     try:
         result = orch.switch_model(model_name)

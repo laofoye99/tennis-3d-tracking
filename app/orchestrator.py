@@ -2967,35 +2967,75 @@ class Orchestrator:
         Returns:
             Dict with new model config info.
         """
-        if model_name == "hrnet":
-            self.config.model.path = "model_weight/hrnet_tennis.onnx"
-            self.config.model.frames_in = 3
-            self.config.model.frames_out = 3
-        elif model_name == "tracknet":
-            self.config.model.path = "model_weight/TrackNet_best.pt"
-            self.config.model.frames_in = 8
-            self.config.model.frames_out = 8
-        else:
+        model_name = model_name.lower().strip()
+        configs = {
+            "hrnet": {
+                "path": "model_weight/hrnet_tennis.onnx",
+                "frames_in": 3,
+                "frames_out": 3,
+                "detector_type": "auto",
+            },
+            "tracknet": {
+                "path": "model_weight/TrackNet_finetuned.onnx",
+                "frames_in": 8,
+                "frames_out": 8,
+                "detector_type": "tracknet",
+            },
+        }
+        if model_name not in configs:
             raise ValueError(f"Unknown model: {model_name}. Use 'hrnet' or 'tracknet'")
 
-        logger.info("Model switched to %s: %s (frames=%d)",
-                     model_name, self.config.model.path, self.config.model.frames_in)
+        running_live_cameras = [
+            name
+            for name, handle in self._handles.items()
+            if name in self.config.cameras and handle.is_alive()
+        ]
+        for name in running_live_cameras:
+            self.stop_pipeline(name)
+
+        selected = configs[model_name]
+        self.config.model.path = selected["path"]
+        self.config.model.frames_in = selected["frames_in"]
+        self.config.model.frames_out = selected["frames_out"]
+        self.config.model.detector_type = selected["detector_type"]
+        self._is_median_bg = self.config.model.detector_type == "median_bg"
+
+        for name in running_live_cameras:
+            self.start_pipeline(name)
+
+        logger.info(
+            "Model switched to %s: %s (detector=%s, frames=%d, restarted=%s)",
+            model_name,
+            self.config.model.path,
+            self.config.model.detector_type,
+            self.config.model.frames_in,
+            running_live_cameras,
+        )
         return {
             "model": model_name,
             "path": self.config.model.path,
             "frames_in": self.config.model.frames_in,
             "frames_out": self.config.model.frames_out,
+            "detector_type": self.config.model.detector_type,
+            "restarted_live_cameras": running_live_cameras,
         }
 
     def get_current_model(self) -> dict:
         """Return current model info."""
         path = self.config.model.path
-        name = "hrnet" if path.endswith(".onnx") else "tracknet"
+        path_name = Path(path).name.lower()
+        if self.config.model.detector_type == "tracknet" or "tracknet" in path_name:
+            name = "tracknet"
+        elif "hrnet" in path_name:
+            name = "hrnet"
+        else:
+            name = self.config.model.detector_type or "auto"
         return {
             "model": name,
             "path": path,
             "frames_in": self.config.model.frames_in,
             "frames_out": self.config.model.frames_out,
+            "detector_type": self.config.model.detector_type,
         }
 
     # ------------------------------------------------------------------
