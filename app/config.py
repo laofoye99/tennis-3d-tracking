@@ -62,7 +62,14 @@ class PlayerDetectionConfig(BaseModel):
     model_path: str = "model_weight/yolo26x-pose.pt"
     device: str = "cuda"
     conf: float = 0.4
+    imgsz: int = 960
+    use_tracking: bool = False
     run_every_n_frames: int = 1  # ~6 fps at 30 fps source
+    yolo_model_path: str = "yolo11n.pt"
+    yolo_conf: float = 0.15
+    yolo_imgsz: int = 960
+    yolo_use_tracking: bool = True
+    yolo_run_every_n_frames: int = 2
 
 
 class ExportConfig(BaseModel):
@@ -97,9 +104,9 @@ class HitBounceRefinerConfig(BaseModel):
     enabled: bool = True
     show_hits_on_minimap: bool = True
     lookback_frames: int = 50
-    release_delay_frames: int = 50
-    hit_suppression_frames: int = 3
-    hit_angle_thresh: float = 45.0
+    release_delay_frames: int = 12
+    hit_suppression_frames: int = 5
+    hit_angle_thresh: float = 110.0
     top_hit_dist_px: float = 50.0
     bottom_hit_dist_px_net: float = 100.0
     bottom_hit_dist_px_base: float = 250.0

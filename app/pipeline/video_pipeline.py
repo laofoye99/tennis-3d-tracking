@@ -357,9 +357,11 @@ def run_video_pipeline(
                         cv2.circle(preview, (draw_x, draw_y), 14, (0, 255, 0), 2)
                         cv2.circle(preview, (draw_x, draw_y), 4, (0, 255, 0), -1)
                     _, jpeg = cv2.imencode(".jpg", preview, [cv2.IMWRITE_JPEG_QUALITY, 75])
-                    while not frame_queue.empty():
+                    while True:
                         try:
                             frame_queue.get_nowait()
+                        except queue.Empty:
+                            break
                         except Exception:
                             break
                     frame_queue.put_nowait(jpeg.tobytes())

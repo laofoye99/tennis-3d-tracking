@@ -52,6 +52,12 @@ class PipelineStatus(BaseModel):
     inference_ready: bool = True
     inference_error: Optional[str] = None
     detector_stats: Optional[dict] = None
+    preview_fps: float = 0.0
+    preview_frame_id: Optional[int] = None
+    latest_preview_seq: Optional[int] = None
+    latest_preview_frame_id: Optional[int] = None
+    latest_preview_capture_ts: Optional[float] = None
+    latest_preview_age_ms: Optional[float] = None
 
 
 class SystemStatus(BaseModel):

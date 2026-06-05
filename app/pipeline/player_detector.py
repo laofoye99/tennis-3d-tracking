@@ -37,6 +37,8 @@ class PlayerPoseDetector:
         model_path: str,
         device: str = "cuda",
         conf: float = 0.4,
+        imgsz: int = 960,
+        use_tracking: bool = False,
         run_every_n: int = 5,
     ):
         from ultralytics import YOLO
@@ -45,11 +47,18 @@ class PlayerPoseDetector:
         self._model = YOLO(model_path)
         self._model.to(device)
         self._conf = conf
+        self._imgsz = int(imgsz or 960)
+        self._use_tracking = bool(use_tracking)
         self._run_every_n = run_every_n
         self._call_count = 0
         self._last_results: list[dict] = []
+        self.last_inference_ran = False
         logger.info(
-            "PlayerPoseDetector ready (conf=%.2f, run_every_n=%d)", conf, run_every_n
+            "PlayerPoseDetector ready (conf=%.2f, imgsz=%d, tracking=%s, run_every_n=%d)",
+            conf,
+            self._imgsz,
+            self._use_tracking,
+            run_every_n,
         )
 
     def detect(self, frame: np.ndarray) -> list[dict]:
@@ -66,16 +75,31 @@ class PlayerPoseDetector:
                 keypoints – list of 17 × [px, py, conf]
         """
         self._call_count += 1
-        if self._call_count % self._run_every_n != 1:
+        if (self._call_count - 1) % self._run_every_n != 0:
+            self.last_inference_ran = False
             return self._last_results
+        self.last_inference_ran = True
 
-        results = self._model.predict(
-            frame,
-            classes=[0],          # person only
-            conf=self._conf,
-            verbose=False,
-            device=self._model.device,
-        )
+        infer_kwargs = {
+            "classes": [0],          # person only
+            "conf": self._conf,
+            "imgsz": self._imgsz,
+            "verbose": False,
+            "device": self._model.device,
+        }
+        if self._use_tracking:
+            try:
+                results = self._model.track(
+                    frame,
+                    persist=True,
+                    tracker="bytetrack.yaml",
+                    **infer_kwargs,
+                )
+            except Exception:
+                logger.debug("Player tracking failed; falling back to predict", exc_info=True)
+                results = self._model.predict(frame, **infer_kwargs)
+        else:
+            results = self._model.predict(frame, **infer_kwargs)
 
         detections: list[dict] = []
         if not results:
@@ -89,6 +113,11 @@ class PlayerPoseDetector:
 
         boxes = res.boxes.xyxy.cpu().numpy()       # (N, 4)
         confs = res.boxes.conf.cpu().numpy()       # (N,)
+        track_ids = (
+            res.boxes.id.int().cpu().numpy().tolist()
+            if getattr(res.boxes, "id", None) is not None
+            else [None] * len(boxes)
+        )
         kps_arr = (
             res.keypoints.data.cpu().numpy()       # (N, 17, 3)  [x, y, conf]
             if res.keypoints is not None
@@ -125,6 +154,7 @@ class PlayerPoseDetector:
                 "conf": det_conf,
                 "foot_px": foot_px,
                 "keypoints": kps,
+                "track_id": int(track_ids[i]) if track_ids[i] is not None else None,
             })
 
         self._last_results = detections

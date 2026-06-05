@@ -54,6 +54,20 @@ async def system_status():
     return status.model_dump()
 
 
+@router.get("/api/dashboard/status")
+async def dashboard_status():
+    """Compact status payload for the live dashboard render loop."""
+    orch = _get_orch()
+    return orch.get_dashboard_status()
+
+
+@router.get("/api/dashboard/live")
+async def dashboard_live():
+    """Lightweight live event payload for minimap and video overlays."""
+    orch = _get_orch()
+    return orch.get_dashboard_live_payload()
+
+
 # ---- Ball 3D ----
 
 @router.get("/api/ball3d")
@@ -86,7 +100,7 @@ async def ball_3d_stream():
 # ---- Live Analytics ----
 
 @router.get("/api/analytics/live")
-async def live_analytics():
+def live_analytics():
     """Get current live bounce detection and rally tracking state."""
     orch = _get_orch()
     return orch.get_live_analytics()
@@ -665,28 +679,62 @@ async def camera_mjpeg_stream(name: str, delay: float = 0):
     orch = _get_orch()
     from collections import deque
     import time as _time
+    delay = max(0.0, float(delay or 0.0))
 
-    async def frame_generator():
+    def frame_generator():
         _BOUNDARY = b"--frame\r\nContent-Type: image/jpeg\r\n\r\n"
-        buf: deque = deque()
+        heartbeat_s = 5.0
+        delay_buffer_len = max(30, min(900, int(delay * 30) + 60))
+        buf: deque = deque(maxlen=delay_buffer_len)
+        last_seq = None
+        last_yield_mono = 0.0
 
-        while True:
-            jpeg = orch.get_latest_frame(name)
-            if jpeg is not None:
-                now = _time.time()
+        try:
+            while True:
+                info = orch.wait_for_latest_frame(
+                    name,
+                    after_seq=last_seq,
+                    timeout=heartbeat_s,
+                )
+                now_mono = _time.monotonic()
+
+                if info is None:
+                    # Keep long-lived browser connections alive without pretending
+                    # a new preview frame arrived.
+                    if last_yield_mono and now_mono - last_yield_mono >= heartbeat_s:
+                        heartbeat = orch.get_latest_frame_info(name)
+                        if heartbeat is not None and heartbeat.get("jpeg") is not None:
+                            yield _BOUNDARY + heartbeat["jpeg"] + b"\r\n"
+                            last_yield_mono = now_mono
+                    continue
+
+                last_seq = info.get("seq")
+                jpeg = info.get("jpeg")
+                if jpeg is None:
+                    continue
+
                 if delay > 0:
-                    buf.append((now, jpeg))
-                    # Emit oldest frame that's at least `delay` seconds old
-                    while buf and now - buf[0][0] >= delay:
-                        _, old_jpeg = buf.popleft()
-                        yield _BOUNDARY + old_jpeg + b"\r\n"
+                    buf.append((now_mono, info))
+                    while buf and now_mono - buf[0][0] >= delay:
+                        _, old_info = buf.popleft()
+                        old_jpeg = old_info.get("jpeg")
+                        if old_jpeg is not None:
+                            yield _BOUNDARY + old_jpeg + b"\r\n"
+                            last_yield_mono = now_mono
                 else:
                     yield _BOUNDARY + jpeg + b"\r\n"
-            await asyncio.sleep(1 / 15)
+                    last_yield_mono = now_mono
+        except (GeneratorExit, BrokenPipeError, ConnectionResetError):
+            return
 
     return StreamingResponse(
         frame_generator(),
         media_type="multipart/x-mixed-replace; boundary=frame",
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
     )
 
 

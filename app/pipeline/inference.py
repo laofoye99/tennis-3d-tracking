@@ -624,7 +624,7 @@ class YoloRoadmapDetector:
         conf: float = 0.25,
         imgsz: int = 960,
         move_threshold: float = 5.0,
-        static_frame_limit: int = 10,
+        static_frame_limit: int = 7,
         static_zone_radius: float = 28.0,
         static_zone_ttl_frames: int = 150,
         static_zone_max: int = 8,
@@ -632,6 +632,7 @@ class YoloRoadmapDetector:
         static_release_displacement: float = 24.0,
         static_release_frames: int = 2,
         static_starvation_frames: int = 90,
+        use_yolo_track: bool = False,
         **_kwargs,
     ):
         from ultralytics import YOLO
@@ -650,6 +651,7 @@ class YoloRoadmapDetector:
         self.static_release_displacement = static_release_displacement
         self.static_release_frames = static_release_frames
         self.static_starvation_frames = static_starvation_frames
+        self.use_yolo_track = use_yolo_track
         self.device = self._resolve_device(device)
 
         self.model = YOLO(model_path)
@@ -700,7 +702,7 @@ class YoloRoadmapDetector:
         outputs: list[list[dict]] = []
         for frame in frames:
             self._frame_counter += 1
-            if self._track_available:
+            if self.use_yolo_track and self._track_available:
                 try:
                     results = self.model.track(
                         frame,
@@ -755,6 +757,7 @@ class YoloRoadmapDetector:
         )
 
         blobs: list[dict] = []
+        raw_blobs: list[dict] = []
         raw_count = 0
         claimed_pseudo_tracks: set[int | str] = set()
         for box, conf, cls_id, track_id in zip(xywh, confs, classes, track_ids):
@@ -796,8 +799,22 @@ class YoloRoadmapDetector:
             }
             if keep:
                 blobs.append(blob)
+            raw_blobs.append({
+                **blob,
+                "static_blocked": not keep,
+            })
 
         blobs.sort(key=lambda b: b["yolo_conf"], reverse=True)
+        raw_blobs.sort(key=lambda b: b["yolo_conf"], reverse=True)
+        if blobs:
+            blobs[0]["raw_candidates"] = raw_blobs
+        elif raw_blobs:
+            blobs.append({
+                **raw_blobs[0],
+                "raw_candidates": raw_blobs,
+                "event_only_raw_candidates": True,
+                "static_status": "event_only_raw",
+            })
         self._expire_static_zones()
         self._update_static_starvation(raw_count=raw_count, kept_count=len(blobs))
         self._static_stats["raw_detections"] += raw_count
@@ -1064,7 +1081,7 @@ def create_detector(
             device=device,
             conf=0.15,
             imgsz=960,
-            static_frame_limit=20,
+            static_frame_limit=7,
         )
     # Auto-select by file extension
     if model_path.endswith(".pt"):

@@ -63,9 +63,9 @@ hit_bounce_refiner:
   enabled: true
   show_hits_on_minimap: true
   lookback_frames: 50
-  release_delay_frames: 50
-  hit_suppression_frames: 3
-  hit_angle_thresh: 45.0
+  release_delay_frames: 12
+  hit_suppression_frames: 5
+  hit_angle_thresh: 110.0
   top_hit_dist_px: 50.0
   bottom_hit_dist_px_net: 100.0
   bottom_hit_dist_px_base: 250.0

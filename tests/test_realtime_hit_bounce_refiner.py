@@ -39,7 +39,16 @@ def _point(frame, x=0.0, y=0.0, z=0.5):
     }
 
 
-def _bounce(frame, x=0.0, y=0.0):
+def _bounce(
+    frame,
+    x=0.0,
+    y=0.0,
+    *,
+    angle=0.0,
+    delta_v=0.0,
+    confidence=1.0,
+    y_reversal=False,
+):
     return {
         "x": x,
         "y": y,
@@ -48,6 +57,10 @@ def _bounce(frame, x=0.0, y=0.0):
         "capture_ts": frame / 25.0,
         "frame_index": frame,
         "in_court": True,
+        "angle": angle,
+        "delta_v": delta_v,
+        "confidence": confidence,
+        "y_reversal": y_reversal,
     }
 
 
@@ -124,6 +137,28 @@ def test_bounce_dedupe_happens_after_hit_stage():
 
     out = refiner.update(_point(2), raw_bounce=_bounce(2, x=0.4, y=0.2), players=[])
     assert out["new_final_bounces"] == []
+    assert out["stats"]["raw_bounce_candidate_count"] == 2
+    assert out["stats"]["deduped_bounces_after_hit"] == 1
+    assert out["stats"]["final_bounce_count"] == 1
+
+
+def test_bounce_cleaning_keeps_strongest_pending_signal():
+    refiner = HitBounceRefiner(_cfg(release_delay_frames=2))
+
+    refiner.update(
+        _point(1),
+        raw_bounce=_bounce(1, x=0.0, y=0.0, angle=20.0, delta_v=4.0),
+        players=[],
+    )
+    refiner.update(
+        _point(2),
+        raw_bounce=_bounce(2, x=0.2, y=0.2, angle=70.0, delta_v=30.0, y_reversal=True),
+        players=[],
+    )
+    out = refiner.update(_point(4), players=[])
+
+    assert [b["frame_index"] for b in out["new_final_bounces"]] == [2]
+    assert out["new_final_bounces"][0]["bounce_signal_score"] > 0
     assert out["stats"]["raw_bounce_candidate_count"] == 2
     assert out["stats"]["deduped_bounces_after_hit"] == 1
     assert out["stats"]["final_bounce_count"] == 1

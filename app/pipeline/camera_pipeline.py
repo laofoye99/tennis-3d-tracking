@@ -21,6 +21,8 @@ YOLO_META_KEYS = (
     "static_count",
     "static_status",
     "static_zone_id",
+    "raw_candidates",
+    "event_only_raw_candidates",
     "source",
 )
 
@@ -44,6 +46,8 @@ def run_pipeline(
     player_model_path: str = "",
     player_device: str = "cuda",
     player_conf: float = 0.4,
+    player_imgsz: int = 960,
+    player_use_tracking: bool = False,
     player_run_every_n: int = 5,
     preview_stride: int = 2,
 ) -> None:
@@ -65,6 +69,9 @@ def run_pipeline(
     status_dict["inference_error"] = ""
 
     stream: CameraStream | None = None
+    _jpeg_q = None
+    _jpeg_thread = None
+    _preview_thread = None
     try:
         # Initialize components
         stream = CameraStream(rtsp_url, name)
@@ -105,6 +112,8 @@ def run_pipeline(
                     model_path=player_model_path,
                     device=player_device,
                     conf=player_conf,
+                    imgsz=player_imgsz,
+                    use_tracking=player_use_tracking,
                     run_every_n=player_run_every_n,
                 )
             except Exception as e:
@@ -121,21 +130,53 @@ def run_pipeline(
         fps_counter = 0
         fps_time = time.time()
 
-        # JPEG encoding in background thread (don't block inference)
+        # JPEG encoding and preview publishing run outside the inference loop.
+        # YOLO can take longer than a frame budget; tying preview publication to
+        # detector throughput makes the dashboard look frozen even while RTSP is
+        # still healthy.
         import threading, queue as _queue
-        _jpeg_q: _queue.Queue = _queue.Queue(maxsize=2)
+        _jpeg_q: _queue.Queue = _queue.Queue(maxsize=4)
+        _is_yolo_preview = (
+            str(detector_type or "").lower() in {"yolo", "yolo_roadmap"}
+            or "yolo_roadmap" in str(model_path or "").replace("\\", "/").lower()
+        )
+        _preview_max_width = 640 if _is_yolo_preview else 720
+        _preview_jpeg_quality = 55 if _is_yolo_preview else 60
+        _preview_last_frame_id = -1
+        _preview_counter = 0
+        _preview_fps_time = time.time()
 
         def _push_latest_frame_payload(payload: dict) -> None:
             """Keep only the freshest preview/recording payload in frame_queue."""
             try:
-                while not frame_queue.empty():
+                while True:
                     try:
                         frame_queue.get_nowait()
+                    except _queue.Empty:
+                        break
                     except Exception:
                         break
                 frame_queue.put_nowait(payload)
             except Exception:
                 pass
+
+        def _put_latest_jpeg_job(
+            raw_frame,
+            is_rec: bool,
+            payload_frame_id: int,
+            payload_capture_ts: float,
+        ) -> None:
+            try:
+                _jpeg_q.put_nowait((raw_frame, is_rec, payload_frame_id, payload_capture_ts))
+            except _queue.Full:
+                try:
+                    _jpeg_q.get_nowait()
+                except _queue.Empty:
+                    pass
+                try:
+                    _jpeg_q.put_nowait((raw_frame, is_rec, payload_frame_id, payload_capture_ts))
+                except _queue.Full:
+                    pass
 
         def _jpeg_worker():
             while not stop_event.is_set():
@@ -148,8 +189,20 @@ def run_pipeline(
                 raw_frame, is_rec, payload_frame_id, payload_capture_ts = item
                 try:
                     h, w = raw_frame.shape[:2]
-                    preview = cv2.resize(raw_frame, (960, int(h * 960 / w))) if w > 960 else raw_frame
-                    _, preview_jpeg = cv2.imencode(".jpg", preview, [cv2.IMWRITE_JPEG_QUALITY, 75])
+                    preview = (
+                        cv2.resize(
+                            raw_frame,
+                            (_preview_max_width, int(h * _preview_max_width / w)),
+                            interpolation=cv2.INTER_AREA,
+                        )
+                        if w > _preview_max_width
+                        else raw_frame
+                    )
+                    _, preview_jpeg = cv2.imencode(
+                        ".jpg",
+                        preview,
+                        [cv2.IMWRITE_JPEG_QUALITY, _preview_jpeg_quality],
+                    )
                     if is_rec:
                         _, recording_jpeg = cv2.imencode(".jpg", raw_frame, [cv2.IMWRITE_JPEG_QUALITY, 92])
                         _push_latest_frame_payload({
@@ -168,9 +221,38 @@ def run_pipeline(
                 except Exception:
                     pass
 
+        def _preview_feeder():
+            nonlocal _preview_last_frame_id, _preview_counter, _preview_fps_time
+            while not stop_event.is_set():
+                preview_frame, preview_frame_id, preview_ts = stream.read()
+                if preview_frame is None or preview_frame_id == _preview_last_frame_id:
+                    time.sleep(0.002)
+                    continue
+                _preview_last_frame_id = preview_frame_id
+
+                is_recording = bool(status_dict.get("recording_enabled", False))
+                if not is_recording and preview_stride > 1 and preview_frame_id % preview_stride != 0:
+                    continue
+
+                _put_latest_jpeg_job(
+                    preview_frame.copy(),
+                    is_recording,
+                    preview_frame_id,
+                    preview_ts or time.time(),
+                )
+                _preview_counter += 1
+                now_preview = time.time()
+                if now_preview - _preview_fps_time >= 1.0:
+                    status_dict["preview_fps"] = _preview_counter / (now_preview - _preview_fps_time)
+                    status_dict["preview_frame_id"] = preview_frame_id
+                    _preview_counter = 0
+                    _preview_fps_time = now_preview
+
         if frame_queue is not None:
             _jpeg_thread = threading.Thread(target=_jpeg_worker, daemon=True)
             _jpeg_thread.start()
+            _preview_thread = threading.Thread(target=_preview_feeder, daemon=True)
+            _preview_thread.start()
 
         while not stop_event.is_set():
             frame, frame_id, ts = stream.read()
@@ -181,20 +263,11 @@ def run_pipeline(
             capture_ts = time.time()  # wall-clock at frame arrival
             raw_frame = frame.copy()
 
-            # Send clean frame to JPEG thread (before OSD mask)
-            if frame_queue is not None:
-                is_recording = status_dict.get("recording_enabled", False)
-                if is_recording or frame_id % preview_stride == 0:
-                    try:
-                        _jpeg_q.put_nowait((raw_frame.copy(), is_recording, frame_id, capture_ts))
-                    except _queue.Full:
-                        pass
-
             # Player pose detection (clean frame, before OSD mask)
             if player_detector is not None:
                 try:
                     player_dets = player_detector.detect(raw_frame)
-                    if player_dets:
+                    if player_dets and getattr(player_detector, "last_inference_ran", True):
                         player_msg = {
                             "type": "player_pose",
                             "camera_name": name,
@@ -309,7 +382,7 @@ def run_pipeline(
                         detection["yolo_conf"] = top["yolo_conf"]
                     if top.get("source") is not None:
                         detection["source"] = top["source"]
-                    for key in ("static_count", "static_status", "static_zone_id"):
+                    for key in ("static_count", "static_status", "static_zone_id", "raw_candidates", "event_only_raw_candidates"):
                         if top.get(key) is not None:
                             detection[key] = top[key]
                     try:
@@ -361,7 +434,7 @@ def run_pipeline(
                         detection["yolo_conf"] = top["yolo_conf"]
                     if top.get("source") is not None:
                         detection["source"] = top["source"]
-                    for key in ("static_count", "static_status", "static_zone_id"):
+                    for key in ("static_count", "static_status", "static_zone_id", "raw_candidates", "event_only_raw_candidates"):
                         if top.get(key) is not None:
                             detection[key] = top[key]
                     try:
@@ -387,6 +460,22 @@ def run_pipeline(
         status_dict["state"] = "error"
         status_dict["error_msg"] = str(e)
     finally:
+        stop_event.set()
+        if _jpeg_q is not None:
+            try:
+                _jpeg_q.put_nowait(None)
+            except Exception:
+                pass
+        if _preview_thread is not None:
+            try:
+                _preview_thread.join(timeout=2.0)
+            except Exception:
+                pass
+        if _jpeg_thread is not None:
+            try:
+                _jpeg_thread.join(timeout=2.0)
+            except Exception:
+                pass
         if stream is not None:
             stream.stop()
         status_dict["state"] = status_dict.get("state", "stopped")

@@ -313,8 +313,8 @@ class HitBounceRefiner:
             frame for frame in sorted(self._pending_bounces)
             if frame <= latest_frame - self.release_delay_frames
         ]
-        final_bounces = []
         suppressed = []
+        candidates = []
         for frame in ready:
             bd = self._pending_bounces.pop(frame)
             if frame in self._released_bounce_frames:
@@ -323,13 +323,20 @@ class HitBounceRefiner:
                 suppressed.append(bd)
                 self._stats["suppressed_bounces_by_hit"] += 1
                 continue
+            candidates.append(bd)
+
+        selected, deduped = self._select_strongest_bounces(candidates)
+        self._stats["deduped_bounces_after_hit"] += len(deduped)
+
+        final_bounces = []
+        for bd in selected:
             if self._is_duplicate_final_bounce(bd):
                 self._stats["deduped_bounces_after_hit"] += 1
                 continue
             bd = dict(bd)
             bd["event_type"] = "bounce"
             bd["refiner_source"] = "hit_first_final"
-            self._released_bounce_frames.add(frame)
+            self._released_bounce_frames.add(self._event_frame(bd))
             self._final_bounces.append(bd)
             if len(self._final_bounces) > 500:
                 self._final_bounces = self._final_bounces[-500:]
@@ -360,6 +367,63 @@ class HitBounceRefiner:
             if math.hypot(bx - px, by - py) <= self.clean_space_meters:
                 return True
         return False
+
+    def _select_strongest_bounces(self, bounces: list[dict]) -> tuple[list[dict], list[dict]]:
+        clusters: list[list[dict]] = []
+        for bounce in sorted(bounces, key=self._event_frame):
+            enriched = dict(bounce)
+            enriched["bounce_signal_score"] = self._bounce_signal_score(enriched)
+            target = None
+            for cluster in clusters:
+                if any(self._same_bounce_window(enriched, member) for member in cluster):
+                    target = cluster
+                    break
+            if target is None:
+                clusters.append([enriched])
+            else:
+                target.append(enriched)
+
+        selected = []
+        dropped = []
+        for cluster in clusters:
+            best = max(
+                cluster,
+                key=lambda e: (
+                    self._safe_float(e.get("bounce_signal_score")) or 0.0,
+                    self._safe_float(e.get("delta_v")) or 0.0,
+                    self._safe_float(e.get("angle")) or 0.0,
+                    self._safe_float(e.get("confidence")) or 0.0,
+                    -self._event_frame(e),
+                ),
+            )
+            selected.append({**best, "dedupe_cluster_size": len(cluster)})
+            for bounce in cluster:
+                if bounce is best:
+                    continue
+                dropped.append({
+                    **bounce,
+                    "deduped_by_frame": self._event_frame(best),
+                    "dedupe_reason": "weaker_bounce_signal_same_window",
+                })
+        return selected, dropped
+
+    def _same_bounce_window(self, a: dict, b: dict) -> bool:
+        if abs(self._event_frame(a) - self._event_frame(b)) > self.clean_time_frames:
+            return False
+        ax = self._safe_float(a.get("x"))
+        ay = self._safe_float(a.get("y"))
+        bx = self._safe_float(b.get("x"))
+        by = self._safe_float(b.get("y"))
+        if None in (ax, ay, bx, by):
+            return False
+        return math.hypot(ax - bx, ay - by) <= self.clean_space_meters
+
+    def _bounce_signal_score(self, bounce: dict) -> float:
+        angle = max(0.0, self._safe_float(bounce.get("angle")) or 0.0)
+        delta_v = max(0.0, self._safe_float(bounce.get("delta_v")) or 0.0)
+        confidence = max(0.0, self._safe_float(bounce.get("confidence")) or 0.0)
+        y_bonus = 25.0 if bounce.get("y_reversal") else 0.0
+        return round(angle + delta_v * 2.0 + confidence * 10.0 + y_bonus, 4)
 
     def _store_hit(self, hit: dict | None) -> dict | None:
         if hit is None:

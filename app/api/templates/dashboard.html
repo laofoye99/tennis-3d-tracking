@@ -107,6 +107,9 @@ body{font-family:'Lato',sans-serif;background:var(--bg);color:var(--text);height
 
 .map3d-panel{background:var(--card-bg);border-radius:6px;overflow:hidden;position:relative;height:100%;min-height:0}
 .map3d-panel .panel-title{font-size:13px;font-weight:600;padding:6px 14px}
+.court3d-placeholder{height:calc(100% - 30px);display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.22);border-radius:4px}
+.court3d-load-btn{height:30px;border:1px solid #555;background:#202020;color:#ccc;border-radius:4px;cursor:pointer;font-size:12px;padding:0 14px}
+.court3d-load-btn:hover{border-color:#777;color:#fff}
 .map3d-canvas{width:100%;height:calc(100% - 30px);display:flex;align-items:center;justify-content:center}
 .map3d-canvas canvas{height:100%;width:auto;max-width:100%;display:block}
 
@@ -680,8 +683,12 @@ body{font-family:'Lato',sans-serif;background:var(--bg);color:var(--text);height
       <!-- Right bottom: 3D Court (iframe) -->
       <div class="map3d-panel">
         <div class="panel-title">3D Court</div>
-        <iframe id="court3d-iframe" src="https://tennis.motionrivalry.com/tennisAi/"
-                style="width:100%;height:calc(100% - 30px);border:none;border-radius:4px"></iframe>
+        <div id="court3d-placeholder" class="court3d-placeholder">
+          <button class="court3d-load-btn" onclick="loadCourt3DFrame()">Load 3D</button>
+        </div>
+        <iframe id="court3d-iframe" src="about:blank" data-src="https://tennis.motionrivalry.com/tennisAi/"
+                loading="lazy" referrerpolicy="no-referrer"
+                style="display:none;width:100%;height:calc(100% - 30px);border:none;border-radius:4px"></iframe>
       </div>
     </div>
     </div><!-- /page-dashboard -->
@@ -1137,9 +1144,11 @@ body{font-family:'Lato',sans-serif;background:var(--bg);color:var(--text);height
 // Dashboard JS (original)
 // ============================================================
 const COURT_W=8.23,COURT_L=23.78,NET_Y=0.0,SRV_N=-6.4,SRV_F=6.4,CX=0.0,HL=11.89,HW=4.115;
-const MAX_DASHBOARD_BOUNCES=500;
+const MAX_DASHBOARD_BOUNCES=120;
+const MAX_DASHBOARD_HITS=48;
 let _minimapLatestBounces=[];
 let _minimapLatestHits=[];
+let _minimapLatestSpeeds=[];
 let _minimapClearCutoff={sequence:-Infinity,timestamp:-Infinity,frame:-Infinity};
 const _storedMinimapRotate180=localStorage.getItem('tennis_minimap_rotate180');
 let _minimapRotate180=_storedMinimapRotate180===null?true:_storedMinimapRotate180==='1';
@@ -1219,6 +1228,8 @@ function _renderSingle(cam){
     <canvas class="ball-overlay" data-cam="${cam}"></canvas>
     <span class="vid-label">${cam}</span>
   </div>`;
+  _ballOverlayDirty=true;
+  _ballOverlayActiveUntil=Math.max(_ballOverlayActiveUntil,Date.now()+250);
   document.getElementById('active-cam').textContent=cam;
 }
 
@@ -1236,13 +1247,15 @@ function _renderGrid(cams){
       <canvas class="ball-overlay" data-cam="${cam}"></canvas>
       <span class="vid-label">${cam}</span>
     </div>`).join('');
+  _ballOverlayDirty=true;
+  _ballOverlayActiveUntil=Math.max(_ballOverlayActiveUntil,Date.now()+250);
   document.getElementById('active-cam').textContent=cams.join(' / ');
 }
 
 // ---- Video Stream Delay ----
 // Server-side delay via ?delay=N parameter on MJPEG stream URL.
 // Matches pipeline latency so bounce events appear in sync with video.
-const _VIDEO_DELAY_S = 1;
+const _VIDEO_DELAY_S = 0;
 
 // ---- Ball Overlay on Camera Feed ----
 // Draws tracked ball position on the MJPEG stream overlay canvas.
@@ -1255,9 +1268,45 @@ const _BALL_HISTORY_MAX_MS=5000;
 const _BALL_STALE_S=Math.max(2.5,_VIDEO_DELAY_S+1.5);
 const _TRAIL_TTL_MS=1300;
 const _TRAIL_SAMPLE_MS=48;
-const _OVERLAY_FRAME_MS=33;
+const _OVERLAY_FRAME_MS=67;
+const _THREE_RENDER_FRAME_MS=33;
+const _THREE_IDLE_RENDER_FRAME_MS=200;
+const _THREE_ACTIVE_RENDER_MS=900;
+const COURT3D_IFRAME_URL='https://tennis.motionrivalry.com/tennisAi/';
 let _ballOverlayLastPaint=0;
 const _ballOverlayHistory={}; // cam -> [{receivedAt, det}]
+let _ballOverlayDirty=true;
+let _ballOverlayActiveUntil=0;
+let _ballOverlayNeedsClear=false;
+let _court3dFrameLoaded=false;
+
+function loadCourt3DFrame(){
+  const iframe=document.getElementById('court3d-iframe');
+  const placeholder=document.getElementById('court3d-placeholder');
+  if(!iframe) return;
+  const src=iframe.dataset.src||COURT3D_IFRAME_URL;
+  if(!_court3dFrameLoaded||iframe.getAttribute('src')==='about:blank'){
+    iframe.setAttribute('src',src);
+    _court3dFrameLoaded=true;
+  }
+  iframe.style.display='block';
+  if(placeholder) placeholder.style.display='none';
+}
+
+function unloadCourt3DFrame(){
+  const iframe=document.getElementById('court3d-iframe');
+  const placeholder=document.getElementById('court3d-placeholder');
+  if(!iframe) return;
+  iframe.setAttribute('src','about:blank');
+  iframe.style.display='none';
+  _court3dFrameLoaded=false;
+  if(placeholder) placeholder.style.display='flex';
+}
+
+function setCourt3DFrameEnabled(enabled){
+  if(enabled) loadCourt3DFrame();
+  else unloadCourt3DFrame();
+}
 
 function _isFinitePoint(x,y){
   return Number.isFinite(Number(x))&&Number.isFinite(Number(y));
@@ -1283,6 +1332,7 @@ function _normalizeOverlayDet(cam,det){
 
 function rememberBallOverlaySnapshot(latestDets){
   const now=Date.now();
+  let changed=false;
   for(const [cam,det] of Object.entries(latestDets||{})){
     const clean=_normalizeOverlayDet(cam,det);
     if(!clean) continue;
@@ -1292,8 +1342,15 @@ function rememberBallOverlaySnapshot(latestDets){
       last.det.frame_index===clean.frame_index&&
       Math.abs(last.det.pixel_x-clean.pixel_x)<0.01&&
       Math.abs(last.det.pixel_y-clean.pixel_y)<0.01;
-    if(!same) hist.push({receivedAt:now,det:clean});
+    if(!same){
+      hist.push({receivedAt:now,det:clean});
+      changed=true;
+    }
     while(hist.length&&now-hist[0].receivedAt>_BALL_HISTORY_MAX_MS) hist.shift();
+  }
+  if(changed){
+    _ballOverlayDirty=true;
+    _ballOverlayActiveUntil=Math.max(_ballOverlayActiveUntil,now+_TRAIL_TTL_MS+180);
   }
 }
 
@@ -1431,6 +1488,7 @@ function _drawBallMarker(ctx,bx,by){
 
 function drawBallOverlays(detections){
   const now=Date.now();
+  let drewAny=false;
   document.querySelectorAll('canvas.ball-overlay').forEach(cvs=>{
     const cam=cvs.dataset.cam;
     const cell=cvs.parentElement;
@@ -1470,6 +1528,7 @@ function drawBallOverlays(detections){
       if(_ballTrail[cam]){
         _ballTrail[cam]=_ballTrail[cam].filter(p=>now-p.t<_TRAIL_TTL_MS);
         _drawCometTrail(ctx,_ballTrail[cam],now);
+        if(_ballTrail[cam].length) drewAny=true;
       }
       return;
     }
@@ -1487,16 +1546,47 @@ function drawBallOverlays(detections){
 
     _drawCometTrail(ctx,_ballTrail[cam],now);
     _drawBallMarker(ctx,render.x,render.y);
+    drewAny=true;
+  });
+  return drewAny;
+}
+
+function _clearBallOverlayCanvases(){
+  document.querySelectorAll('canvas.ball-overlay').forEach(cvs=>{
+    const ctx=cvs.getContext('2d');
+    if(ctx) ctx.clearRect(0,0,cvs.width,cvs.height);
   });
 }
 
+function _hasActiveBallOverlayTrail(now){
+  return Object.values(_ballTrail).some(trail=>
+    (trail||[]).some(p=>now-p.t<_TRAIL_TTL_MS)
+  );
+}
+
 function _ballOverlayLoop(ts){
+  requestAnimationFrame(_ballOverlayLoop);
+  if(document.hidden) return;
+  const now=Date.now();
+  const shouldDraw=_ballOverlayDirty||now<_ballOverlayActiveUntil||_hasActiveBallOverlayTrail(now);
+  if(!shouldDraw){
+    if(_ballOverlayNeedsClear){
+      _clearBallOverlayCanvases();
+      _ballOverlayNeedsClear=false;
+    }
+    return;
+  }
   if(!ts||ts-_ballOverlayLastPaint>=_OVERLAY_FRAME_MS){
     _ballOverlayLastPaint=ts||performance.now();
-    drawBallOverlays(getDelayedBallOverlayDetections());
+    _ballOverlayNeedsClear=drawBallOverlays(getDelayedBallOverlayDetections());
+    _ballOverlayDirty=false;
   }
-  requestAnimationFrame(_ballOverlayLoop);
 }
+
+window.addEventListener('resize',()=>{
+  _ballOverlayDirty=true;
+  _ballOverlayActiveUntil=Math.max(_ballOverlayActiveUntil,Date.now()+250);
+});
 
 
 // ---- GT Overlay ----
@@ -1600,21 +1690,160 @@ function clearMinimapEvents(){
     timestamp:timestamps.length?Math.max(...timestamps):_minimapClearCutoff.timestamp,
     frame:frames.length?Math.max(...frames):_minimapClearCutoff.frame,
   };
-  drawCourt(document.getElementById('minimap'),[],[]);
+  _minimapLatestSpeeds=[];
+  _minimapLastDrawKey='';
+  redrawMinimapIfChanged(true);
 }
 
 function flipMinimap(){
   _minimapRotate180=!_minimapRotate180;
   localStorage.setItem('tennis_minimap_rotate180',_minimapRotate180?'1':'0');
-  drawCourt(
-    document.getElementById('minimap'),
-    filterMinimapEvents(_minimapLatestBounces),
-    filterMinimapEvents(_minimapLatestHits)
-  );
+  _minimapLastDrawKey='';
+  redrawMinimapIfChanged(true);
 }
 
 function drawCourt(canvas, bounces, hits){
   const ctx=canvas.getContext('2d'),W=canvas.width,H=canvas.height;
+  const speedEvents=_minimapLatestSpeeds||[];
+  const inColor='#22c55e', outColor='#ff1e00', hitColor='#ff9800';
+  ctx.clearRect(0,0,W,H);
+  ctx.fillStyle='#193d21';ctx.fillRect(0,0,W,H);
+
+  function drawHitMarker(x,y,r,color){
+    ctx.save();
+    ctx.strokeStyle=color;
+    ctx.fillStyle=color;
+    ctx.lineWidth=2.2;
+    ctx.beginPath();
+    ctx.moveTo(x,y-r);
+    ctx.lineTo(x+r,y);
+    ctx.lineTo(x,y+r);
+    ctx.lineTo(x-r,y);
+    ctx.closePath();
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(x-r*0.7,y-r*0.7);
+    ctx.lineTo(x+r*0.7,y+r*0.7);
+    ctx.moveTo(x+r*0.7,y-r*0.7);
+    ctx.lineTo(x-r*0.7,y+r*0.7);
+    ctx.stroke();
+    ctx.restore();
+  }
+  function legendCircle(x,y,color,fill=true){
+    ctx.beginPath();ctx.arc(x,y,5,0,Math.PI*2);
+    if(fill){
+      ctx.fillStyle=color;
+      ctx.fill();
+    }else{
+      ctx.strokeStyle=color;
+      ctx.lineWidth=2;
+      ctx.stroke();
+    }
+  }
+
+  ctx.fillStyle='#f4f7ef';
+  ctx.font='bold 20px Lato, sans-serif';
+  ctx.fillText('2D TRACKING MAP',14,28);
+  ctx.font='13px Lato, sans-serif';
+  legendCircle(18,62,inColor);ctx.fillStyle='#f4f7ef';ctx.fillText('IN (Bounce)',34,67);
+  legendCircle(18,88,outColor,false);ctx.fillStyle='#f4f7ef';ctx.fillText('OUT (Bounce)',34,93);
+  drawHitMarker(18,115,7,hitColor);ctx.fillStyle='#f4f7ef';ctx.fillText('HIT (Player)',34,120);
+
+  const panelH=94,panelX=10,panelY=H-panelH-10,panelW=W-20;
+  const courtTop=138,courtBottom=panelY-18;
+  const courtH=Math.max(170,courtBottom-courtTop);
+  const courtW=Math.min(W-70,courtH*(10.97/23.77));
+  const courtLeft=(W-courtW)/2;
+  const courtY=courtTop;
+  const xMin=-5.485,xMax=5.485,yMin=-11.885,yMax=11.885;
+  function mapPoint(x,y){
+    let mx=Number(x),my=Number(y);
+    if(_minimapRotate180){mx=-mx;my=-my;}
+    return {
+      x:courtLeft+((mx-xMin)/(xMax-xMin))*courtW,
+      y:courtY+((yMax-my)/(yMax-yMin))*courtH,
+    };
+  }
+  function line(x1,y1,x2,y2){
+    const a=mapPoint(x1,y1),b=mapPoint(x2,y2);
+    ctx.beginPath();ctx.moveTo(a.x,a.y);ctx.lineTo(b.x,b.y);ctx.stroke();
+  }
+  function rect(x1,y1,x2,y2,fill){
+    const a=mapPoint(x1,y1),b=mapPoint(x2,y2);
+    const l=Math.min(a.x,b.x),t=Math.min(a.y,b.y);
+    const rw=Math.abs(a.x-b.x),rh=Math.abs(a.y-b.y);
+    if(fill) ctx.fillRect(l,t,rw,rh); else ctx.strokeRect(l,t,rw,rh);
+  }
+
+  ctx.fillStyle='#9a7b54';rect(xMin,yMin,xMax,yMax,true);
+  ctx.strokeStyle='#f5f2e6';ctx.lineWidth=2;
+  rect(xMin,yMin,xMax,yMax,false);
+  rect(-4.115,yMin,4.115,yMax,false);
+  line(xMin,0,xMax,0);
+  line(-4.115,-6.4,4.115,-6.4);
+  line(-4.115,6.4,4.115,6.4);
+  line(0,-6.4,0,6.4);
+
+  if(hits&&hits.length){
+    hits.slice(-MAX_DASHBOARD_HITS).forEach((h,i,arr)=>{
+      if(h.x===undefined||h.y===undefined) return;
+      const pt=mapPoint(h.x,h.y);
+      const age=arr.length-1-i;
+      ctx.globalAlpha=age===0?0.95:age<12?0.72:0.42;
+      drawHitMarker(pt.x,pt.y,age===0?9:7,hitColor);
+      ctx.globalAlpha=1;
+    });
+  }
+  if(bounces&&bounces.length){
+    bounces.slice(-MAX_DASHBOARD_BOUNCES).forEach((b,i,arr)=>{
+      if(b.x===undefined||b.y===undefined) return;
+      const pt=mapPoint(b.x,b.y);
+      const age=arr.length-1-i;
+      const r=age===0?7:5;
+      ctx.globalAlpha=age===0?1:age<12?0.86:0.62;
+      ctx.beginPath();ctx.arc(pt.x,pt.y,r,0,Math.PI*2);
+      if(b.in_court){
+        ctx.fillStyle=inColor;
+        ctx.fill();
+      }else{
+        ctx.strokeStyle=outColor;
+        ctx.lineWidth=2.2;
+        ctx.stroke();
+      }
+      if(age===0){
+        ctx.globalAlpha=1;
+        ctx.beginPath();ctx.arc(pt.x,pt.y,r+6,0,Math.PI*2);
+        ctx.strokeStyle=b.in_court?'#bbf7d0':'#ff8a80';
+        ctx.lineWidth=2;ctx.stroke();
+      }
+      ctx.globalAlpha=1;
+    });
+  }
+
+  ctx.fillStyle='rgba(18,44,20,.92)';
+  ctx.fillRect(panelX,panelY,panelW,panelH);
+  ctx.strokeStyle='rgba(180,220,180,.45)';ctx.lineWidth=1;ctx.strokeRect(panelX,panelY,panelW,panelH);
+  ctx.beginPath();ctx.moveTo(panelX+5,panelY+34);ctx.lineTo(panelX+panelW-5,panelY+34);ctx.stroke();
+  ctx.fillStyle='#d9ffd7';ctx.font='bold 15px Lato, sans-serif';ctx.fillText('SPEED (km/h)',panelX+10,panelY+22);
+  ctx.fillStyle='rgba(220,255,220,.7)';ctx.font='10px Lato, sans-serif';ctx.fillText('Mode: Two-Line Trap',panelX+130,panelY+22);
+  const speeds={up:0,down:0};
+  speedEvents.slice(-80).forEach(ev=>{
+    const dir=String(ev.direction||ev.legacy_direction||'');
+    const val=Number(ev.speed_kmh||0);
+    if(!Number.isFinite(val)||val<=0) return;
+    if(dir==='bottom_up'||dir==='far_to_near') speeds.up=val;
+    if(dir==='top_down'||dir==='near_to_far') speeds.down=val;
+  });
+  ctx.font='bold 13px Lato, sans-serif';ctx.fillStyle='#e8e8e8';
+  ctx.fillText('UP   :',panelX+10,panelY+58);
+  ctx.fillText('DOWN :',panelX+10,panelY+82);
+  ctx.font='bold 20px Lato, sans-serif';ctx.fillStyle='#00e5ff';
+  ctx.fillText(String(Math.round(speeds.up)).padStart(3,'0')+'.0',panelX+78,panelY+60);
+  ctx.fillText(String(Math.round(speeds.down)).padStart(3,'0')+'.0',panelX+78,panelY+84);
+  ctx.font='10px Lato, sans-serif';ctx.fillStyle='rgba(220,220,220,.65)';
+  ctx.fillText('(x1.50)',panelX+142,panelY+58);
+  ctx.fillText('(x1.50)',panelX+142,panelY+82);
+  return;
   // V2 coords with padding so out-of-court bounces are visible
   const PAD_X=2.0, PAD_Y=3.0;
   const VW=2*HW+2*PAD_X, VH=2*HL+2*PAD_Y;
@@ -1844,7 +2073,12 @@ function draw3DMap(canvas,ball){
 let _3dScene, _3dCamera, _3dRenderer, _3dControls;
 let _3dBallMesh, _3dTrailLine, _3dTrailPoints=[];
 let _3dBounceMeshes=[];
+let _3dDirtyUntil=0;
 const MAX_TRAIL=50, MAX_BOUNCES_3D=50;
+
+function mark3DDirty(durationMs=_THREE_ACTIVE_RENDER_MS){
+  _3dDirtyUntil=Math.max(_3dDirtyUntil,Date.now()+durationMs);
+}
 
 function init3DCourt(){
   const container=document.getElementById('threejs-container');
@@ -1858,9 +2092,9 @@ function init3DCourt(){
   _3dCamera.position.set(0, -20, 18);
   _3dCamera.lookAt(0, 0, 0);
 
-  _3dRenderer=new THREE.WebGLRenderer({antialias:true});
+  _3dRenderer=new THREE.WebGLRenderer({antialias:false,powerPreference:'low-power'});
   _3dRenderer.setSize(container.clientWidth, container.clientHeight);
-  _3dRenderer.setPixelRatio(window.devicePixelRatio);
+  _3dRenderer.setPixelRatio(Math.min(window.devicePixelRatio||1,1.25));
   container.appendChild(_3dRenderer.domElement);
 
   // OrbitControls
@@ -1871,6 +2105,8 @@ function init3DCourt(){
     _3dControls.dampingFactor=0.1;
     _3dControls.maxPolarAngle=Math.PI/2-0.05;
     _3dControls.update();
+    _3dControls.addEventListener?.('start',()=>mark3DDirty(1600));
+    _3dControls.addEventListener?.('change',()=>mark3DDirty(900));
   }
 
   // Ambient + directional light
@@ -1964,21 +2200,31 @@ function init3DCourt(){
       _3dCamera.aspect=w/h;
       _3dCamera.updateProjectionMatrix();
       _3dRenderer.setSize(w, h);
+      mark3DDirty(1200);
     }
   });
   ro.observe(container);
 
   // Render loop
+  let lastRenderTs=0;
   function animate(){
     requestAnimationFrame(animate);
-    if(_3dControls) _3dControls.update();
+    if(document.hidden||!container.isConnected||container.clientWidth<=0||container.clientHeight<=0) return;
+    const now=performance.now();
+    const active=Date.now()<_3dDirtyUntil;
+    const frameMs=active?_THREE_RENDER_FRAME_MS:_THREE_IDLE_RENDER_FRAME_MS;
+    if(now-lastRenderTs<frameMs) return;
+    lastRenderTs=now;
+    if(active&&_3dControls) _3dControls.update();
     _3dRenderer.render(_3dScene, _3dCamera);
   }
+  mark3DDirty(1500);
   animate();
 }
 
 function update3DCourt(ball, bounces){
   if(!_3dScene) return;
+  mark3DDirty();
 
   // Update ball position
   if(ball){
@@ -2168,8 +2414,13 @@ async function toggle3DPush(el){
     const endpoint = enabling ? '/api/3d-display/enable' : '/api/3d-display/disable';
     const r = await fetch(endpoint, {method:'POST'});
     const data = await r.json();
-    if(data.enabled) el.classList.add('on');
-    else el.classList.remove('on');
+    if(data.enabled){
+      el.classList.add('on');
+      setCourt3DFrameEnabled(true);
+    }else{
+      el.classList.remove('on');
+      setCourt3DFrameEnabled(false);
+    }
   }catch(e){
     console.error('toggle3DPush failed',e);
   }
@@ -2389,9 +2640,101 @@ function _updateRecAVDuration(){
   if(txt)txt.textContent='AV '+m+':'+ss;
 }
 
+let _statusPollInFlight=false;
+let _liveOverlayPollInFlight=false;
+const _LIVE_OVERLAY_POLL_MS=333;
+let _minimapLastDrawKey='';
+
+function _minimapEventDrawToken(event){
+  if(!event) return '';
+  return [
+    event.sequence ?? '',
+    event.frame_index ?? event.frame ?? '',
+    event.timestamp ?? '',
+    event.x ?? '',
+    event.y ?? '',
+    event.in_court ?? '',
+    event.type ?? '',
+    event.kind ?? '',
+    event.speed_kmh ?? '',
+    event.direction ?? event.legacy_direction ?? ''
+  ].join(':');
+}
+
+function _minimapDrawKey(bounces,hits,speeds){
+  return [
+    _minimapRotate180?'r180':'normal',
+    _minimapClearCutoff.sequence,
+    _minimapClearCutoff.timestamp,
+    _minimapClearCutoff.frame,
+    (bounces||[]).map(_minimapEventDrawToken).join('|'),
+    (hits||[]).map(_minimapEventDrawToken).join('|'),
+    (speeds||[]).map(_minimapEventDrawToken).join('|')
+  ].join('#');
+}
+
+function redrawMinimapIfChanged(force=false){
+  const visibleBounces=filterMinimapEvents(_minimapLatestBounces);
+  const visibleHits=filterMinimapEvents(_minimapLatestHits);
+  const key=_minimapDrawKey(visibleBounces,visibleHits,_minimapLatestSpeeds);
+  if(!force&&key===_minimapLastDrawKey) return;
+  _minimapLastDrawKey=key;
+  drawCourt(document.getElementById('minimap'),visibleBounces,visibleHits);
+  updateGTStats(visibleBounces);
+}
+
+function applyLiveDashboardPayload(d){
+  if(!d) return;
+
+  const analytics=d.analytics||{};
+  const recentBounces=analytics.recent_bounces||[];
+  const recentHits=analytics.recent_hits||[];
+  const recentSpeedEvents=analytics.recent_speed_events||[];
+  const showHitsOnMinimap=(analytics.hit_bounce_refiner_stats||{}).show_hits_on_minimap!==false;
+  const totalBounces=analytics.total_bounces ?? recentBounces.length;
+  const rallyState=analytics.rally_state||{};
+  const latestCrossing=analytics.latest_net_crossing||null;
+  const latestSingleCamSpeed=analytics.latest_single_cam_speed_event||null;
+  const lastFrameSpeed=Number(analytics.last_frame_speed_kmh||0);
+
+  const latestDets=d.latest_detections||null;
+  rememberBallOverlaySnapshot(latestDets);
+  _minimapLatestBounces=recentBounces;
+  _minimapLatestHits=showHitsOnMinimap?recentHits:[];
+  _minimapLatestSpeeds=recentSpeedEvents;
+  redrawMinimapIfChanged(false);
+
+  const stateEl=document.getElementById('rally-state');
+  const strokeEl=document.getElementById('stroke-count');
+  const bounceEl=document.getElementById('bounce-count');
+  const speedEl=document.getElementById('ball-speed');
+  if(stateEl){
+    const st=rallyState.state||'idle';
+    stateEl.textContent=st;
+    stateEl.style.color=st==='rally'?'#4caf50':'#94a3b8';
+  }
+  if(strokeEl) strokeEl.textContent=rallyState.stroke_count||0;
+  if(bounceEl) bounceEl.textContent=totalBounces||0;
+  if(speedEl){
+    let speedToShow=0;
+    if(latestCrossing && Number.isFinite(Number(latestCrossing.speed_kmh||0))){
+      const crossingAge=(Date.now()/1000)-Number(latestCrossing.timestamp||0);
+      if(crossingAge <= 3.0) speedToShow=Number(latestCrossing.speed_kmh||0);
+    }
+    if(speedToShow <= 0 && latestSingleCamSpeed && Number.isFinite(Number(latestSingleCamSpeed.speed_kmh||0))){
+      const singleCamAge=(Date.now()/1000)-Number(latestSingleCamSpeed.timestamp||0);
+      if(singleCamAge <= 3.0) speedToShow=Number(latestSingleCamSpeed.speed_kmh||0);
+    }
+    if(speedToShow <= 0 && Number.isFinite(lastFrameSpeed)) speedToShow=lastFrameSpeed;
+    speedEl.textContent=speedToShow > 0 ? `${Math.round(speedToShow)} km/h` : '- km/h';
+  }
+}
+
 async function poll(){
+  if(_statusPollInFlight) return;
+  _statusPollInFlight=true;
   try{
-    const r=await fetch('/api/status');
+    const r=await fetch('/api/dashboard/status');
     const d=await r.json();
     for(const[name,p]of Object.entries(d.pipelines)){
       if(name.startsWith('_')) continue; // skip internal pipelines
@@ -2418,60 +2761,29 @@ async function poll(){
     }
     renderVideoArea(d.pipelines);
     updateYoloStaticStatus(d.pipelines);
-
-    // Extract analytics data from status
-    const analytics=d.analytics||{};
-    const recentBounces=analytics.recent_bounces||[];
-    const recentHits=analytics.recent_hits||[];
-    const showHitsOnMinimap=(analytics.hit_bounce_refiner_stats||{}).show_hits_on_minimap!==false;
-    const totalBounces=analytics.total_bounces ?? recentBounces.length;
-    const rallyState=analytics.rally_state||{};
-    const latestCrossing=analytics.latest_net_crossing||null;
-    const latestSingleCamSpeed=analytics.latest_single_cam_speed_event||null;
-    const lastFrameSpeed=Number(analytics.last_frame_speed_kmh||0);
-
-    const b=d.latest_ball_3d;
-    const latestDets=d.latest_detections||null;
-    rememberBallOverlaySnapshot(latestDets);
-    _minimapLatestBounces=recentBounces;
-    _minimapLatestHits=showHitsOnMinimap?recentHits:[];
-    const visibleBounces=filterMinimapEvents(_minimapLatestBounces);
-    const visibleHits=filterMinimapEvents(_minimapLatestHits);
-    drawCourt(document.getElementById('minimap'),visibleBounces,visibleHits);
-    updateGTStats(visibleBounces);
-
-    // Update rally state display
-    const stateEl=document.getElementById('rally-state');
-    const strokeEl=document.getElementById('stroke-count');
-    const bounceEl=document.getElementById('bounce-count');
-    const speedEl=document.getElementById('ball-speed');
-    if(stateEl){
-      const st=rallyState.state||'idle';
-      stateEl.textContent=st;
-      stateEl.style.color=st==='rally'?'#4caf50':'#94a3b8';
-    }
-    if(strokeEl) strokeEl.textContent=rallyState.stroke_count||0;
-    if(bounceEl) bounceEl.textContent=totalBounces||0;
-    if(speedEl){
-      let speedToShow=0;
-      if(latestCrossing && Number.isFinite(Number(latestCrossing.speed_kmh||0))){
-        const crossingAge=(Date.now()/1000)-Number(latestCrossing.timestamp||0);
-        if(crossingAge <= 3.0) speedToShow=Number(latestCrossing.speed_kmh||0);
-      }
-      if(speedToShow <= 0 && latestSingleCamSpeed && Number.isFinite(Number(latestSingleCamSpeed.speed_kmh||0))){
-        const singleCamAge=(Date.now()/1000)-Number(latestSingleCamSpeed.timestamp||0);
-        if(singleCamAge <= 3.0) speedToShow=Number(latestSingleCamSpeed.speed_kmh||0);
-      }
-      if(speedToShow <= 0 && Number.isFinite(lastFrameSpeed)) speedToShow=lastFrameSpeed;
-      speedEl.textContent=speedToShow > 0 ? `${Math.round(speedToShow)} km/h` : '- km/h';
-    }
   }catch(e){console.error(e)}
+  finally{_statusPollInFlight=false;}
+}
+
+async function pollLiveOverlay(){
+  if(document.hidden) return;
+  if(_liveOverlayPollInFlight) return;
+  _liveOverlayPollInFlight=true;
+  try{
+    const r=await fetch('/api/dashboard/live');
+    const d=await r.json();
+    applyLiveDashboardPayload(d);
+  }catch(e){console.warn('pollLiveOverlay:',e)}
+  finally{_liveOverlayPollInFlight=false;}
 }
 
 // Init
 drawCourt(document.getElementById('minimap'),[],[]);
 requestAnimationFrame(_ballOverlayLoop);
-setInterval(poll,500);
+setInterval(poll,1000);
+setInterval(pollLiveOverlay,_LIVE_OVERLAY_POLL_MS);
+poll();
+pollLiveOverlay();
 syncRecordingStatus();
 setInterval(syncRecordingStatus,2000);
 syncLiveModel();
@@ -2490,6 +2802,7 @@ syncLiveModel();
       const el=document.getElementById(elId);
       if(el && d[key]!==undefined){
         if(d[key]) el.classList.add('on'); else el.classList.remove('on');
+        if(elId==='tog-3d-push') setCourt3DFrameEnabled(!!d[key]);
       }
     }
   }catch(e){console.warn('syncToggles:',e)}
@@ -2917,8 +3230,13 @@ function vtInit3D(){
   _vtScene.add(_vt3dBallGroup);
 
   // Animation loop
+  let lastRenderTs=0;
   function animate(){
     requestAnimationFrame(animate);
+    if(document.hidden||!container.isConnected||container.clientWidth<=0||container.clientHeight<=0) return;
+    const now=performance.now();
+    if(now-lastRenderTs<_THREE_RENDER_FRAME_MS) return;
+    lastRenderTs=now;
     _vtControls.update();
     _vtRenderer.render(_vtScene,_vtCamera3d);
   }

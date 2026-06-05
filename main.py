@@ -2,6 +2,7 @@
 
 import logging
 import signal
+import socket
 import sys
 
 import uvicorn
@@ -38,6 +39,7 @@ class _AccessNoiseFilter(logging.Filter):
 
     _suppressed_fragments = (
         '"GET /api/status HTTP/1.1" 200',
+        '"GET /api/dashboard/status HTTP/1.1" 200',
         '"GET /api/recording/status HTTP/1.1" 200',
     )
 
@@ -90,8 +92,33 @@ def main() -> None:
     signal.signal(signal.SIGINT, handle_signal)
     signal.signal(signal.SIGTERM, handle_signal)
 
-    logger.info("Starting server on %s:%d", config.server.host, config.server.port)
-    uvicorn.run(app, host=config.server.host, port=config.server.port)
+    host = config.server.host
+    port = config.server.port
+    if host == "0.0.0.0" and socket.has_dualstack_ipv6():
+        try:
+            sock = socket.create_server(
+                ("::", port),
+                family=socket.AF_INET6,
+                backlog=2048,
+                dualstack_ipv6=True,
+            )
+            logger.info(
+                "Starting dual-stack server on [::]:%d (localhost IPv6 + IPv4)",
+                port,
+            )
+            server = uvicorn.Server(uvicorn.Config(app))
+            server.run(sockets=[sock])
+            return
+        except OSError:
+            logger.warning(
+                "Dual-stack bind failed; falling back to %s:%d",
+                host,
+                port,
+                exc_info=True,
+            )
+
+    logger.info("Starting server on %s:%d", host, port)
+    uvicorn.run(app, host=host, port=port)
 
 
 if __name__ == "__main__":
