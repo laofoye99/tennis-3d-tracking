@@ -209,7 +209,7 @@ def run_video_pipeline(
         if use_verifier:
             from app.pipeline.blob_verifier import BlobVerifier
             blob_verifier = BlobVerifier(
-                model_path=blob_verifier_config.get("model_path", "yolo11n.pt"),
+                model_path=blob_verifier_config.get("model_path", "model_weight/blob_verifier_yolo.pt"),
                 crop_size=blob_verifier_config.get("crop_size", 128),
                 conf=blob_verifier_config.get("conf", 0.25),
                 device=device,

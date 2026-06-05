@@ -225,7 +225,7 @@ def test_switch_model_sets_matching_detector_type_and_yolo_roadmap_weight(orch):
     yolo = orch.switch_model("yolo_roadmap")
 
     assert yolo["model"] == "yolo_roadmap"
-    assert yolo["path"] == "yolo_roadmap/best.pt"
+    assert yolo["path"] == "model_weight/best.pt"
     assert yolo["frames_in"] == 1
     assert yolo["frames_out"] == 1
     assert yolo["detector_type"] == "yolo_roadmap"

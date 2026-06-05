@@ -16,6 +16,8 @@ class CameraConfig(BaseModel):
 
 class ModelConfig(BaseModel):
     path: str = ""  # not needed for median_bg
+    tracknet_path: str = "model_weight/TrackNet_finetuned.onnx"
+    yolo_roadmap_path: str = "model_weight/best.pt"
     input_size: list[int] = [288, 512]
     frames_in: int = 8
     frames_out: int = 8
@@ -52,7 +54,7 @@ class EnsembleConfig(BaseModel):
 
 class BlobVerifierConfig(BaseModel):
     enabled: bool = False
-    model_path: str = "yolo11n.pt"
+    model_path: str = "model_weight/blob_verifier_yolo.pt"
     crop_size: int = 128
     conf: float = 0.25
 
@@ -65,7 +67,7 @@ class PlayerDetectionConfig(BaseModel):
     imgsz: int = 960
     use_tracking: bool = False
     run_every_n_frames: int = 1  # ~6 fps at 30 fps source
-    yolo_model_path: str = "yolo11n.pt"
+    yolo_model_path: str = ""
     yolo_conf: float = 0.15
     yolo_imgsz: int = 960
     yolo_use_tracking: bool = True

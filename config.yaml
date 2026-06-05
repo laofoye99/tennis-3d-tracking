@@ -39,6 +39,8 @@ model:
   heatmap_mask:
   - [0, 0, 620, 40]
   detector_type: tracknet
+  tracknet_path: model_weight/TrackNet_finetuned.onnx
+  yolo_roadmap_path: model_weight/best.pt
   # detector_type: median_bg     # 切换时同时改 frames_in: 30, frames_out: 30
 bounce_detection:
   hybrid:
@@ -92,6 +94,7 @@ server:
 player_detection:
   enabled: true                              # 改为 true 开启球员检测
   model_path: model_weight/yolo26x-pose.pt
+  yolo_model_path: model_weight/yolo26x-pose.pt
   device: cuda
   conf: 0.4
   run_every_n_frames: 5                       # 每5帧推理一次 (~6fps)

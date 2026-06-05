@@ -5443,19 +5443,19 @@ class Orchestrator:
         model_name = model_name.lower().strip()
         configs = {
             "tracknet": {
-                "path": "model_weight/TrackNet_finetuned.onnx",
+                "path": self.config.model.tracknet_path or "model_weight/TrackNet_finetuned.onnx",
                 "frames_in": 8,
                 "frames_out": 8,
                 "detector_type": "tracknet",
             },
             "yolo": {
-                "path": "yolo_roadmap/best.pt",
+                "path": self.config.model.yolo_roadmap_path or "model_weight/best.pt",
                 "frames_in": 1,
                 "frames_out": 1,
                 "detector_type": "yolo_roadmap",
             },
             "yolo_roadmap": {
-                "path": "yolo_roadmap/best.pt",
+                "path": self.config.model.yolo_roadmap_path or "model_weight/best.pt",
                 "frames_in": 1,
                 "frames_out": 1,
                 "detector_type": "yolo_roadmap",

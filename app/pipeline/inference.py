@@ -604,7 +604,7 @@ class _StaticZone:
 
 
 class YoloRoadmapDetector:
-    """Ultralytics YOLO detector from ``yolo_roadmap/best.pt``.
+    """Ultralytics YOLO detector from ``model_weight/best.pt``.
 
     This backend mirrors the prototype in ``yolo_roadmap``: run YOLO directly
     on each frame, keep active tracked boxes, and suppress objects that stay
@@ -616,7 +616,7 @@ class YoloRoadmapDetector:
 
     def __init__(
         self,
-        model_path: str = "yolo_roadmap/best.pt",
+        model_path: str = "model_weight/best.pt",
         input_size: tuple[int, int] = (288, 512),
         frames_in: int = 1,
         frames_out: int = 1,
@@ -1074,7 +1074,7 @@ def create_detector(
     ):
         logger.info("Using YoloRoadmapDetector")
         return YoloRoadmapDetector(
-            model_path=model_path or "yolo_roadmap/best.pt",
+            model_path=model_path or "model_weight/best.pt",
             input_size=input_size,
             frames_in=frames_in,
             frames_out=frames_out,
