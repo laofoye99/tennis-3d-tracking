@@ -45,6 +45,7 @@ yolo*.pt
 yolo_roadmap/*.pt
 
 # Local media server binaries
+tools/mediamtx/
 tools/mediamtx/*.exe
 tools/mediamtx/*.zip
 
