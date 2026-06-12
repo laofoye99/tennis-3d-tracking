@@ -6,6 +6,7 @@ inference so the GPU never waits for the CPU.
 
 import logging
 import multiprocessing as mp
+from pathlib import Path
 import queue
 import threading
 import time
@@ -208,13 +209,22 @@ def run_video_pipeline(
         )
         if use_verifier:
             from app.pipeline.blob_verifier import BlobVerifier
-            blob_verifier = BlobVerifier(
-                model_path=blob_verifier_config.get("model_path", "model_weight/blob_verifier_yolo.pt"),
-                crop_size=blob_verifier_config.get("crop_size", 128),
-                conf=blob_verifier_config.get("conf", 0.25),
-                device=device,
+            verifier_path = blob_verifier_config.get(
+                "model_path", "model_weight/blob_verifier_yolo.pt"
             )
-            log.info("Blob verifier enabled: %s", blob_verifier_config.get("model_path"))
+            if not verifier_path or not Path(str(verifier_path)).exists():
+                log.warning(
+                    "Blob verifier disabled, model not found: %s",
+                    verifier_path,
+                )
+            else:
+                blob_verifier = BlobVerifier(
+                    model_path=str(verifier_path),
+                    crop_size=blob_verifier_config.get("crop_size", 128),
+                    conf=blob_verifier_config.get("conf", 0.25),
+                    device=device,
+                )
+                log.info("Blob verifier enabled: %s", verifier_path)
 
         status_dict["state"] = "running"
         status_dict["total_frames"] = total_frames

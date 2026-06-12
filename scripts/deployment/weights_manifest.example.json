@@ -1,0 +1,29 @@
+{
+  "weights": [
+    {
+      "path": "model_weight/TrackNet_finetuned.onnx",
+      "url": "${env:TENNIS_TRACKNET_ONNX_URL}",
+      "sha256": ""
+    },
+    {
+      "path": "model_weight/best.pt",
+      "url": "${env:TENNIS_YOLO_ROADMAP_URL}",
+      "sha256": ""
+    },
+    {
+      "path": "model_weight/blob_verifier_yolo.pt",
+      "url": "${env:TENNIS_BLOB_VERIFIER_URL}",
+      "sha256": ""
+    },
+    {
+      "path": "model_weight/hrnet_tennis.onnx",
+      "url": "${env:TENNIS_HRNET_ONNX_URL}",
+      "sha256": ""
+    },
+    {
+      "path": "model_weight/yolo26x-pose.pt",
+      "url": "${env:TENNIS_PLAYER_POSE_URL}",
+      "sha256": ""
+    }
+  ]
+}
