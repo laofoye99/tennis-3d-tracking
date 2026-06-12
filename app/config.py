@@ -76,6 +76,7 @@ class PlayerDetectionConfig(BaseModel):
 
 class ExportConfig(BaseModel):
     endpoint: str = "https://tennisync.top/api/admin/SpaceParties/reportData"
+    dry_run: bool = False  # True → 只打印 payload 不发送到 API
 
 
 class HybridBounceConfig(BaseModel):

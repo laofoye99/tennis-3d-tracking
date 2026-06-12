@@ -220,12 +220,18 @@ def _build_result_matrix(frames: list) -> list:
         if ball is None:
             continue
 
-        nx = _norm_x(ball["x"])
-        ny = _norm_y(ball["y"])
-        raw_speed = fr.get("speed_kmh", 0.0)
-        # Filter entries where ball is outside court (clamped to boundary)
-        if nx <= 0.0 or nx >= 1.0 or ny <= 0.0 or ny >= 1.0:
+        raw_x, raw_y = ball["x"], ball["y"]
+        # Filter entries where ball is clearly outside the court.
+        # Check raw coordinates BEFORE normalization so that a ball landing
+        # exactly on the line (which normalizes to 0.0 or 1.0) is kept.
+        # Also guard against NaN which would slip through the comparisons.
+        if not (math.isfinite(raw_x) and math.isfinite(raw_y)):
             continue
+        if raw_x < _X_MIN or raw_x > _X_MAX or raw_y < _Y_MIN or raw_y > _Y_MAX:
+            continue
+        nx = _norm_x(raw_x)
+        ny = _norm_y(raw_y)
+        raw_speed = fr.get("speed_kmh", 0.0)
 
         if is_bounce:
             # Bounce speed is naturally lower (post-impact energy loss) — no lower filter
@@ -258,6 +264,13 @@ def _build_result_matrix(frames: list) -> list:
             entry_type    = "serve"
             serve_emitted = True
 
+        # De-duplicate consecutive hit frames from the same stroke:
+        # same speed + coordinates within 0.05 normalised units = same physical stroke.
+        if result and result[-1]["type"] in ("hit", "serve"):
+            last = result[-1]
+            if last["speed"] == speed and abs(nx - last["x"]) < 0.05 and abs(ny - last["y"]) < 0.05:
+                continue
+
         result.append({
             "x":        nx,
             "y":        ny,
@@ -265,6 +278,19 @@ def _build_result_matrix(frames: list) -> list:
             "speed":    speed,
             "handType": hand_type,
         })
+
+    # Ensure at least one 'serve' exists (required by server spec).
+    # Priority: promote first hit; if no hit, promote first bounce.
+    if result and not any(e["type"] == "serve" for e in result):
+        promoted = False
+        for e in result:
+            if e["type"] == "hit":
+                e["type"] = "serve"
+                promoted = True
+                break
+        if not promoted:
+            result[0]["type"] = "serve"
+            result[0]["handType"] = "forehand"
 
     return result
 
@@ -378,7 +404,7 @@ def _compute_advanced_stats(
         if srv["type"] != "serve":
             continue
         # Find the immediately following bounce
-        for nxt in result_matrix[result_matrix.index(srv) + 1:]:
+        for nxt in result_matrix[s_idx + 1:]:
             if nxt["type"] == "bounce":
                 if _is_valid_serve_landing(nxt["x"], nxt["y"], side):
                     serve_success += 1
@@ -389,15 +415,15 @@ def _compute_advanced_stats(
     # ---- Return first serve success rate ----
     # Opponent serves → this side must return into opponent half.
     opp_y_lo, opp_y_hi = (0.5, 1.0) if side == "near" else (0.0, 0.5)
-    opp_serves = [e for e in result_matrix if e["type"] == "serve" and opp_y_lo <= e["y"] < opp_y_hi]
+    # Build with indices to avoid O(n) list.index() lookups on each iteration.
+    opp_serve_entries = [(i, e) for i, e in enumerate(result_matrix)
+                         if e["type"] == "serve" and opp_y_lo <= e["y"] < opp_y_hi]
     return_success = 0
-    for srv in opp_serves:
-        srv_i = result_matrix.index(srv)
+    for srv_i, srv in opp_serve_entries:
         # Next hit from this side
-        for nxt in result_matrix[srv_i + 1:]:
+        for nxt_i, nxt in enumerate(result_matrix[srv_i + 1:], start=srv_i + 1):
             if nxt["type"] in ("hit", "serve") and y_lo <= nxt["y"] < y_hi:
                 # Following bounce should be in opponent half
-                nxt_i = result_matrix.index(nxt)
                 for b in result_matrix[nxt_i + 1:]:
                     if b["type"] == "bounce":
                         if opp_y_lo <= b["y"] < opp_y_hi:
@@ -405,33 +431,104 @@ def _compute_advanced_stats(
                         break
                 break
 
-    return_first_rate = round(100 * return_success / len(opp_serves), 1) if opp_serves else 0.0
+    return_first_rate = round(100 * return_success / len(opp_serve_entries), 1) if opp_serve_entries else 0.0
 
     # ---- Baseline / net rates ----
-    baseline_hits = [h for h in hits if h["y"] >= _BASELINE_ZONE] if side == "far" \
-                    else [h for h in hits if (1.0 - h["y"]) >= _BASELINE_ZONE]
-    net_hits      = [h for h in hits if h["y"] <= _NET_ZONE]     if side == "far" \
-                    else [h for h in hits if (1.0 - h["y"]) <= _NET_ZONE]
+    # Coordinate system (normalised):
+    #   y=0.0 → near baseline  y=0.5 → net  y=1.0 → far baseline
+    # near player hits from y < 0.5:
+    #   near baseline: y <= 0.2  (deep near court, close to y=0)
+    #   near net:      y >= 0.3  (approaching net from near side)
+    # far player hits from y >= 0.5:
+    #   far baseline:  y >= 0.8  (deep far court, close to y=1)
+    #   far net:       y <= 0.7  (approaching net from far side)
+    _NEAR_BASELINE_MAX = 0.2   # near-side baseline zone upper bound
+    _NEAR_NET_MIN      = 0.3   # near-side net zone lower bound
+    _FAR_BASELINE_MIN  = 0.8   # far-side baseline zone lower bound
+    _FAR_NET_MAX       = 0.7   # far-side net zone upper bound
+    baseline_hits = [h for h in hits if h["y"] >= _FAR_BASELINE_MIN] if side == "far" \
+                    else [h for h in hits if h["y"] <= _NEAR_BASELINE_MAX]
+    net_hits      = [h for h in hits if h["y"] <= _FAR_NET_MAX]     if side == "far" \
+                    else [h for h in hits if h["y"] >= _NEAR_NET_MIN]
 
     baseline_shot_rate = round(100 * len(baseline_hits) / total_shots, 1) if total_shots else 0.0
     net_point_rate     = round(100 * len(net_hits)      / total_shots, 1) if total_shots else 0.0
 
-    # Win rates: approximate — a point is "won" if the next bounce after this
-    # player's hit lands out-of-bounds (y > 1 or y < 0) or there is no further
-    # hit from the opponent.  Without a proper rally scorer this is a best-
-    # effort heuristic; leave as 0 rather than fabricate incorrect values.
-    baseline_win_rate = 0.0
-    net_win_rate      = 0.0
+    # ---- Hit success rate ----
+    # A hit is 'successful' unless this stroke directly caused the ball to go
+    # out or hit the net — meaning NO bounce occurs anywhere after this hit
+    # until the end of result_matrix.
+    # Opponent volleys (hit without a preceding bounce) do NOT count as failure
+    # for the striker — only a complete absence of any bounce after this hit
+    # indicates the ball never landed in court (net or out).
+    hit_success_count = 0
+    for i, e in enumerate(result_matrix):
+        if e["type"] not in ("hit", "serve"):
+            continue
+        if not (y_lo <= e["y"] < y_hi):
+            continue
+        # Check if any bounce exists after this hit
+        has_bounce_after = any(nxt["type"] == "bounce" for nxt in result_matrix[i + 1:])
+        if has_bounce_after:
+            hit_success_count += 1
+    hit_success_rate = round(100 * hit_success_count / total_shots, 1) if total_shots else 0.0
+
+    # ---- Scoring helpers ----
+    # A hit 'scores' when it is the last hit in the matrix with no bounce after
+    # it AND no opponent hit after it (opponent didn't touch it).
+    scoring_hits = []
+    for i, e in enumerate(result_matrix):
+        if e["type"] not in ("hit", "serve"):
+            continue
+        rest = result_matrix[i + 1:]
+        has_bounce_after   = any(n["type"] == "bounce"           for n in rest)
+        has_opp_hit_after  = any(n["type"] in ("hit", "serve")   for n in rest)
+        if not has_bounce_after and not has_opp_hit_after:
+            scoring_hits.append(e)
+
+    total_points      = len(scoring_hits)
+    this_side_scores  = [e for e in scoring_hits if y_lo <= e["y"] < y_hi]
+
+    # breakPointConversionRate: far (receiver) only
+    if side == "far":
+        break_point_rate = round(100 * len(this_side_scores) / total_points, 1) if total_points else 0.0
+    else:
+        break_point_rate = 0.0
+
+    # baselineScoreRate / netScoreRate — of this side's scoring hits
+    def _is_baseline(e):
+        return (side == "far"  and e["y"] >= _FAR_BASELINE_MIN) or \
+               (side == "near" and e["y"] <= _NEAR_BASELINE_MAX)
+    def _is_net_zone(e):
+        return (side == "far"  and e["y"] <= _FAR_NET_MAX) or \
+               (side == "near" and e["y"] >= _NEAR_NET_MIN)
+
+    baseline_scores = [e for e in this_side_scores if _is_baseline(e)]
+    net_scores      = [e for e in this_side_scores if _is_net_zone(e)]
+    baseline_score_rate = round(100 * len(baseline_scores) / len(this_side_scores), 1) if this_side_scores else 0.0
+    net_score_rate      = round(100 * len(net_scores)      / len(this_side_scores), 1) if this_side_scores else 0.0
+
+    # volleyScoreRate — volley = preceding event is not a bounce
+    volley_scores = []
+    for i, e in enumerate(result_matrix):
+        if e not in scoring_hits or not (y_lo <= e["y"] < y_hi):
+            continue
+        preceding = next((p for p in reversed(result_matrix[:i])), None)
+        if preceding is None or preceding["type"] != "bounce":
+            volley_scores.append(e)
+    volley_score_rate = round(100 * len(volley_scores) / total_points, 1) if total_points else 0.0
+
+    baseline_win_rate = baseline_score_rate
+    net_win_rate      = net_score_rate
 
     # ---- ACE count ----
     # Serve lands in service box AND no opponent hit follows before the next serve.
     ace_count = 0
-    for srv in result_matrix:
+    for srv_i, srv in enumerate(result_matrix):
         if srv["type"] != "serve":
             continue
         if not (y_lo <= srv["y"] < y_hi):
             continue
-        srv_i = result_matrix.index(srv)
         # Find next bounce
         landing_ok = False
         opponent_returned = False
@@ -473,6 +570,11 @@ def _compute_advanced_stats(
         "totalDistance":          player_stats["totalDistance"],
         "avgMoveSpeed":           player_stats["avgMoveSpeed"],
         "maxMoveSpeed":           player_stats["maxMoveSpeed"],
+        "hitSuccessRate":           hit_success_rate,
+        "breakPointConversionRate": break_point_rate,
+        "baselineScoreRate":        baseline_score_rate,
+        "netScoreRate":             net_score_rate,
+        "volleyScoreRate":          volley_score_rate,
     }
 
 
@@ -486,6 +588,7 @@ def format_rally(
     serial_number: str,
     endpoint:      str,
     dry_run:       bool = False,
+    second_serial: str = "",   # 第二个摄像头的序列号，非空时会发送空 payload
 ) -> dict:
     """Format rally data into the standard result JSON and POST to endpoint.
 
@@ -499,10 +602,12 @@ def format_rally(
     Returns:
         The formatted payload dict.
     """
-    # Use Beijing time (UTC+8) but keep the Z suffix as the server expects
-    _tz_offset = datetime.timedelta(hours=8)
-    start_dt = datetime.datetime.utcfromtimestamp(rally_result.start_time) + _tz_offset
-    end_dt   = datetime.datetime.utcfromtimestamp(rally_result.end_time)   + _tz_offset
+    # Use Beijing time (UTC+8) but keep the Z suffix as the server expects.
+    # datetime.utcfromtimestamp was deprecated in Python 3.12 / removed in 3.13;
+    # use timezone-aware fromtimestamp instead.
+    _beijing_tz = datetime.timezone(datetime.timedelta(hours=8))
+    start_dt = datetime.datetime.fromtimestamp(rally_result.start_time, tz=_beijing_tz)
+    end_dt   = datetime.datetime.fromtimestamp(rally_result.end_time,   tz=_beijing_tz)
 
     # FIX #1: ball speed from hit/bounce frames only, clamped
     avg_ball_speed, max_ball_speed = _compute_ball_speed_stats(frames)
@@ -510,32 +615,24 @@ def format_rally(
     near_stats = _compute_player_stats(frames, "near")
     far_stats  = _compute_player_stats(frames, "far")
 
-    # FIX #3/#4: serve type + correct bounce handType
     result_matrix = _build_result_matrix(frames)
-    # FIX #5: last-value carry for player positions
-    track_matrix  = _build_track_matrix(frames)
 
-    # Skip export if resultmatrix is empty (no hit/bounce detected — upstream issue)
+    # Server requires non-empty resultmatrix; skip export if no events detected
     if not result_matrix:
         logger.warning(
-            "Rally %d: resultmatrix is empty (no hit/bounce events), skipping export",
+            "Rally %d: resultmatrix is empty, skipping export",
             rally_result.rally_id,
         )
         return {}
 
-    # The realtime mainline now receives HIT events from HitBounceRefiner. If a
-    # rally still contains only bounce rows, suppress export because downstream
-    # business logic expects at least one stroke event.
-    has_stroke_event = any(
-        entry.get("type") in ("hit", "serve")
-        for entry in result_matrix
-    )
-    if not has_stroke_event:
-        logger.warning(
-            "Rally %d: resultmatrix has no hit/serve events (bounce-only), skipping export",
-            rally_result.rally_id,
-        )
-        return {}
+    # Fallback: if raw-frame speeds were all filtered out (< 50 km/h),
+    # derive avg/max from resultmatrix entries (which are clamped to ≥ 50).
+    if avg_ball_speed == 0.0 and max_ball_speed == 0.0 and result_matrix:
+        rm_speeds = [e["speed"] for e in result_matrix
+                     if e["type"] in ("hit", "serve")]
+        if rm_speeds:
+            avg_ball_speed = round(sum(rm_speeds) / len(rm_speeds), 1)
+            max_ball_speed = float(max(rm_speeds))
 
     # Downsample resultmatrix if too large (keeps payload under size limit)
     if len(result_matrix) > _RESULT_MAX_ENTRIES:
@@ -543,31 +640,31 @@ def format_rally(
         idx = _np.round(_np.linspace(0, len(result_matrix) - 1, _RESULT_MAX_ENTRIES)).astype(int)
         result_matrix = [result_matrix[i] for i in idx]
 
-    # Per-side blocks: movement stats from filtered _compute_player_stats;
-    # totalShots counted from result_matrix (near=y<0.5, far=y>=0.5).
-    near_shots = sum(1 for e in result_matrix if e["type"] in ("hit", "serve") and e["y"] < 0.5)
-    far_shots  = sum(1 for e in result_matrix if e["type"] in ("hit", "serve") and e["y"] >= 0.5)
+    # Compute all per-side stats from result_matrix using _compute_advanced_stats
+    near_block_raw = _compute_advanced_stats(result_matrix, near_stats, "near", avg_ball_speed, max_ball_speed)
+    far_block_raw  = _compute_advanced_stats(result_matrix, far_stats,  "far",  avg_ball_speed, max_ball_speed)
 
-    def _side_block(stats, avg_spd, max_spd, total_shots):
-        return {
-            "firstServeSuccessRate":  0,
-            "returnFirstSuccessRate": 0,
-            "baselineShotRate":       0,
-            "baselineWinRate":        0,
-            "netPointRate":           0,
-            "netPointWinRate":        0,
-            "totalShots":             total_shots,
-            "aceCount":               0,
-            "netApproaches":          0,
-            "avgBallSpeed":           int(round(avg_spd)),
-            "maxBallSpeed":           int(round(max_spd)),
-            "totalDistance":          int(round(stats["totalDistance"])),
-            "avgMoveSpeed":           int(round(stats["avgMoveSpeed"])),
-            "maxMoveSpeed":           int(round(stats["maxMoveSpeed"])),
-        }
+    # Cap per-side counts that must not exceed totalShots
+    for block in (near_block_raw, far_block_raw):
+        block["netApproaches"] = min(block["netApproaches"], block["totalShots"])
+        block["aceCount"]      = min(block["aceCount"],      block["totalShots"])
 
-    near_block = _side_block(near_stats, avg_ball_speed, max_ball_speed, near_shots)
-    far_block  = _side_block(far_stats,  avg_ball_speed, max_ball_speed, far_shots)
+    # ALL farCount/nearCount fields must be integers per server spec
+    def _finalise_block(b):
+        return {k: int(round(v)) if isinstance(v, (int, float)) else v
+                for k, v in b.items()}
+
+    near_block = _finalise_block(near_block_raw)
+    far_block  = _finalise_block(far_block_raw)
+
+    # Clamp percentage fields to [0, 100]
+    _pct_keys = ("firstServeSuccessRate", "returnFirstSuccessRate",
+                 "baselineShotRate", "baselineWinRate", "netPointRate",
+                 "netPointWinRate", "hitSuccessRate", "breakPointConversionRate",
+                 "baselineScoreRate", "netScoreRate", "volleyScoreRate")
+    for block in (near_block, far_block):
+        for k in _pct_keys:
+            block[k] = max(0, min(100, block[k]))
 
     payload = {
         "serial_number": serial_number,
@@ -576,41 +673,30 @@ def format_rally(
         "content": {
             "mete": {
                 "movingDistance":           int(round(near_stats["totalDistance"] + far_stats["totalDistance"])),
-                "battingAttempts":          0,
-                "serveSuccessRate":         0.0,
-                "serveAceCount":            0,
-                "serveSpeed":               0.0,
-                "receiveSuccessRate":        0.0,
-                "breakPointConversionRate": 0.0,
-                "hitSuccessRate":           0.0,
-                "forehandHitRate":          0.0,
-                "backhandHitRate":          0.0,
-                "baselineScoreRate":        0.0,
-                "averageHitSpeed":          avg_ball_speed,
-                "maxHitSpeed":              max_ball_speed,
-                "netApproachCount":         0,
-                "netScoreRate":             0.0,
-                "volleyScoreRate":          0.0,
+                "battingAttempts":          near_block["totalShots"] + far_block["totalShots"],
+                "serveSuccessRate":         int(round((near_block["firstServeSuccessRate"] + far_block["firstServeSuccessRate"]) / 2.0)),
+                "serveAceCount":            near_block["aceCount"] + far_block["aceCount"],
+                "serveSpeed":               int(round(avg_ball_speed)),
+                "receiveSuccessRate":        int(round((near_block["returnFirstSuccessRate"] + far_block["returnFirstSuccessRate"]) / 2.0)),
+                "breakPointConversionRate": int(round(far_block_raw.get("breakPointConversionRate", 0.0))),
+                "hitSuccessRate":           int(round((near_block_raw.get("hitSuccessRate", 0.0) + far_block_raw.get("hitSuccessRate", 0.0)) / 2.0)),
+                "forehandHitRate":          int(round(_forehand_rate(result_matrix))),
+                "backhandHitRate":          int(round(_backhand_rate(result_matrix))),
+                "baselineScoreRate":        int(round((near_block_raw.get("baselineScoreRate", 0.0) + far_block_raw.get("baselineScoreRate", 0.0)) / 2.0)),
+                "averageHitSpeed":          int(round(avg_ball_speed)),
+                "maxHitSpeed":              int(round(max_ball_speed)),
+                "netApproachCount":         near_block["netApproaches"] + far_block["netApproaches"],
+                "netScoreRate":             int(round((near_block_raw.get("netScoreRate", 0.0) + far_block_raw.get("netScoreRate", 0.0)) / 2.0)),
+                "volleyScoreRate":          int(round((near_block_raw.get("volleyScoreRate", 0.0) + far_block_raw.get("volleyScoreRate", 0.0)) / 2.0)),
                 "farCount":                 far_block,
                 "nearCount":                near_block,
             },
             "resultmatrix": result_matrix,
-            "trackMatrix":  track_matrix,
+            "trackMatrix":  _build_track_matrix(frames),
         },
     }
 
     if not dry_run:
-        # --- DEBUG: dump payload to file so we can inspect it ---
-        import json as _json, os as _os
-        try:
-            _dump_path = _os.path.join("recordings", f"payload_rally_{rally_result.rally_id}.json")
-            _os.makedirs("recordings", exist_ok=True)
-            with open(_dump_path, "w", encoding="utf-8") as _f:
-                _json.dump(payload, _f, ensure_ascii=False, indent=2)
-            logger.info("Rally %d payload dumped -> %s", rally_result.rally_id, _dump_path)
-        except Exception as _e:
-            logger.warning("Payload dump failed: %s", _e)
-        # --- END DEBUG ---
         try:
             resp = requests.post(endpoint, json=payload, timeout=10)
             if resp.ok:
@@ -639,15 +725,147 @@ def format_rally(
                     "Rally %d export failed: %s %s",
                     rally_result.rally_id, resp.status_code, resp.text[:200],
                 )
+                _dump_failed_payload(
+                    payload, rally_result.rally_id,
+                    f"HTTP {resp.status_code}: {resp.text[:500]}",
+                )
         except Exception as e:
             logger.warning("Rally %d export error: %s", rally_result.rally_id, e)
+            _dump_failed_payload(payload, rally_result.rally_id, str(e))
+    else:
+        # dry_run mode: print payload JSON to console for local testing
+        import json as _json
+        print(f"\n{'='*60}")
+        print(f"[DRY-RUN] Rally {rally_result.rally_id} payload (不发送):")
+        print(f"  时间: {payload['startTime']} → {payload['endTime']}")
+        mete = payload["content"]["mete"]
+        near = mete["nearCount"]
+        far  = mete["farCount"]
+        print(f"  球速: 均值={mete['averageHitSpeed']:.1f} km/h  最大={mete['maxHitSpeed']:.1f} km/h")
+        print(f"  近端: 击球={near['totalShots']}  发球成功率={near['firstServeSuccessRate']}%")
+        print(f"  远端: 击球={far['totalShots']}  发球成功率={far['firstServeSuccessRate']}%")
+        print(f"  resultmatrix: {len(payload['content']['resultmatrix'])} 条目")
+        print(f"  trackMatrix:  {len(payload['content']['trackMatrix'])} 条目")
+        print(f"--- JSON payload (前 2000 字符) ---")
+        _payload_json = _json.dumps(payload, ensure_ascii=False, indent=2)
+        if len(_payload_json) > 2000:
+            print(_payload_json[:2000])
+            print(f"... (共 {len(_payload_json)} 字符, 已截断)")
+        else:
+            print(_payload_json)
+        print(f"{'='*60}\n")
+
+    # --- Second camera empty payload (same time window, all zeros) ---
+    if second_serial:
+        empty_payload = build_empty_payload(second_serial, start_dt, end_dt)
+        if not dry_run:
+            try:
+                resp2 = requests.post(endpoint, json=empty_payload, timeout=10)
+                if resp2.ok:
+                    logger.info(
+                        "Rally %d second camera exported → %s (%d)",
+                        rally_result.rally_id, endpoint, resp2.status_code,
+                    )
+                else:
+                    logger.warning(
+                        "Rally %d second camera export failed: %s %s",
+                        rally_result.rally_id, resp2.status_code, resp2.text[:200],
+                    )
+            except Exception as e:
+                logger.warning("Rally %d second camera export error: %s", rally_result.rally_id, e)
+        else:
+            import json as _json2
+            print(f"[DRY-RUN] Rally {rally_result.rally_id} → 第二个摄像头 {second_serial} (空 payload)")
 
     return payload
+
+
+def build_empty_payload(
+    serial_number: str,
+    start_dt: datetime.datetime,
+    end_dt: datetime.datetime,
+) -> dict:
+    """Build a zeroed-out payload for a second camera (same time window)."""
+    empty_mete = {
+        "movingDistance": 0,
+        "battingAttempts": 0,
+        "serveSuccessRate": 0,
+        "serveAceCount": 0,
+        "serveSpeed": 0,
+        "receiveSuccessRate": 0,
+        "breakPointConversionRate": 0,
+        "hitSuccessRate": 0,
+        "forehandHitRate": 0,
+        "backhandHitRate": 0,
+        "baselineScoreRate": 0,
+        "averageHitSpeed": 0,
+        "maxHitSpeed": 0,
+        "netApproachCount": 0,
+        "netScoreRate": 0,
+        "volleyScoreRate": 0,
+        "farCount": {
+            "firstServeSuccessRate": 0, "returnFirstSuccessRate": 0,
+            "baselineShotRate": 0, "baselineWinRate": 0,
+            "netPointRate": 0, "netPointWinRate": 0,
+            "totalShots": 0, "aceCount": 0, "netApproaches": 0,
+            "avgBallSpeed": 0, "maxBallSpeed": 0,
+            "totalDistance": 0, "avgMoveSpeed": 0, "maxMoveSpeed": 0,
+            "hitSuccessRate": 0, "breakPointConversionRate": 0,
+            "baselineScoreRate": 0, "netScoreRate": 0, "volleyScoreRate": 0,
+        },
+        "nearCount": {
+            "firstServeSuccessRate": 0, "returnFirstSuccessRate": 0,
+            "baselineShotRate": 0, "baselineWinRate": 0,
+            "netPointRate": 0, "netPointWinRate": 0,
+            "totalShots": 0, "aceCount": 0, "netApproaches": 0,
+            "avgBallSpeed": 0, "maxBallSpeed": 0,
+            "totalDistance": 0, "avgMoveSpeed": 0, "maxMoveSpeed": 0,
+            "hitSuccessRate": 0, "breakPointConversionRate": 0,
+            "baselineScoreRate": 0, "netScoreRate": 0, "volleyScoreRate": 0,
+        },
+    }
+    return {
+        "serial_number": serial_number,
+        "startTime": start_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "endTime": end_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "content": {
+            "mete": empty_mete,
+            "resultmatrix": [],
+            "trackMatrix": [
+                {"x": 0, "y": 0, "type": "hit", "speed": 0, "timestamp": 0,
+                 "farCountPerson_x": 0, "farCountPerson_y": 0,
+                 "nearCountPerson_x": 0, "nearCountPerson_y": 0},
+                {"x": 0, "y": 0, "type": "running", "speed": 0, "timestamp": 1,
+                 "farCountPerson_x": 0, "farCountPerson_y": 0,
+                 "nearCountPerson_x": 0, "nearCountPerson_y": 0},
+            ],
+        },
+    }
 
 
 # ---------------------------------------------------------------------------
 # Small helpers used by format_rally
 # ---------------------------------------------------------------------------
+
+def _dump_failed_payload(payload: dict, rally_id: int, reason: str) -> None:
+    """Dump payload to file when sending fails, recording the failure reason."""
+    import json as _json
+    import os as _os
+    try:
+        _dump_path = _os.path.join(
+            "recordings", f"payload_rally_{rally_id}_failed.json",
+        )
+        _os.makedirs("recordings", exist_ok=True)
+        dump = {"failure_reason": reason, "payload": payload}
+        with open(_dump_path, "w", encoding="utf-8") as _f:
+            _json.dump(dump, _f, ensure_ascii=False, indent=2)
+        logger.info(
+            "Rally %d failed payload dumped -> %s (reason: %s)",
+            rally_id, _dump_path, reason[:200],
+        )
+    except Exception as _e:
+        logger.warning("Failed payload dump error: %s", _e)
+
 
 def _forehand_rate(result_matrix: list) -> float:
     hits = [e for e in result_matrix if e["type"] in ("hit", "serve")]

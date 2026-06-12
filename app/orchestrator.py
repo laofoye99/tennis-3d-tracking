@@ -31,6 +31,7 @@ from app.realtime_hit_bounce import HitBounceRefiner
 from app.trajectory import clean_detections, find_offset_and_triangulate, fit_trajectory, segment_rallies
 from app.pipeline.multi_blob_matcher import MultiBlobMatcher
 from app.triangulation import triangulate
+from app.mini_program.pipeline import NearFieldPipeline
 
 logger = logging.getLogger(__name__)
 
@@ -336,6 +337,10 @@ class Orchestrator:
         self._rally_raw_buffer: deque = deque(maxlen=3000)
         self._last_frame_speed_kmh: float = 0.0
         self._last_bounce_ts: float = 0.0  # timestamp of most recent bounce
+
+        # --- independent near-field pipeline (mini-program data) ---
+        self._near_field = NearFieldPipeline(self.config)
+        self._near_field.start()
 
     def _get_camera_positions(self) -> dict[str, list[float]]:
         """Get camera 3D positions, optionally overriding with calibrated values.
@@ -1062,6 +1067,9 @@ class Orchestrator:
                             if name.startswith("_video_test"):
                                 cam = det.get("camera_name", "unknown")
                                 self._video_test_detections.setdefault(cam, []).append(det)
+                                # Also route to triangulation pipeline so rally export flows
+                                if cam in tri_cams:
+                                    self._det_queues.setdefault(cam, []).append(det)
                             got_any = True
                     except Exception:
                         pass
@@ -1417,13 +1425,14 @@ class Orchestrator:
                         # frame so offline /api/report/generate still has
                         # data, but there's no longer an automatic rally-end
                         # trigger that flushes it to the export endpoint.
-                        is_bounce_frame = bool(
-                            accepted_bd is not None
-                            and accepted_bd.get("frame_index") == fi
-                        )
-                        if accepted_bd is not None:
+                        is_bounce_frame = accepted_bounce is not None
+                        if is_bounce_frame and accepted_bd is not None:
                             self._last_bounce_ts = float(accepted_bd.get("timestamp", capture_ts))
-                        is_hit_frame = any(h.get("frame_index") == fi for h in new_hits)
+                        is_hit_frame = (
+                            not is_bounce_frame
+                            and capture_ts - self._last_bounce_ts < 2.0
+                            and len(self._speed_buffer) >= 2
+                        )
                         _near_pose = self._latest_player_pose.get(tri_cams[0])
                         _far_pose = self._latest_player_pose.get(tri_cams[1])
                         near_player = _near_pose["player"] if _near_pose else None
@@ -1615,7 +1624,7 @@ class Orchestrator:
     def _export_rally(self, rally_result, frames: list) -> None:
         """Export a completed rally to the configured API endpoint (runs in background thread)."""
         try:
-            from app.result_exporter import format_rally
+            from app.mini_program.result_exporter import format_rally
 
             if not frames:
                 logger.warning("Rally %d: no frames in snapshot, skipping export", rally_result.rally_id)
@@ -1624,10 +1633,17 @@ class Orchestrator:
 
             serial_numbers = self.config.serial_numbers
             serial = serial_numbers.get("cam66") or next(iter(serial_numbers.values()), "UNKNOWN")
+            second_serial = serial_numbers.get("cam68", "")
 
             endpoint = self.config.export.endpoint
-            print(f"[DEBUG] Rally {rally_result.rally_id} 正在 POST → {endpoint}")
-            format_rally(rally_result, frames, serial, endpoint)
+            dry_run = self.config.export.dry_run
+            if dry_run:
+                print(f"[DRY-RUN] Rally {rally_result.rally_id} — 仅打印 payload，不发送")
+            result = format_rally(rally_result, frames, serial, endpoint,
+                                 dry_run=dry_run, second_serial=second_serial)
+            if not result:
+                # format_rally returned empty dict → resultmatrix was empty, export skipped.
+                print(f"[DEBUG] Rally {rally_result.rally_id} export 跳过: resultmatrix 为空 (无击球/落点事件)")
         except Exception as e:
             logger.warning("Rally export error: %s", e)
             print(f"[DEBUG] Rally export 异常: {e}")
