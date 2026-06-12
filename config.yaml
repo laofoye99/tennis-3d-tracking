@@ -97,10 +97,10 @@ player_detection:
   yolo_model_path: model_weight/yolo26x-pose.pt
   device: cuda
   conf: 0.4
-  run_every_n_frames: 1                       # 每5帧推理一次 (~6fps)
+  run_every_n_frames: 5                       # 每5帧推理一次 (~6fps)
 serial_numbers:
   cam66: FV9942593
   cam68: FV9942588
 export:
   endpoint: https://tennisync.top/api/admin/SpaceParties/reportData
-  dry_run: true
+  dry_run: false
