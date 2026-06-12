@@ -10,7 +10,7 @@ from typing import Optional
 import cv2
 import numpy as np
 
-from app.hit_detector import detect_hits_v2
+from app.mini_program.hit_detector import detect_hits_v2
 from app.mini_program.detectors import BallDetector, BounceDetector
 from app.pipeline.homography import HomographyTransformer
 from app.pipeline.player_detector import PlayerPoseDetector
