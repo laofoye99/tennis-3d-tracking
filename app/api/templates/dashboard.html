@@ -385,7 +385,7 @@ body{font-family:'Lato',sans-serif;background:var(--bg);color:var(--text);height
 .hcal-body{display:grid;grid-template-columns:minmax(0,1fr) 260px;gap:12px;min-height:360px}
 .hcal-stage{position:relative;background:#050505;border-radius:6px;overflow:hidden;min-height:360px}
 .hcal-stage img{width:100%;height:100%;object-fit:contain;display:block;background:#050505}
-.hcal-stage canvas{position:absolute;inset:0;width:100%;height:100%;cursor:crosshair}
+.hcal-stage canvas{position:absolute;inset:0;width:100%;height:100%;cursor:crosshair;touch-action:none}
 .hcal-overlay-label{position:absolute;top:8px;left:8px;background:rgba(0,0,0,.72);border-radius:3px;padding:3px 8px;font-size:10px;color:#fff;z-index:2}
 .hcal-side{display:flex;flex-direction:column;gap:8px;min-width:0}
 .hcal-corner-list{display:flex;flex-direction:column;gap:6px}
@@ -1110,6 +1110,7 @@ body{font-family:'Lato',sans-serif;background:var(--bg);color:var(--text);height
             <option value="cam66">cam66</option>
           </select>
           <button onclick="hcalLoadSnapshot()">Load Snapshot</button>
+          <button onclick="hcalAutoMarkCorners()">Auto Mark</button>
           <button onclick="hcalLoadCurrentProjection()">Use Current</button>
           <button onclick="hcalUndo()">Undo</button>
           <button onclick="hcalClear()">Clear</button>
@@ -1131,7 +1132,7 @@ body{font-family:'Lato',sans-serif;background:var(--bg);color:var(--text);height
               <button onclick="hcalSelectCorner(2)">3</button>
               <button onclick="hcalSelectCorner(3)">4</button>
             </div>
-            <div class="hcal-status" id="hcal-status">Corners are mapped to court coordinates: near baseline left/right, far baseline right/left.</div>
+            <div class="hcal-status" id="hcal-status">Auto mark the camera-view court corners, then drag or click to adjust.</div>
           </div>
         </div>
       </div>
@@ -5897,15 +5898,19 @@ document.addEventListener('keydown',function(e){
 // ============================================================
 
 const HCAL_CORNERS=[
-  {id:'near_left',label:'Near left baseline',world:[-HW,-HL],color:'#69f0ae'},
-  {id:'near_right',label:'Near right baseline',world:[HW,-HL],color:'#69f0ae'},
-  {id:'far_right',label:'Far right baseline',world:[HW,HL],color:'#5fb1df'},
-  {id:'far_left',label:'Far left baseline',world:[-HW,HL],color:'#5fb1df'},
+  {id:'near_left',label:'Bottom-left corner',color:'#69f0ae'},
+  {id:'near_right',label:'Bottom-right corner',color:'#69f0ae'},
+  {id:'far_right',label:'Top-right corner',color:'#5fb1df'},
+  {id:'far_left',label:'Top-left corner',color:'#5fb1df'},
 ];
 let _hcalPoints={};
 let _hcalActive=0;
 let _hcalLoaded=false;
 let _hcalNatural={w:1920,h:1080};
+let _hcalPreviewNatural={w:1920,h:1080};
+let _hcalImageUrl=null;
+let _hcalDragCorner=null;
+let _hcalPlacedNew=false;
 let _hcalInitDone=false;
 
 function hcalSetStatus(text,cls){
@@ -5924,16 +5929,25 @@ function hcalInit(){
   if(img){
     img.onload=()=>{
       _hcalLoaded=true;
-      _hcalNatural={w:img.naturalWidth||1920,h:img.naturalHeight||1080};
+      _hcalPreviewNatural={w:img.naturalWidth||_hcalPreviewNatural.w,h:img.naturalHeight||_hcalPreviewNatural.h};
+      if(!_hcalNatural||!_hcalNatural.w||!_hcalNatural.h){
+        _hcalNatural={..._hcalPreviewNatural};
+      }
       hcalResizeCanvas();
-      hcalSetStatus('Snapshot loaded. Click '+HCAL_CORNERS[_hcalActive].label+'.','ok');
+      hcalSetStatus('Snapshot loaded. Auto marking corners...','ok');
+      hcalAutoMarkCorners(false);
     };
     img.onerror=()=>{
       _hcalLoaded=false;
       hcalSetStatus('No snapshot available. Start the camera pipeline first, then load snapshot.','error');
     };
   }
-  if(canvas) canvas.addEventListener('click',hcalCanvasClick);
+  if(canvas){
+    canvas.addEventListener('pointerdown',hcalCanvasPointerDown);
+    canvas.addEventListener('pointermove',hcalCanvasPointerMove);
+    canvas.addEventListener('pointerup',hcalCanvasPointerUp);
+    canvas.addEventListener('pointerleave',hcalCanvasPointerUp);
+  }
   window.addEventListener('resize',hcalResizeCanvas);
   hcalResizeCanvas();
 }
@@ -5941,14 +5955,20 @@ function hcalInit(){
 function hcalReset(clearImage=true){
   _hcalPoints={};
   _hcalActive=0;
+  _hcalDragCorner=null;
+  _hcalPlacedNew=false;
   if(clearImage){
     const img=document.getElementById('hcal-img');
     if(img) img.removeAttribute('src');
+    if(_hcalImageUrl){
+      URL.revokeObjectURL(_hcalImageUrl);
+      _hcalImageUrl=null;
+    }
     _hcalLoaded=false;
   }
   hcalRenderCornerList();
   hcalRedraw();
-  hcalSetStatus('Load a snapshot, then click the four court corners.');
+  hcalSetStatus('Load a snapshot, then auto mark or adjust the four corners.');
 }
 
 function hcalRenderCornerList(){
@@ -5969,7 +5989,7 @@ function hcalRenderCornerList(){
   const label=document.getElementById('hcal-label');
   if(label){
     const active=HCAL_CORNERS[_hcalActive];
-    label.textContent='Selected: '+active.label+' ('+active.world[0].toFixed(3)+', '+active.world[1].toFixed(3)+'m)';
+    label.textContent='Selected: '+active.label+' | source '+Math.round(_hcalNatural.w)+'x'+Math.round(_hcalNatural.h);
   }
 }
 
@@ -5979,14 +5999,67 @@ function hcalSelectCorner(idx){
   hcalRedraw();
 }
 
-function hcalLoadSnapshot(){
+function hcalHeaderInt(resp,name){
+  const value=resp.headers.get(name);
+  const parsed=value?Number(value):NaN;
+  return Number.isFinite(parsed)&&parsed>0?parsed:null;
+}
+
+async function hcalLoadSnapshot(){
   const cam=document.getElementById('hcal-camera').value;
   const img=document.getElementById('hcal-img');
   if(!img) return;
   hcalReset(false);
   _hcalLoaded=false;
   hcalSetStatus('Loading '+cam+' snapshot...');
-  img.src='/api/camera/'+encodeURIComponent(cam)+'/snapshot?ts='+Date.now();
+  try{
+    const resp=await fetch('/api/camera/'+encodeURIComponent(cam)+'/snapshot?ts='+Date.now(),{cache:'no-store'});
+    if(!resp.ok) throw new Error('snapshot failed');
+    const blob=await resp.blob();
+    const previewW=hcalHeaderInt(resp,'X-Preview-Width');
+    const previewH=hcalHeaderInt(resp,'X-Preview-Height');
+    const sourceW=hcalHeaderInt(resp,'X-Source-Width')||previewW;
+    const sourceH=hcalHeaderInt(resp,'X-Source-Height')||previewH;
+    if(sourceW&&sourceH) _hcalNatural={w:sourceW,h:sourceH};
+    if(previewW&&previewH) _hcalPreviewNatural={w:previewW,h:previewH};
+    if(_hcalImageUrl) URL.revokeObjectURL(_hcalImageUrl);
+    _hcalImageUrl=URL.createObjectURL(blob);
+    img.src=_hcalImageUrl;
+  }catch(e){
+    hcalSetStatus('Error: '+e.message,'error');
+  }
+}
+
+function hcalApplyPoints(points){
+  _hcalPoints={};
+  HCAL_CORNERS.forEach(c=>{
+    const pt=points&&points[c.id];
+    if(pt&&Number.isFinite(Number(pt.x))&&Number.isFinite(Number(pt.y))){
+      _hcalPoints[c.id]={x:Number(pt.x),y:Number(pt.y)};
+    }
+  });
+  const next=HCAL_CORNERS.findIndex(c=>!_hcalPoints[c.id]);
+  _hcalActive=next>=0?next:0;
+  hcalRenderCornerList();
+  hcalRedraw();
+}
+
+async function hcalAutoMarkCorners(showStatus=true){
+  const cam=document.getElementById('hcal-camera').value;
+  if(showStatus) hcalSetStatus('Auto marking '+cam+' court corners...');
+  try{
+    const resp=await fetch('/api/homography/auto-corners?camera='+encodeURIComponent(cam)+'&ts='+Date.now(),{cache:'no-store'});
+    const data=await resp.json();
+    if(!resp.ok) throw new Error(data.detail||data.error||'auto mark failed');
+    if(data.source_width&&data.source_height){
+      _hcalNatural={w:Number(data.source_width),h:Number(data.source_height)};
+    }
+    hcalApplyPoints(data.points||{});
+    const fallback=data.method==='current_projection_fallback';
+    hcalSetStatus((fallback?'Loaded current projection fallback. ':'Auto marked corners. ')+'Drag a point or select 1-4 and click to adjust.','ok');
+  }catch(e){
+    hcalSetStatus((showStatus?'Auto mark failed: ':'Auto mark failed, adjust manually: ')+e.message,'warn');
+  }
 }
 
 function hcalGetBaseTransform(){
@@ -6037,24 +6110,76 @@ function hcalResizeCanvas(){
   hcalRedraw();
 }
 
-function hcalCanvasClick(e){
-  if(!_hcalLoaded){
-    hcalSetStatus('Load a camera snapshot before marking corners.','warn');
-    return;
-  }
+function hcalNearestCorner(cx,cy){
+  let best=null;
+  let bestDist=20;
+  HCAL_CORNERS.forEach((corner,idx)=>{
+    const pt=_hcalPoints[corner.id];
+    if(!pt) return;
+    const p=hcalNatToCanvas(pt.x,pt.y);
+    const dist=Math.hypot(p.x-cx,p.y-cy);
+    if(dist<bestDist){
+      bestDist=dist;
+      best={corner,idx};
+    }
+  });
+  return best;
+}
+
+function hcalPointerToPoint(e){
   const canvas=e.currentTarget;
   const rect=canvas.getBoundingClientRect();
   const cx=(e.clientX-rect.left)*(canvas.width/rect.width);
   const cy=(e.clientY-rect.top)*(canvas.height/rect.height);
-  const pt=hcalCanvasToNat(cx,cy);
+  return {canvas,pt:hcalCanvasToNat(cx,cy),cx,cy};
+}
+
+function hcalCanvasPointerDown(e){
+  if(!_hcalLoaded){
+    hcalSetStatus('Load a camera snapshot before marking corners.','warn');
+    return;
+  }
+  const info=hcalPointerToPoint(e);
+  const pt=info.pt;
   if(!pt){
     hcalSetStatus('Click inside the snapshot image area.','warn');
     return;
   }
-  const corner=HCAL_CORNERS[_hcalActive];
+  const nearest=hcalNearestCorner(info.cx,info.cy);
+  const corner=nearest?nearest.corner:HCAL_CORNERS[_hcalActive];
+  _hcalActive=nearest?nearest.idx:_hcalActive;
+  _hcalDragCorner=corner.id;
+  _hcalPlacedNew=!nearest;
   _hcalPoints[corner.id]=pt;
+  if(info.canvas.setPointerCapture&&e.pointerId!==undefined){
+    info.canvas.setPointerCapture(e.pointerId);
+  }
+  hcalRenderCornerList();
+  hcalRedraw();
+  e.preventDefault();
+}
+
+function hcalCanvasPointerMove(e){
+  if(!_hcalDragCorner) return;
+  const info=hcalPointerToPoint(e);
+  if(!info.pt) return;
+  _hcalPoints[_hcalDragCorner]=info.pt;
+  hcalRenderCornerList();
+  hcalRedraw();
+  e.preventDefault();
+}
+
+function hcalCanvasPointerUp(e){
+  if(!_hcalDragCorner) return;
+  const cornerId=_hcalDragCorner;
+  const cornerIdx=HCAL_CORNERS.findIndex(c=>c.id===cornerId);
+  _hcalDragCorner=null;
+  if(e&&e.currentTarget&&e.currentTarget.releasePointerCapture&&e.pointerId!==undefined){
+    try{e.currentTarget.releasePointerCapture(e.pointerId);}catch(_e){}
+  }
   const next=HCAL_CORNERS.findIndex(c=>!_hcalPoints[c.id]);
-  _hcalActive=next>=0?next:_hcalActive;
+  _hcalActive=_hcalPlacedNew&&next>=0?next:Math.max(0,cornerIdx);
+  _hcalPlacedNew=false;
   hcalRenderCornerList();
   hcalRedraw();
   hcalSetStatus(next>=0?'Marked. Next: '+HCAL_CORNERS[next].label:'All four corners marked. Save Homography to apply.','ok');
@@ -6133,15 +6258,8 @@ async function hcalLoadCurrentProjection(){
     const camKey=Object.keys(data.cameras||{})[0];
     const projected=camKey&&data.cameras[camKey]?data.cameras[camKey].projected_corners_image:null;
     if(!projected) throw new Error('Current matrix has no projected corners');
-    _hcalPoints={};
-    HCAL_CORNERS.forEach(c=>{
-      const pt=projected[c.id];
-      if(pt) _hcalPoints[c.id]={x:Math.round(pt[0]),y:Math.round(pt[1])};
-    });
-    _hcalActive=0;
-    hcalRenderCornerList();
-    hcalRedraw();
-    hcalSetStatus('Loaded current projected corners. Adjust points if the camera moved.','ok');
+    hcalApplyPoints(projected);
+    hcalSetStatus('Loaded current projected corners. Drag or click to adjust.','ok');
   }catch(e){
     hcalSetStatus('Error: '+e.message,'error');
   }

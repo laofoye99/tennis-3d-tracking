@@ -11,7 +11,11 @@ from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, Response, StreamingResponse
 
 from app.orchestrator import Orchestrator
-from app.homography_calibration import homography_status, update_homography_file
+from app.homography_calibration import (
+    estimate_court_corners_from_jpeg,
+    homography_status,
+    update_homography_file,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -448,6 +452,52 @@ async def get_homography_status(camera: str | None = None):
         raise HTTPException(500, str(e))
 
 
+@router.get("/api/homography/auto-corners")
+async def auto_homography_corners(camera: str):
+    """Estimate four court corners from the latest camera snapshot."""
+    orch = _get_orch()
+    cam_cfg = orch.config.cameras.get(camera)
+    if cam_cfg is None or not getattr(cam_cfg, "homography_key", None):
+        raise HTTPException(404, f"Unknown homography camera: {camera}")
+
+    info = orch.get_latest_frame_info(camera)
+    if info is None or info.get("jpeg") is None:
+        raise HTTPException(404, f"No preview frame available for {camera}")
+
+    try:
+        result = estimate_court_corners_from_jpeg(
+            info["jpeg"],
+            source_width=info.get("source_width"),
+            source_height=info.get("source_height"),
+        )
+        return {
+            **result,
+            "camera": camera,
+            "camera_key": cam_cfg.homography_key,
+        }
+    except Exception as e:
+        logger.warning("Auto homography corners failed for %s: %s", camera, e)
+        try:
+            status = homography_status(orch.config.homography.path, cam_cfg.homography_key)
+            camera_status = status.get("cameras", {}).get(cam_cfg.homography_key, {})
+            projected = camera_status.get("projected_corners_image")
+            if projected:
+                return {
+                    "status": "ok",
+                    "method": "current_projection_fallback",
+                    "camera": camera,
+                    "camera_key": cam_cfg.homography_key,
+                    "points": {
+                        corner: {"x": float(pt[0]), "y": float(pt[1])}
+                        for corner, pt in projected.items()
+                    },
+                    "warning": str(e),
+                }
+        except Exception:
+            logger.exception("Auto homography fallback failed for %s", camera)
+        raise HTTPException(422, str(e))
+
+
 @router.post("/api/homography/recalibrate")
 async def recalibrate_homography(request: Request):
     """Update one camera homography from four manually clicked court corners.
@@ -751,6 +801,15 @@ async def camera_snapshot(name: str):
     frame_id = info.get("frame_id")
     if frame_id is not None:
         headers["X-Frame-Id"] = str(frame_id)
+    for meta_key, header_key in (
+        ("source_width", "X-Source-Width"),
+        ("source_height", "X-Source-Height"),
+        ("preview_width", "X-Preview-Width"),
+        ("preview_height", "X-Preview-Height"),
+    ):
+        value = info.get(meta_key)
+        if value is not None:
+            headers[header_key] = str(value)
     return Response(content=info["jpeg"], media_type="image/jpeg", headers=headers)
 
 

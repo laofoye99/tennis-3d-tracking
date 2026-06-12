@@ -367,6 +367,7 @@ def run_video_pipeline(
                         cv2.circle(preview, (draw_x, draw_y), 14, (0, 255, 0), 2)
                         cv2.circle(preview, (draw_x, draw_y), 4, (0, 255, 0), -1)
                     _, jpeg = cv2.imencode(".jpg", preview, [cv2.IMWRITE_JPEG_QUALITY, 75])
+                    preview_h, preview_w = preview.shape[:2]
                     while True:
                         try:
                             frame_queue.get_nowait()
@@ -374,7 +375,14 @@ def run_video_pipeline(
                             break
                         except Exception:
                             break
-                    frame_queue.put_nowait(jpeg.tobytes())
+                    frame_queue.put_nowait({
+                        "preview": jpeg.tobytes(),
+                        "recording": None,
+                        "source_width": w,
+                        "source_height": h,
+                        "preview_width": preview_w,
+                        "preview_height": preview_h,
+                    })
                 except Exception:
                     pass
 

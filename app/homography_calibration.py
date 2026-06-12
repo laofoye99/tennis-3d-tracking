@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import json
+import math
 import shutil
 from pathlib import Path
 from typing import Any
@@ -20,9 +21,27 @@ COURT_CORNERS = (
 )
 
 
-def _corner_world_points(court: dict[str, Any]) -> dict[str, tuple[float, float]]:
+def _corner_world_points(
+    court: dict[str, Any],
+    camera_key: str | None = None,
+) -> dict[str, tuple[float, float]]:
     half_width = float(court.get("half_width_m", court.get("width_m", 8.23) / 2.0))
     half_length = float(court.get("half_length_m", court.get("length_m", 23.78) / 2.0))
+    key = str(camera_key or "").lower()
+    if key == "cam68":
+        return {
+            "near_left": (half_width, -half_length),
+            "near_right": (-half_width, -half_length),
+            "far_right": (-half_width, half_length),
+            "far_left": (half_width, half_length),
+        }
+    if key == "cam66":
+        return {
+            "near_left": (-half_width, half_length),
+            "near_right": (half_width, half_length),
+            "far_right": (half_width, -half_length),
+            "far_left": (-half_width, -half_length),
+        }
     return {
         "near_left": (-half_width, -half_length),
         "near_right": (half_width, -half_length),
@@ -93,13 +112,176 @@ def _project(matrix: np.ndarray, point: tuple[float, float]) -> tuple[float, flo
     return float(out[0] / out[2]), float(out[1] / out[2])
 
 
+def _fit_line_from_segments(segments: list[tuple[float, ...]]) -> np.ndarray:
+    pts: list[tuple[float, float]] = []
+    for x1, y1, x2, y2, length, *_rest in segments:
+        repeats = max(1, int(float(length) / 80.0))
+        pts.extend([(x1, y1), (x2, y2)] * repeats)
+    if len(pts) < 2:
+        raise ValueError("not enough line points")
+    arr = np.array(pts, dtype=np.float32)
+    vx, vy, x0, y0 = cv2.fitLine(arr, cv2.DIST_L2, 0, 0.01, 0.01).flatten()
+    return np.array([-vy, vx, vy * x0 - vx * y0], dtype=np.float64)
+
+
+def _intersect_lines(a: np.ndarray, b: np.ndarray) -> tuple[float, float]:
+    a1, b1, c1 = [float(v) for v in a]
+    a2, b2, c2 = [float(v) for v in b]
+    denom = a1 * b2 - a2 * b1
+    if abs(denom) <= 1e-9:
+        raise ValueError("parallel court lines")
+    return (b1 * c2 - b2 * c1) / denom, (c1 * a2 - c2 * a1) / denom
+
+
+def _cluster_horizontal_segments(
+    segments: list[tuple[float, ...]],
+    *,
+    tolerance_px: float,
+) -> list[list[tuple[float, ...]]]:
+    clusters: list[list[tuple[float, ...]]] = []
+    for segment in sorted(segments, key=lambda item: item[7]):
+        for cluster in clusters:
+            weight = sum(float(item[4]) for item in cluster)
+            y_mid = sum(float(item[7]) * float(item[4]) for item in cluster) / max(weight, 1.0)
+            if abs(float(segment[7]) - y_mid) <= tolerance_px:
+                cluster.append(segment)
+                break
+        else:
+            clusters.append([segment])
+    return clusters
+
+
+def estimate_court_corners_from_jpeg(
+    jpeg: bytes,
+    *,
+    source_width: int | None = None,
+    source_height: int | None = None,
+) -> dict[str, Any]:
+    """Estimate four camera-view court corners from a snapshot JPEG.
+
+    Returned points are in source-frame coordinates, matching detector pixels.
+    """
+    arr = np.frombuffer(jpeg, dtype=np.uint8)
+    frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    if frame is None:
+        raise ValueError("could not decode snapshot")
+
+    img_h, img_w = frame.shape[:2]
+    max_width = 960.0
+    scale = min(1.0, max_width / float(max(img_w, 1)))
+    proc = (
+        cv2.resize(frame, (int(img_w * scale), int(img_h * scale)), interpolation=cv2.INTER_AREA)
+        if scale < 1.0
+        else frame.copy()
+    )
+    proc_h, proc_w = proc.shape[:2]
+
+    hsv = cv2.cvtColor(proc, cv2.COLOR_BGR2HSV)
+    mask = cv2.inRange(hsv, (0, 0, 155), (179, 85, 255))
+    mask[: int(proc_h * 0.08), : int(proc_w * 0.36)] = 0
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=1)
+    mask = cv2.dilate(mask, kernel, iterations=1)
+
+    lines = cv2.HoughLinesP(
+        mask,
+        1,
+        np.pi / 180,
+        threshold=max(45, int(proc_w * 0.06)),
+        minLineLength=max(50, int(proc_w * 0.10)),
+        maxLineGap=max(20, int(proc_w * 0.03)),
+    )
+    if lines is None:
+        raise ValueError("no court lines found")
+
+    segments: list[tuple[float, ...]] = []
+    for raw in lines[:, 0]:
+        x1, y1, x2, y2 = [float(v) for v in raw]
+        length = math.hypot(x2 - x1, y2 - y1)
+        if length < max(50.0, proc_w * 0.08):
+            continue
+        angle = math.degrees(math.atan2(y2 - y1, x2 - x1))
+        while angle <= -90.0:
+            angle += 180.0
+        while angle > 90.0:
+            angle -= 180.0
+        mx = (x1 + x2) / 2.0
+        my = (y1 + y2) / 2.0
+        segments.append((x1, y1, x2, y2, length, angle, mx, my))
+
+    horizontal = [s for s in segments if abs(float(s[5])) < 12.0]
+    diag_pos = [s for s in segments if 35.0 < float(s[5]) < 75.0 and float(s[6]) > proc_w * 0.42]
+    diag_neg = [s for s in segments if -75.0 < float(s[5]) < -35.0 and float(s[6]) < proc_w * 0.58]
+    if diag_pos:
+        max_len = max(float(s[4]) for s in diag_pos)
+        diag_pos = [s for s in diag_pos if float(s[4]) >= max_len * 0.55]
+    if diag_neg:
+        max_len = max(float(s[4]) for s in diag_neg)
+        diag_neg = [s for s in diag_neg if float(s[4]) >= max_len * 0.55]
+
+    clusters = [
+        cluster
+        for cluster in _cluster_horizontal_segments(horizontal, tolerance_px=max(10.0, proc_h * 0.035))
+        if sum(float(s[4]) for s in cluster) >= proc_w * 0.12
+    ]
+    if len(clusters) < 2 or not diag_pos or not diag_neg:
+        raise ValueError("not enough court line candidates")
+
+    top_cluster = clusters[0]
+    bottom_cluster = clusters[-1]
+    top_line = _fit_line_from_segments(top_cluster)
+    bottom_line = _fit_line_from_segments(bottom_cluster)
+    left_line = _fit_line_from_segments(diag_neg)
+    right_line = _fit_line_from_segments(diag_pos)
+
+    points_preview = {
+        "near_left": _intersect_lines(bottom_line, left_line),
+        "near_right": _intersect_lines(bottom_line, right_line),
+        "far_right": _intersect_lines(top_line, right_line),
+        "far_left": _intersect_lines(top_line, left_line),
+    }
+
+    source_w = float(source_width or img_w)
+    source_h = float(source_height or img_h)
+    x_scale = source_w / float(img_w)
+    y_scale = source_h / float(img_h)
+    points = {
+        corner: {
+            "x": round(float(pt[0]) / max(scale, 1e-9) * x_scale, 3),
+            "y": round(float(pt[1]) / max(scale, 1e-9) * y_scale, 3),
+        }
+        for corner, pt in points_preview.items()
+    }
+
+    for corner, point in points.items():
+        if not (0 <= point["x"] <= source_w and 0 <= point["y"] <= source_h):
+            raise ValueError(f"auto corner outside image: {corner}")
+
+    return {
+        "status": "ok",
+        "method": "white_line_hough",
+        "points": points,
+        "source_width": int(source_w),
+        "source_height": int(source_h),
+        "preview_width": int(img_w),
+        "preview_height": int(img_h),
+        "diagnostics": {
+            "line_count": len(segments),
+            "horizontal_clusters": len(clusters),
+            "left_segments": len(diag_neg),
+            "right_segments": len(diag_pos),
+        },
+    }
+
+
 def compute_corner_homography(
     image_points: dict[str, tuple[float, float]],
     court: dict[str, Any] | None = None,
+    camera_key: str | None = None,
 ) -> dict[str, Any]:
-    """Compute image/world homography matrices from four labeled court corners."""
+    """Compute image/world homography matrices from four camera-view corners."""
     court = court or {}
-    world_points = _corner_world_points(court)
+    world_points = _corner_world_points(court, camera_key)
     src = np.array([image_points[corner] for corner in COURT_CORNERS], dtype=np.float64)
     dst = np.array([world_points[corner] for corner in COURT_CORNERS], dtype=np.float64)
 
@@ -163,7 +345,11 @@ def update_homography_file(
         raise ValueError(f"unknown homography camera key: {camera_key}")
 
     image_points = normalize_corner_points(points)
-    computed = compute_corner_homography(image_points, data.get("court_dimensions", {}))
+    computed = compute_corner_homography(
+        image_points,
+        data.get("court_dimensions", {}),
+        camera_key=camera_key,
+    )
     timestamp = _dt.datetime.now(_dt.timezone.utc).isoformat()
 
     backup_path: Path | None = None
@@ -216,7 +402,7 @@ def homography_status(matrices_path: str | Path, camera_key: str | None = None) 
             h_world2img = np.array(cam_data["H_world_to_image"], dtype=np.float64)
             projected = {
                 corner: [round(float(v), 3) for v in _project(h_world2img, world)]
-                for corner, world in _corner_world_points(court).items()
+                for corner, world in _corner_world_points(court, key).items()
             }
         except Exception:
             projected = None
@@ -234,7 +420,7 @@ def homography_status(matrices_path: str | Path, camera_key: str | None = None) 
         "corner_order": list(COURT_CORNERS),
         "corner_points_world": {
             corner: [round(float(x), 6), round(float(y), 6)]
-            for corner, (x, y) in _corner_world_points(court).items()
+            for corner, (x, y) in _corner_world_points(court, camera_key).items()
         },
         "cameras": cameras,
     }

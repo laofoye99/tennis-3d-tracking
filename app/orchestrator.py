@@ -880,6 +880,10 @@ class Orchestrator:
         *,
         frame_id: int | None = None,
         capture_ts: float | None = None,
+        source_width: int | None = None,
+        source_height: int | None = None,
+        preview_width: int | None = None,
+        preview_height: int | None = None,
     ) -> None:
         """Publish a fresh preview frame and wake MJPEG consumers."""
         now = time.time()
@@ -892,6 +896,10 @@ class Orchestrator:
                 "frame_id": frame_id,
                 "capture_ts": capture_ts,
                 "updated_ts": now,
+                "source_width": source_width,
+                "source_height": source_height,
+                "preview_width": preview_width,
+                "preview_height": preview_height,
             }
             self._latest_frame_condition.notify_all()
 
@@ -957,15 +965,27 @@ class Orchestrator:
             recording_jpeg = payload.get("recording")
             frame_id = payload.get("frame_id")
             capture_ts = payload.get("capture_ts")
+            source_width = payload.get("source_width")
+            source_height = payload.get("source_height")
+            preview_width = payload.get("preview_width")
+            preview_height = payload.get("preview_height")
         else:
             preview_jpeg = payload
             recording_jpeg = payload if self._recording else None
+            source_width = None
+            source_height = None
+            preview_width = None
+            preview_height = None
         if preview_jpeg is not None:
             self._store_latest_frame(
                 name,
                 preview_jpeg,
                 frame_id=frame_id,
                 capture_ts=capture_ts,
+                source_width=source_width,
+                source_height=source_height,
+                preview_width=preview_width,
+                preview_height=preview_height,
             )
         with self._recording_lock:
             if self._recording and recording_jpeg is not None:
