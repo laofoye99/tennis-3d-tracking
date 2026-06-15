@@ -565,7 +565,7 @@ body{font-family:'Lato',sans-serif;background:var(--bg);color:var(--text);height
           <div class="section-title" style="display:flex;align-items:center;justify-content:space-between;gap:8px">
             <span>Mini Map</span>
             <span style="display:flex;gap:4px">
-              <button onclick="flipMinimap()" title="Rotate minimap 180 degrees" style="height:22px;border:1px solid #555;background:#202020;color:#ccc;border-radius:4px;cursor:pointer;font-size:11px;line-height:18px;padding:0 8px">180</button>
+              <button onclick="flipMinimap()" title="Mirror minimap horizontally" style="height:22px;border:1px solid #555;background:#202020;color:#ccc;border-radius:4px;cursor:pointer;font-size:11px;line-height:18px;padding:0 8px">↔</button>
               <button onclick="clearMinimapEvents()" title="Refresh minimap markers" style="width:22px;height:22px;border:1px solid #555;background:#202020;color:#ccc;border-radius:4px;cursor:pointer;font-size:13px;line-height:18px">&#8635;</button>
             </span>
           </div>
@@ -1212,8 +1212,8 @@ let _minimapLatestBounces=[];
 let _minimapLatestHits=[];
 let _minimapLatestSpeeds=[];
 let _minimapClearCutoff={sequence:-Infinity,timestamp:-Infinity,frame:-Infinity};
-const _storedMinimapRotate180=localStorage.getItem('tennis_minimap_rotate180');
-let _minimapRotate180=_storedMinimapRotate180===null?true:_storedMinimapRotate180==='1';
+const _storedMinimapMirrorX=localStorage.getItem('tennis_minimap_mirror_x');
+let _minimapMirrorX=_storedMinimapMirrorX===null?true:_storedMinimapMirrorX==='1';
 
 const TEST_BALLS=[
   {label:'B1',x:2.694,y:-10.069, z:0.177,color:'#4f88fa'},
@@ -1758,8 +1758,8 @@ function clearMinimapEvents(){
 }
 
 function flipMinimap(){
-  _minimapRotate180=!_minimapRotate180;
-  localStorage.setItem('tennis_minimap_rotate180',_minimapRotate180?'1':'0');
+  _minimapMirrorX=!_minimapMirrorX;
+  localStorage.setItem('tennis_minimap_mirror_x',_minimapMirrorX?'1':'0');
   _minimapLastDrawKey='';
   redrawMinimapIfChanged(true);
 }
@@ -1820,7 +1820,7 @@ function drawCourt(canvas, bounces, hits){
   const xMin=-5.485,xMax=5.485,yMin=-11.885,yMax=11.885;
   function mapPoint(x,y){
     let mx=Number(x),my=Number(y);
-    if(_minimapRotate180){mx=-mx;my=-my;}
+    if(_minimapMirrorX){mx=-mx;}
     return {
       x:courtLeft+((mx-xMin)/(xMax-xMin))*courtW,
       y:courtY+((yMax-my)/(yMax-yMin))*courtH,
@@ -1913,8 +1913,8 @@ function drawCourt(canvas, bounces, hits){
   function tx(x){return margin+((HW+PAD_X+x)/VW)*dw}
   function ty(y){return margin+((HL+PAD_Y-y)/VH)*dh}
   function eventPoint(x,y){
-    const mx=_minimapRotate180?-Number(x):Number(x);
-    const my=_minimapRotate180?-Number(y):Number(y);
+    const mx=_minimapMirrorX?-Number(x):Number(x);
+    const my=Number(y);
     return {x:tx(mx),y:ty(my)};
   }
 
@@ -2725,7 +2725,7 @@ function _minimapEventDrawToken(event){
 
 function _minimapDrawKey(bounces,hits,speeds){
   return [
-    _minimapRotate180?'r180':'normal',
+    _minimapMirrorX?'mirrorX':'normal',
     _minimapClearCutoff.sequence,
     _minimapClearCutoff.timestamp,
     _minimapClearCutoff.frame,
