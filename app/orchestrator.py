@@ -339,6 +339,11 @@ class Orchestrator:
         self._ws_min_send_interval_seconds = 1.0
         self._ws_last_send_monotonic = 0.0
         self._ws_generation = 0
+        display_orientation = getattr(config, "display_orientation", None)
+        self._display_orientation = {
+            "mirror_x": bool(getattr(display_orientation, "mirror_x", True)),
+            "mirror_y": bool(getattr(display_orientation, "mirror_y", False)),
+        }
 
         # Latency instrumentation
         self._latency_buffer: deque = deque(maxlen=1000)
@@ -2396,6 +2401,7 @@ class Orchestrator:
         return {
             "pipelines": pipelines,
             "triangulation_active": self._triangulation_active,
+            "display_orientation": self.get_display_orientation(),
         }
 
     def get_dashboard_live_payload(self) -> dict:
@@ -2404,11 +2410,72 @@ class Orchestrator:
             "latest_ball_3d": self._latest_3d.model_dump() if self._latest_3d is not None else None,
             "analytics": self.get_live_analytics(compact=True),
             "latest_detections": self._latest_detection_summary(max_candidates=2),
+            "display_orientation": self.get_display_orientation(),
             "server_ts": time.time(),
         }
 
     def get_latest_3d(self) -> Optional[BallPosition3D]:
         return self._latest_3d
+
+    @staticmethod
+    def _coerce_display_bool(value: Any, default: bool) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"1", "true", "yes", "on"}:
+                return True
+            if normalized in {"0", "false", "no", "off"}:
+                return False
+            return default
+        return bool(value)
+
+    def get_display_orientation(self) -> dict:
+        return dict(self._display_orientation)
+
+    def set_display_orientation(
+        self,
+        *,
+        mirror_x: Any | None = None,
+        mirror_y: Any | None = None,
+    ) -> dict:
+        with self._analytics_lock:
+            current = dict(self._display_orientation)
+            self._display_orientation = {
+                "mirror_x": self._coerce_display_bool(mirror_x, current["mirror_x"]),
+                "mirror_y": self._coerce_display_bool(mirror_y, current["mirror_y"]),
+            }
+            self._dashboard_analytics_cache = {}
+            return self.get_display_orientation()
+
+    def _apply_display_orientation_to_point(self, x: float, y: float) -> tuple[float, float]:
+        orientation = self.get_display_orientation()
+        dx = -x if orientation.get("mirror_x") else x
+        dy = -y if orientation.get("mirror_y") else y
+        return dx, dy
+
+    def _apply_display_orientation_to_ws_payload(self, payload: dict) -> dict:
+        """Return a 3D-display payload whose public coords match minimap orientation."""
+        try:
+            raw_x = float(payload.get("raw_x"))
+            raw_y = float(payload.get("raw_y"))
+        except (TypeError, ValueError):
+            return dict(payload)
+
+        display_x, display_y = self._apply_display_orientation_to_point(raw_x, raw_y)
+        display_ws_x = round(display_x * 10.0, 4)
+        display_ws_y = round(display_y * 10.0, 4)
+        oriented = dict(payload)
+        oriented["display_x"] = round(display_x, 4)
+        oriented["display_y"] = round(display_y, 4)
+        oriented["display_ws_x"] = display_ws_x
+        oriented["display_ws_y"] = display_ws_y
+        oriented["display_orientation"] = self.get_display_orientation()
+        oriented["x"] = display_ws_x
+        oriented["y"] = display_ws_y
+        oriented["ws_x"] = display_ws_x
+        oriented["ws_y"] = display_ws_y
+        return oriented
 
     def get_latest_detection(self, name: str) -> Optional[dict]:
         return self._latest_detections.get(name)
@@ -6649,6 +6716,7 @@ class Orchestrator:
                             if bd:
                                 if not self._ws_generation_active(generation):
                                     break
+                                bd = self._apply_display_orientation_to_ws_payload(bd)
                                 bounce_payload = {
                                     key: value
                                     for key, value in bd.items()

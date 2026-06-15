@@ -1212,8 +1212,8 @@ let _minimapLatestBounces=[];
 let _minimapLatestHits=[];
 let _minimapLatestSpeeds=[];
 let _minimapClearCutoff={sequence:-Infinity,timestamp:-Infinity,frame:-Infinity};
-const _storedMinimapMirrorX=localStorage.getItem('tennis_minimap_mirror_x');
-let _minimapMirrorX=_storedMinimapMirrorX===null?true:_storedMinimapMirrorX==='1';
+let _minimapMirrorX=true;
+let _minimapMirrorY=false;
 
 const TEST_BALLS=[
   {label:'B1',x:2.694,y:-10.069, z:0.177,color:'#4f88fa'},
@@ -1757,11 +1757,46 @@ function clearMinimapEvents(){
   redrawMinimapIfChanged(true);
 }
 
-function flipMinimap(){
-  _minimapMirrorX=!_minimapMirrorX;
-  localStorage.setItem('tennis_minimap_mirror_x',_minimapMirrorX?'1':'0');
-  _minimapLastDrawKey='';
-  redrawMinimapIfChanged(true);
+function applyDisplayOrientation(orientation, redraw=true){
+  if(!orientation) return false;
+  const nextMirrorX=orientation.mirror_x!==false;
+  const nextMirrorY=orientation.mirror_y===true;
+  const changed=nextMirrorX!==_minimapMirrorX||nextMirrorY!==_minimapMirrorY;
+  _minimapMirrorX=nextMirrorX;
+  _minimapMirrorY=nextMirrorY;
+  if(changed){
+    _minimapLastDrawKey='';
+    if(redraw) redrawMinimapIfChanged(true);
+  }
+  return changed;
+}
+
+async function syncDisplayOrientation(){
+  try{
+    const r=await fetch('/api/display-orientation',{cache:'no-store'});
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    applyDisplayOrientation(await r.json());
+  }catch(e){
+    console.warn('syncDisplayOrientation:',e);
+  }
+}
+
+async function flipMinimap(){
+  const previous={mirror_x:_minimapMirrorX,mirror_y:_minimapMirrorY};
+  const next={mirror_x:!_minimapMirrorX,mirror_y:_minimapMirrorY};
+  applyDisplayOrientation(next);
+  try{
+    const r=await fetch('/api/display-orientation',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(next),
+    });
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    applyDisplayOrientation(await r.json());
+  }catch(e){
+    applyDisplayOrientation(previous);
+    console.error('flipMinimap failed',e);
+  }
 }
 
 function drawCourt(canvas, bounces, hits){
@@ -1821,6 +1856,7 @@ function drawCourt(canvas, bounces, hits){
   function mapPoint(x,y){
     let mx=Number(x),my=Number(y);
     if(_minimapMirrorX){mx=-mx;}
+    if(_minimapMirrorY){my=-my;}
     return {
       x:courtLeft+((mx-xMin)/(xMax-xMin))*courtW,
       y:courtY+((yMax-my)/(yMax-yMin))*courtH,
@@ -1914,7 +1950,7 @@ function drawCourt(canvas, bounces, hits){
   function ty(y){return margin+((HL+PAD_Y-y)/VH)*dh}
   function eventPoint(x,y){
     const mx=_minimapMirrorX?-Number(x):Number(x);
-    const my=Number(y);
+    const my=_minimapMirrorY?-Number(y):Number(y);
     return {x:tx(mx),y:ty(my)};
   }
 
@@ -2725,7 +2761,7 @@ function _minimapEventDrawToken(event){
 
 function _minimapDrawKey(bounces,hits,speeds){
   return [
-    _minimapMirrorX?'mirrorX':'normal',
+    (_minimapMirrorX?'mirrorX':'normal')+(_minimapMirrorY?':mirrorY':''),
     _minimapClearCutoff.sequence,
     _minimapClearCutoff.timestamp,
     _minimapClearCutoff.frame,
@@ -2747,6 +2783,7 @@ function redrawMinimapIfChanged(force=false){
 
 function applyLiveDashboardPayload(d){
   if(!d) return;
+  applyDisplayOrientation(d.display_orientation,false);
 
   const analytics=d.analytics||{};
   const recentBounces=analytics.recent_bounces||[];
@@ -2844,6 +2881,7 @@ drawCourt(document.getElementById('minimap'),[],[]);
 requestAnimationFrame(_ballOverlayLoop);
 setInterval(poll,1000);
 setInterval(pollLiveOverlay,_LIVE_OVERLAY_POLL_MS);
+syncDisplayOrientation();
 poll();
 pollLiveOverlay();
 syncRecordingStatus();

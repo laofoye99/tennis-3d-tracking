@@ -73,6 +73,29 @@ async def dashboard_live():
     return orch.get_dashboard_live_payload()
 
 
+@router.get("/api/display-orientation")
+async def get_display_orientation():
+    """Return shared display orientation for minimap and 3D push."""
+    orch = _get_orch()
+    return orch.get_display_orientation()
+
+
+@router.post("/api/display-orientation")
+async def set_display_orientation(request: Request):
+    """Update shared display orientation for minimap and 3D push."""
+    orch = _get_orch()
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    if not isinstance(payload, dict):
+        raise HTTPException(400, "Expected JSON object")
+    return orch.set_display_orientation(
+        mirror_x=payload.get("mirror_x"),
+        mirror_y=payload.get("mirror_y"),
+    )
+
+
 # ---- Ball 3D ----
 
 @router.get("/api/ball3d")
