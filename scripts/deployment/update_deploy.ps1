@@ -170,18 +170,78 @@ function Install-Requirements {
     Invoke-External -Exe $pythonExe -Args @("-m", "pip", "install", "-r", "requirements.txt") -WorkingDirectory $RepoPath
 }
 
+function Get-AppPort {
+    try {
+        $uri = [System.Uri]$AppUrl
+        if ($uri.Port -gt 0) {
+            return [int]$uri.Port
+        }
+    } catch {
+        Write-Host "Could not parse app URL '$AppUrl'; defaulting to port 8000."
+    }
+    return 8000
+}
+
+function Get-ListeningProcessIdsOnPort {
+    param([int]$Port)
+    return Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue |
+        Select-Object -ExpandProperty OwningProcess -Unique
+}
+
+function Get-DescendantProcessIds {
+    param([int[]]$RootIds)
+
+    $allProcesses = @(Get-CimInstance Win32_Process)
+    $seen = New-Object "System.Collections.Generic.HashSet[int]"
+    $queue = New-Object "System.Collections.Generic.Queue[int]"
+
+    foreach ($rootId in $RootIds) {
+        if ($seen.Add([int]$rootId)) {
+            $queue.Enqueue([int]$rootId)
+        }
+    }
+
+    while ($queue.Count -gt 0) {
+        $parentId = $queue.Dequeue()
+        foreach ($child in ($allProcesses | Where-Object { [int]$_.ParentProcessId -eq $parentId })) {
+            $childId = [int]$child.ProcessId
+            if ($seen.Add($childId)) {
+                $queue.Enqueue($childId)
+            }
+        }
+    }
+
+    return @($seen)
+}
+
 function Stop-FallbackProcesses {
     $escapedRepo = [regex]::Escape($RepoPath)
+    $appPort = Get-AppPort
+    $listeningProcessIds = @(Get-ListeningProcessIdsOnPort -Port $appPort | ForEach-Object { [int]$_ })
     $processes = Get-CimInstance Win32_Process |
         Where-Object {
-            $_.CommandLine -and
-            $_.CommandLine -match $escapedRepo -and
-            $_.CommandLine -match "main\.py"
+            $cmd = $_.CommandLine
+            if ([string]::IsNullOrWhiteSpace($cmd)) {
+                return $false
+            }
+            $looksLikeApp = $cmd -match "main\.py"
+            $mentionsRepo = $cmd -match $escapedRepo
+            $listensOnAppPort = $listeningProcessIds -contains [int]$_.ProcessId
+            return $looksLikeApp -and ($mentionsRepo -or $listensOnAppPort)
         }
 
-    foreach ($proc in $processes) {
-        Write-Host "Stopping existing app process PID $($proc.ProcessId)."
-        Stop-Process -Id $proc.ProcessId -Force
+    $rootIds = @($processes | Select-Object -ExpandProperty ProcessId)
+    if ($rootIds.Count -eq 0) {
+        Write-Host "No fallback app processes found."
+        return
+    }
+
+    $stopIds = @(Get-DescendantProcessIds -RootIds $rootIds)
+    foreach ($processId in ($stopIds | Sort-Object -Descending)) {
+        if (Get-Process -Id $processId -ErrorAction SilentlyContinue) {
+            Write-Host "Stopping existing app process PID $processId."
+            Stop-Process -Id $processId -Force
+        }
     }
 }
 
