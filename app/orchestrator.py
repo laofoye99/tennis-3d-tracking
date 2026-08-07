@@ -64,7 +64,7 @@ class Orchestrator:
     """Manages camera pipelines, triangulation, and exposes state for the API."""
 
     _LIVE_BOUNCE_HISTORY_LIMIT = 500
-    _YOLO_FUZZY_BUFFER_SIZE = 180
+    _YOLO_FUZZY_BUFFER_SIZE = 600
     _YOLO_FUZZY_EMIT_DELAY_FRAMES = 5
     _YOLO_FUZZY_COOLDOWN_FRAMES = 10
     _YOLO_FUZZY_ANALYSIS_STRIDE = 5
@@ -81,6 +81,24 @@ class Orchestrator:
     _YOLO_LIVE_WEAK_NON_REVERSAL_MAX_ANGLE = 45.0
     _YOLO_LIVE_WEAK_NON_REVERSAL_MIN_SCORE = 90.0
     _YOLO_LIVE_DUPLICATE_SPACE_METERS = 2.5
+    _YOLO_LIVE_MAX_FRAME_REGRESSION = 25
+    _YOLO_LIVE_LATE_RECOVERY_MAX_REGRESSION = 800
+    _YOLO_LIVE_BASELINE_STALE_SPEED_FRAMES = 80
+    _YOLO_LIVE_BASELINE_STALE_SPEED_MARGIN_M = 0.25
+    _YOLO_LIVE_FUTURE_SPEED_MAX_GAP_FRAMES = 120
+    _YOLO_LIVE_LOW_SPEED_STALE_CONTEXT_FRAMES = 240
+    _YOLO_LIVE_LOW_SPEED_STALE_CONTEXT_KMH = 10.0
+    _YOLO_LIVE_FUTURE_LOW_SPEED_MAX_GAP_FRAMES = 300
+    _YOLO_LIVE_FUTURE_LOW_SPEED_KMH = 35.0
+    _YOLO_LIVE_SLOW_QUEUE_STALE_SPEED_FRAMES = 80
+    _YOLO_GAP_FILL_MIN_FRAMES = 225
+    _YOLO_GAP_FILL_SHORT_TRACK_MIN_SCORE = 120.0
+    _YOLO_GAP_FILL_WEAK_MIN_SCORE = 50.0
+    _YOLO_GAP_FILL_WEAK_MIN_DELTA_V = 8.0
+    _YOLO_GAP_FILL_MIN_CONFIDENCE = 0.14
+    _COURT_HALF_WIDTH_M = 4.115
+    _COURT_HALF_LENGTH_M = 11.89
+    _SINGLE_CAM_CLAMP_MARGIN_M = 12.0
 
     def __init__(self, config: AppConfig):
         self.config = config
@@ -318,6 +336,15 @@ class Orchestrator:
         self._ws_thread: Optional[threading.Thread] = None
         self._ws_url = "wss://tennisserver.motionrivalry.com:8086/general"
         self._ws_enabled = False
+        self._ws_zero_speed_grace_seconds = 24.0
+        self._ws_min_send_interval_seconds = 1.0
+        self._ws_last_send_monotonic = 0.0
+        self._ws_generation = 0
+        display_orientation = getattr(config, "display_orientation", None)
+        self._display_orientation = {
+            "mirror_x": bool(getattr(display_orientation, "mirror_x", True)),
+            "mirror_y": bool(getattr(display_orientation, "mirror_y", False)),
+        }
 
         # Latency instrumentation
         self._latency_buffer: deque = deque(maxlen=1000)
@@ -761,21 +788,27 @@ class Orchestrator:
             "detections": detections,
             "player_poses": player_poses,
         }
+        stats = self._yolo_fuzzy_live_stats.setdefault(cam_name, {})
+        stats["worker_enabled"] = True
         try:
-            while True:
-                try:
-                    task_queue.get_nowait()
-                except queue.Empty:
-                    break
-                except Exception:
-                    break
             task_queue.put_nowait(task)
-            stats = self._yolo_fuzzy_live_stats.setdefault(cam_name, {})
-            stats["worker_enabled"] = True
             stats["worker_last_submitted_task_id"] = task_id
             return True
+        except queue.Full:
+            try:
+                task_queue.get_nowait()
+                stats["worker_submit_replaced_busy"] = int(
+                    stats.get("worker_submit_replaced_busy", 0)
+                ) + 1
+                task_queue.put_nowait(task)
+                stats["worker_last_submitted_task_id"] = task_id
+                return True
+            except Exception:
+                stats["worker_submit_skipped_busy"] = int(
+                    stats.get("worker_submit_skipped_busy", 0)
+                ) + 1
+                return True
         except Exception:
-            stats = self._yolo_fuzzy_live_stats.setdefault(cam_name, {})
             stats["worker_submit_dropped"] = int(stats.get("worker_submit_dropped", 0)) + 1
             return False
 
@@ -805,6 +838,43 @@ class Orchestrator:
             except Exception as e:
                 logger.warning("Failed to auto-save debug output: %s", e)
 
+    def reload_homography(self, name: str, *, restart_pipeline: bool = False) -> dict:
+        """Clear cached homography state after the matrix file is updated.
+
+        Running pipeline processes load homography at process start, so a full
+        camera restart is needed for pixel->court conversion to change there.
+        """
+        if name not in self._handles:
+            raise ValueError(f"Unknown pipeline: {name}")
+
+        handle = self._handles[name]
+        was_running = bool(handle.is_alive())
+
+        self._blob_homographies.pop(name, None)
+        if hasattr(self, "_player_homographies"):
+            try:
+                self._player_homographies.pop(name, None)
+            except Exception:
+                pass
+        self._candidate_continuity.pop(name, None)
+        self._stop_yolo_event_worker(name)
+
+        restarted = False
+        if restart_pipeline and was_running:
+            self.stop_pipeline(name)
+            self.start_pipeline(name)
+            restarted = True
+
+        return {
+            "camera": name,
+            "was_running": was_running,
+            "restart_requested": bool(restart_pipeline),
+            "restarted": restarted,
+            "note": "Restart the camera pipeline for running processes to use the new homography."
+            if not restarted
+            else "Camera pipeline restarted with the new homography.",
+        }
+
     def shutdown(self) -> None:
         self._stopped.set()
         for cam_name in list(self._yolo_event_processes):
@@ -820,6 +890,10 @@ class Orchestrator:
         *,
         frame_id: int | None = None,
         capture_ts: float | None = None,
+        source_width: int | None = None,
+        source_height: int | None = None,
+        preview_width: int | None = None,
+        preview_height: int | None = None,
     ) -> None:
         """Publish a fresh preview frame and wake MJPEG consumers."""
         now = time.time()
@@ -832,6 +906,10 @@ class Orchestrator:
                 "frame_id": frame_id,
                 "capture_ts": capture_ts,
                 "updated_ts": now,
+                "source_width": source_width,
+                "source_height": source_height,
+                "preview_width": preview_width,
+                "preview_height": preview_height,
             }
             self._latest_frame_condition.notify_all()
 
@@ -897,15 +975,27 @@ class Orchestrator:
             recording_jpeg = payload.get("recording")
             frame_id = payload.get("frame_id")
             capture_ts = payload.get("capture_ts")
+            source_width = payload.get("source_width")
+            source_height = payload.get("source_height")
+            preview_width = payload.get("preview_width")
+            preview_height = payload.get("preview_height")
         else:
             preview_jpeg = payload
             recording_jpeg = payload if self._recording else None
+            source_width = None
+            source_height = None
+            preview_width = None
+            preview_height = None
         if preview_jpeg is not None:
             self._store_latest_frame(
                 name,
                 preview_jpeg,
                 frame_id=frame_id,
                 capture_ts=capture_ts,
+                source_width=source_width,
+                source_height=source_height,
+                preview_width=preview_width,
+                preview_height=preview_height,
             )
         with self._recording_lock:
             if self._recording and recording_jpeg is not None:
@@ -2327,6 +2417,7 @@ class Orchestrator:
         return {
             "pipelines": pipelines,
             "triangulation_active": self._triangulation_active,
+            "display_orientation": self.get_display_orientation(),
         }
 
     def get_dashboard_live_payload(self) -> dict:
@@ -2335,11 +2426,72 @@ class Orchestrator:
             "latest_ball_3d": self._latest_3d.model_dump() if self._latest_3d is not None else None,
             "analytics": self.get_live_analytics(compact=True),
             "latest_detections": self._latest_detection_summary(max_candidates=2),
+            "display_orientation": self.get_display_orientation(),
             "server_ts": time.time(),
         }
 
     def get_latest_3d(self) -> Optional[BallPosition3D]:
         return self._latest_3d
+
+    @staticmethod
+    def _coerce_display_bool(value: Any, default: bool) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"1", "true", "yes", "on"}:
+                return True
+            if normalized in {"0", "false", "no", "off"}:
+                return False
+            return default
+        return bool(value)
+
+    def get_display_orientation(self) -> dict:
+        return dict(self._display_orientation)
+
+    def set_display_orientation(
+        self,
+        *,
+        mirror_x: Any | None = None,
+        mirror_y: Any | None = None,
+    ) -> dict:
+        with self._analytics_lock:
+            current = dict(self._display_orientation)
+            self._display_orientation = {
+                "mirror_x": self._coerce_display_bool(mirror_x, current["mirror_x"]),
+                "mirror_y": self._coerce_display_bool(mirror_y, current["mirror_y"]),
+            }
+            self._dashboard_analytics_cache = {}
+            return self.get_display_orientation()
+
+    def _apply_display_orientation_to_point(self, x: float, y: float) -> tuple[float, float]:
+        orientation = self.get_display_orientation()
+        dx = -x if orientation.get("mirror_x") else x
+        dy = -y if orientation.get("mirror_y") else y
+        return dx, dy
+
+    def _apply_display_orientation_to_ws_payload(self, payload: dict) -> dict:
+        """Return a 3D-display payload whose public coords match minimap orientation."""
+        try:
+            raw_x = float(payload.get("raw_x"))
+            raw_y = float(payload.get("raw_y"))
+        except (TypeError, ValueError):
+            return dict(payload)
+
+        display_x, display_y = self._apply_display_orientation_to_point(raw_x, raw_y)
+        display_ws_x = round(display_x * 10.0, 4)
+        display_ws_y = round(display_y * 10.0, 4)
+        oriented = dict(payload)
+        oriented["display_x"] = round(display_x, 4)
+        oriented["display_y"] = round(display_y, 4)
+        oriented["display_ws_x"] = display_ws_x
+        oriented["display_ws_y"] = display_ws_y
+        oriented["display_orientation"] = self.get_display_orientation()
+        oriented["x"] = display_ws_x
+        oriented["y"] = display_ws_y
+        oriented["ws_x"] = display_ws_x
+        oriented["ws_y"] = display_ws_y
+        return oriented
 
     def get_latest_detection(self, name: str) -> Optional[dict]:
         return self._latest_detections.get(name)
@@ -2478,6 +2630,178 @@ class Orchestrator:
             for old_frame in seen_frames
         )
 
+    def _reject_stale_yolo_bounce_frame_locked(
+        self,
+        cam_name: str,
+        event_frame: int,
+        stats: dict,
+        event: dict | None = None,
+    ) -> bool:
+        """Reject YOLO bounces that arrive far behind the already published stream."""
+        last_emitted_frame = self._yolo_fuzzy_last_emitted_frame.get(cam_name)
+        if last_emitted_frame is None:
+            return False
+        max_regression = int(self._YOLO_LIVE_MAX_FRAME_REGRESSION)
+        if event_frame >= int(last_emitted_frame) - max_regression:
+            return False
+        if event is not None and self._allow_late_yolo_bounce_recovery_locked(
+            cam_name,
+            event,
+            event_frame=event_frame,
+            last_emitted_frame=int(last_emitted_frame),
+            stats=stats,
+        ):
+            return False
+        stats["skipped_stale_yolo_bounces"] = int(
+            stats.get("skipped_stale_yolo_bounces", 0)
+        ) + 1
+        stats["last_reject_reason"] = (
+            f"stale_yolo_frame:{event_frame}<last:{last_emitted_frame}"
+        )
+        stats["last_stale_yolo_frame"] = event_frame
+        stats["last_stale_yolo_last_emitted_frame"] = int(last_emitted_frame)
+        self._remember_yolo_bounce_reject_locked(
+            stats,
+            event or {"frame_index": event_frame},
+            f"stale_yolo_frame:{event_frame}<last:{last_emitted_frame}",
+        )
+        return True
+
+    def _allow_late_yolo_bounce_recovery_locked(
+        self,
+        cam_name: str,
+        event: dict,
+        *,
+        event_frame: int,
+        last_emitted_frame: int,
+        stats: dict,
+    ) -> bool:
+        """Allow select high-quality YOLO bounces that arrive out of order."""
+        if not self._is_yolo_queue_event(event):
+            return False
+        regression = int(last_emitted_frame) - int(event_frame)
+        if regression <= 0 or regression > int(self._YOLO_LIVE_LATE_RECOVERY_MAX_REGRESSION):
+            return False
+        if self._is_duplicate_yolo_live_bounce_locked(cam_name, event):
+            return False
+
+        confidence = self._event_float(event, "confidence") or 0.0
+        score = self._yolo_bounce_signal_score(event)
+        delta_v = self._event_float(event, "delta_v") or 0.0
+        queue_speed = self._event_float(event, "queue_speed_px") or 0.0
+        try:
+            history = int(event.get("queue_history_len") or 0)
+        except Exception:
+            history = 0
+
+        strong_shape = (
+            confidence >= 0.30
+            and score >= 300.0
+            and delta_v >= 10.0
+            and queue_speed >= 7.0
+            and history >= 8
+        )
+        steady_queue_shape = (
+            confidence >= 0.30
+            and score >= 145.0
+            and delta_v >= 2.5
+            and queue_speed >= 8.0
+            and history >= 12
+        )
+        if not (strong_shape or steady_queue_shape):
+            return False
+
+        event["late_yolo_recovery"] = True
+        event["late_yolo_recovery_regression_frames"] = int(regression)
+        stats["allowed_late_yolo_recovery_bounces"] = int(
+            stats.get("allowed_late_yolo_recovery_bounces", 0)
+        ) + 1
+        stats["last_late_yolo_recovery_frame"] = int(event_frame)
+        stats["last_late_yolo_recovery_regression_frames"] = int(regression)
+        return True
+
+    def _remember_yolo_bounce_reject_locked(
+        self,
+        stats: dict,
+        event: dict,
+        reason: str,
+    ) -> None:
+        entry = {
+            "frame": self._event_frame(event),
+            "reason": reason,
+            "x": event.get("raw_x", event.get("x")),
+            "y": event.get("raw_y", event.get("y")),
+            "source": event.get("source"),
+            "queue_id": event.get("queue_id"),
+            "queue_history_len": event.get("queue_history_len"),
+            "queue_speed_px": event.get("queue_speed_px"),
+            "confidence": event.get("confidence"),
+            "angle": event.get("angle"),
+            "delta_v": event.get("delta_v"),
+            "bounce_signal_score": event.get("bounce_signal_score"),
+            "slow_queue_shape_override": event.get("slow_queue_shape_override"),
+            "speed_frame_gap": event.get("speed_frame_gap"),
+            "speed_source": event.get("speed_source"),
+        }
+        recent = stats.get("recent_rejected_bounces")
+        if not isinstance(recent, list):
+            recent = []
+        recent.append(entry)
+        stats["recent_rejected_bounces"] = recent[-80:]
+
+    def _set_yolo_bounce_debug_list_locked(
+        self,
+        stats: dict,
+        key: str,
+        events: list[dict] | tuple[dict, ...] | None,
+        *,
+        latest_frame: int | None = None,
+        limit: int = 80,
+    ) -> None:
+        rows: list[dict] = []
+        for event in list(events or [])[-limit:]:
+            if not isinstance(event, dict):
+                continue
+            rows.append(
+                {
+                    "frame": self._event_frame(event),
+                    "x": event.get("raw_x", event.get("x")),
+                    "y": event.get("raw_y", event.get("y")),
+                    "source": event.get("source"),
+                    "type": event.get("type"),
+                    "in_court": event.get("in_court"),
+                    "publish_suppression_reason": event.get("publish_suppression_reason"),
+                    "deduped_by_frame": event.get("deduped_by_frame"),
+                    "queue_id": event.get("queue_id"),
+                    "queue_history_len": event.get("queue_history_len"),
+                    "queue_speed_px": event.get("queue_speed_px"),
+                    "confidence": event.get("confidence"),
+                    "angle": event.get("angle"),
+                    "delta_v": event.get("delta_v"),
+                    "bounce_signal_score": event.get("bounce_signal_score"),
+                    "slow_queue_shape_override": event.get("slow_queue_shape_override"),
+                    "near_side_low_delta_override": event.get("near_side_low_delta_override"),
+                    "late_yolo_recovery": event.get("late_yolo_recovery"),
+                    "late_yolo_recovery_regression_frames": event.get("late_yolo_recovery_regression_frames"),
+                }
+            )
+        stats[key] = rows
+        if key.startswith("last_"):
+            history_key = "recent_" + key[len("last_"):]
+            history = stats.get(history_key)
+            if not isinstance(history, list):
+                history = []
+            for row in rows:
+                if history and all(
+                    history[-1].get(field) == row.get(field)
+                    for field in ("frame", "source", "publish_suppression_reason")
+                ):
+                    continue
+                history.append(row)
+            stats[history_key] = history[-300:]
+        if latest_frame is not None:
+            stats[f"{key}_latest_frame"] = int(latest_frame)
+
     @staticmethod
     def _event_frame(event: dict) -> int | None:
         frame = event.get("frame_index", event.get("frame"))
@@ -2536,7 +2860,10 @@ class Orchestrator:
         stats["last_analyzed_frame"] = frame_index
         stats["analysis_calls"] = int(stats.get("analysis_calls", 0)) + 1
 
-        from app.pipeline.yolo_bounce_filter import detect_single_camera_events
+        from app.pipeline.yolo_bounce_filter import (
+            detect_single_camera_events,
+            filter_dashboard_yolo_publishable_bounces,
+        )
 
         buffered = list(buf)
         lookback_frames = int(
@@ -2594,6 +2921,12 @@ class Orchestrator:
         hit_events = result.get("hits", [])
         speed_events = result.get("speed_events", [])
         gate_only_bounce_events = result.get("gate_only_bounces", []) or []
+        self._set_yolo_bounce_debug_list_locked(
+            stats,
+            "last_raw_yolo_bounce_candidates",
+            bounce_events,
+            latest_frame=frame_index,
+        )
         stats["candidate_bounces"] = int(result.get("count", len(bounce_events)) or 0)
         stats["raw_bounce_candidates"] = int(result.get("raw_bounce_candidate_count", 0) or 0)
         stats["suppressed_bounces_by_hit_window"] = int(result.get("suppressed_bounces_by_hit_window", 0) or 0)
@@ -2602,6 +2935,11 @@ class Orchestrator:
         stats["out_rally_suppressed_bounces"] = int(result.get("out_rally_suppressed_bounce_count", 0) or 0)
         stats["candidate_hits"] = int(result.get("hit_count", len(hit_events)) or 0)
         stats["candidate_speed_events"] = int(result.get("speed_count", len(speed_events)) or 0)
+        stats["auxiliary_fallback_bounce_count"] = int(result.get("auxiliary_fallback_bounce_count", 0) or 0)
+        stats["auxiliary_fallback_speed_count"] = int(result.get("auxiliary_fallback_speed_count", 0) or 0)
+        stats["auxiliary_fallback_speed_ignored_count"] = int(
+            result.get("auxiliary_fallback_speed_ignored_count", 0) or 0
+        )
         stats["player_pose_buffered"] = len(player_poses)
         if result.get("queue_tracker_stats"):
             stats["queue_tracker_stats"] = dict(result.get("queue_tracker_stats") or {})
@@ -2626,9 +2964,52 @@ class Orchestrator:
             getattr(self.config.hit_bounce_refiner, "hit_suppression_frames", 3) or 0
         )
         stats["hit_suppression_frames"] = len(suppression_frames)
+        latest_frame = frame_index
+        release_delay = int(getattr(self.config.hit_bounce_refiner, "release_delay_frames", 50) or 0)
+        yolo_bounce_events = [event for event in bounce_events if self._is_yolo_queue_event(event)]
+        passthrough_bounce_events = [event for event in bounce_events if not self._is_yolo_queue_event(event)]
+        publish_suppressed_events = []
+        if yolo_bounce_events:
+            publish_filter = filter_dashboard_yolo_publishable_bounces(
+                yolo_bounce_events,
+                hit_events=hit_events,
+                latest_frame=latest_frame,
+                hit_suppress_frames=hit_suppress_frames,
+                clean_time_frames=int(getattr(self.config.hit_bounce_refiner, "clean_time_frames", 25) or 25),
+                clean_space_meters=float(getattr(self.config.hit_bounce_refiner, "clean_space_meters", 1.5)),
+                release_delay_frames=release_delay,
+            )
+            publish_suppressed_events = (
+                publish_filter.get("suppressed_bounces")
+                or publish_filter.get("suppressed")
+                or []
+            )
+            bounce_events = passthrough_bounce_events + (publish_filter.get("bounces") or [])
+            stats["publish_suppression_counts"] = publish_filter.get("suppression_counts", {})
+            stats["publish_suppressed_bounces"] = len(publish_suppressed_events)
+        self._set_yolo_bounce_debug_list_locked(
+            stats,
+            "last_publishable_yolo_bounces",
+            bounce_events,
+            latest_frame=frame_index,
+        )
+        self._set_yolo_bounce_debug_list_locked(
+            stats,
+            "last_suppressed_yolo_bounces",
+            publish_suppressed_events,
+            latest_frame=frame_index,
+        )
 
         emitted = None
-        latest_frame = frame_index
+        last_speed_frame = self._record_yolo_speed_events_locked(
+            cam_name,
+            speed_events,
+            latest_frame=latest_frame,
+            last_speed_frame=last_speed_frame,
+            seen_speeds=seen_speeds,
+            stats=stats,
+            buffered=buffered,
+        )
         self._record_yolo_gate_only_bounces_locked(
             cam_name,
             gate_only_bounce_events,
@@ -2641,14 +3022,28 @@ class Orchestrator:
             event_frame = self._event_frame(event)
             if event_frame is None:
                 continue
+            if self._reject_stale_yolo_bounce_frame_locked(cam_name, event_frame, stats, event):
+                continue
             quality_reject_reason = self._reject_yolo_live_bounce_quality_locked(
                 event,
                 event_frame=event_frame,
                 stats=stats,
             )
             if quality_reject_reason:
-                stats["last_reject_reason"] = quality_reject_reason
-                continue
+                if not self._allow_yolo_gap_fill_quality_bounce_locked(
+                    cam_name,
+                    event,
+                    event_frame=event_frame,
+                    quality_reject_reason=quality_reject_reason,
+                    stats=stats,
+                ):
+                    stats["last_reject_reason"] = quality_reject_reason
+                    self._remember_yolo_bounce_reject_locked(
+                        stats,
+                        event,
+                        quality_reject_reason,
+                    )
+                    continue
             suppressing_hit_frame = None
             if hit_suppress_frames > 0:
                 for hit_frame in list(suppression_frames):
@@ -2680,7 +3075,6 @@ class Orchestrator:
                 ) + 1
                 stats["last_reject_reason"] = f"hit_window_shadow:{shadow_frame}"
                 continue
-            release_delay = int(getattr(self.config.hit_bounce_refiner, "release_delay_frames", 50) or 0)
             if release_delay > 0 and latest_frame - event_frame + 1 < release_delay:
                 stats["pending_release_delay_frames"] = release_delay
                 stats["pending_release_bounces"] = int(stats.get("pending_release_bounces", 0)) + 1
@@ -2742,6 +3136,15 @@ class Orchestrator:
                 "queue_static_blocked_history": event.get("queue_static_blocked_history"),
                 "bounce_signal_score": event.get("bounce_signal_score"),
                 "dedupe_cluster_size": event.get("dedupe_cluster_size"),
+                "publish_quality_override": event.get("publish_quality_override"),
+                "slow_queue_shape_override": event.get("slow_queue_shape_override"),
+                "near_side_low_delta_override": event.get("near_side_low_delta_override"),
+                "stale_speed_context_override": event.get("stale_speed_context_override"),
+                "late_yolo_recovery": event.get("late_yolo_recovery"),
+                "late_yolo_recovery_regression_frames": event.get("late_yolo_recovery_regression_frames"),
+                "gap_fill_reason": event.get("gap_fill_reason"),
+                "gap_fill_from_frame": event.get("gap_fill_from_frame"),
+                "gap_fill_frames": event.get("gap_fill_frames"),
             }
             # detect_single_camera_events() already applies the verified
             # HIT-first suppression and 25f/1.5m final-bounce cleanup. Do not
@@ -2753,6 +3156,8 @@ class Orchestrator:
                 fallback_speed_kmh=0,
             )
             accepted_bd["refiner_source"] = accepted_bd.get("refiner_source", "yolo_hit_first_final")
+            if self._reject_yolo_live_bounce_speed_context_locked(accepted_bd, stats=stats):
+                continue
             duplicate_action = self._replace_weaker_yolo_duplicate_bounce_locked(
                 cam_name,
                 accepted_bd,
@@ -2765,7 +3170,8 @@ class Orchestrator:
                 self._stash_yolo_out_gate_pending_bounce_locked(cam_name, accepted_bd)
                 stats["last_reject_reason"] = "out_rally_gate"
                 continue
-            self._record_live_bounce_locked(accepted_bd, debug_source=accepted_bd)
+            if not self._record_live_bounce_locked(accepted_bd, debug_source=accepted_bd):
+                continue
             seen.append(event_frame)
             self._yolo_fuzzy_last_emitted_frame[cam_name] = event_frame
             last_emitted_frame = event_frame
@@ -2830,46 +3236,6 @@ class Orchestrator:
         self._remember_yolo_hit_suppressed_result_bounces_locked(cam_name, result, stats)
         self._retract_yolo_live_bounces_shadowing_hit_suppressed_locked(cam_name, stats)
 
-        for event in speed_events:
-            event_frame = self._event_frame(event)
-            if event_frame is None:
-                continue
-            if not self._can_emit_yolo_event(
-                event_frame=event_frame,
-                latest_frame=latest_frame,
-                last_emitted_frame=last_speed_frame,
-                seen_frames=seen_speeds,
-                cooldown_frames=0,
-            ):
-                continue
-            now = time.time()
-            event_capture_ts = self._event_capture_ts(buffered, event_frame, now)
-            speed_event = {
-                "frame": event_frame,
-                "frame_index": event_frame,
-                "x": event.get("x"),
-                "y": event.get("y"),
-                "pixel_x": event.get("pixel_x"),
-                "pixel_y": event.get("pixel_y"),
-                "camera": cam_name,
-                "camera_name": cam_name,
-                "type": "SPEED",
-                "kind": "speed",
-                "speed_kmh": int(round(float(event.get("speed_kmh", 0) or 0))),
-                "direction": event.get("direction"),
-                "timestamp": event_capture_ts,
-                "capture_ts": event_capture_ts,
-                "detect_delay": round(now - event_capture_ts, 2),
-                "bounce_mode": f"mono_{cam_name}",
-                "source": event.get("source", "single_cam_speed_crossing"),
-            }
-            self._record_live_speed_event_locked(speed_event)
-            seen_speeds.append(event_frame)
-            self._yolo_fuzzy_last_emitted_speed_frame[cam_name] = event_frame
-            last_speed_frame = event_frame
-            stats["accepted_speed_events"] = int(stats.get("accepted_speed_events", 0)) + 1
-            stats["last_speed_frame"] = event_frame
-
         return emitted
 
     @staticmethod
@@ -2915,12 +3281,421 @@ class Orchestrator:
             stats[key] = int(stats.get(key, 0)) + 1
         return reason
 
+    def _reject_yolo_live_bounce_speed_context_locked(
+        self,
+        event: dict,
+        *,
+        stats: dict,
+    ) -> str | None:
+        """Reject YOLO bounces whose attached speed context is clearly stale."""
+        if not self._is_yolo_queue_event(event):
+            return None
+        try:
+            speed_frame_gap = int(event.get("speed_frame_gap"))
+        except (TypeError, ValueError):
+            return None
+
+        speed_source = str(event.get("speed_source", "") or "")
+        raw_y = self._event_float(event, "raw_y")
+        if raw_y is None:
+            raw_y = self._event_float(event, "y")
+        raw_x = self._event_float(event, "raw_x")
+        if raw_x is None:
+            raw_x = self._event_float(event, "x")
+        near_baseline = (
+            raw_y is not None
+            and abs(raw_y) >= float(self._COURT_HALF_LENGTH_M) - float(
+                self._YOLO_LIVE_BASELINE_STALE_SPEED_MARGIN_M
+            )
+        )
+        speed_kmh = self._event_float(event, "speed_kmh")
+        if speed_kmh is None:
+            speed_kmh = self._event_float(event, "speed")
+
+        reason = None
+        if (
+            near_baseline
+            and abs(speed_frame_gap) > int(self._YOLO_LIVE_BASELINE_STALE_SPEED_FRAMES)
+        ):
+            reason = "quality_stale_baseline_speed"
+        elif (
+            bool(event.get("slow_queue_shape_override"))
+            and abs(speed_frame_gap)
+            > int(self._YOLO_LIVE_SLOW_QUEUE_STALE_SPEED_FRAMES)
+        ):
+            reason = "quality_stale_slow_queue_speed"
+        elif (
+            speed_kmh is not None
+            and speed_kmh <= float(self._YOLO_LIVE_LOW_SPEED_STALE_CONTEXT_KMH)
+            and abs(speed_frame_gap)
+            > int(self._YOLO_LIVE_LOW_SPEED_STALE_CONTEXT_FRAMES)
+        ):
+            reason = "quality_stale_low_speed_context"
+        elif (
+            speed_source == "future_single_cam_speed_backfill"
+            and speed_kmh is not None
+            and speed_kmh < float(self._YOLO_LIVE_FUTURE_LOW_SPEED_KMH)
+            and abs(speed_frame_gap)
+            > int(self._YOLO_LIVE_FUTURE_LOW_SPEED_MAX_GAP_FRAMES)
+        ):
+            reason = "quality_distant_future_speed"
+        elif (
+            raw_y is not None
+            and raw_x is not None
+            and abs(raw_x) <= 1.5
+            and raw_y >= 5.0
+            and str(event.get("speed_direction", "") or "") == "top_down"
+            and speed_source == "future_single_cam_speed_backfill"
+            and abs(speed_frame_gap) > 60
+        ):
+            reason = "quality_distant_top_down_positive_future_speed"
+        elif (
+            raw_y is not None
+            and raw_x is not None
+            and abs(raw_x) <= 1.5
+            and raw_y >= 5.0
+            and str(event.get("speed_direction", "") or "") == "top_down"
+            and speed_frame_gap >= 45
+        ):
+            reason = "quality_stale_top_down_positive_speed"
+
+        if reason == "quality_stale_slow_queue_speed":
+            try:
+                confidence = float(event.get("confidence", 0.0) or 0.0)
+            except Exception:
+                confidence = 0.0
+            try:
+                score = float(event.get("bounce_signal_score", 0.0) or 0.0)
+            except Exception:
+                score = 0.0
+            try:
+                delta_v = float(event.get("delta_v", 0.0) or 0.0)
+            except Exception:
+                delta_v = 0.0
+            try:
+                queue_speed = float(event.get("queue_speed_px", 0.0) or 0.0)
+            except Exception:
+                queue_speed = 0.0
+            try:
+                unique_tracks = int(event.get("queue_track_id_unique") or 0)
+            except Exception:
+                unique_tracks = 0
+            if (
+                raw_y is not None
+                and raw_y <= -3.0
+                and confidence >= 0.25
+                and score >= 180.0
+                and delta_v >= 2.0
+                and queue_speed <= 3.0
+                and unique_tracks <= 1
+            ):
+                event["stale_speed_context_override"] = "near_side_slow_queue"
+                stats["allowed_stale_slow_queue_speed_bounces"] = int(
+                    stats.get("allowed_stale_slow_queue_speed_bounces", 0)
+                ) + 1
+                return None
+
+        if reason == "quality_stale_baseline_speed":
+            try:
+                confidence = float(event.get("confidence", 0.0) or 0.0)
+            except Exception:
+                confidence = 0.0
+            try:
+                score = float(event.get("bounce_signal_score", 0.0) or 0.0)
+            except Exception:
+                score = 0.0
+            try:
+                delta_v = float(event.get("delta_v", 0.0) or 0.0)
+            except Exception:
+                delta_v = 0.0
+            try:
+                queue_speed = float(event.get("queue_speed_px", 0.0) or 0.0)
+            except Exception:
+                queue_speed = 0.0
+            try:
+                history = int(event.get("queue_history_len") or 0)
+            except Exception:
+                history = 0
+            if (
+                confidence >= 0.25
+                and score >= 300.0
+                and delta_v >= 10.0
+                and queue_speed >= 8.0
+                and history >= 20
+            ):
+                event["stale_speed_context_override"] = "baseline_high_quality"
+                stats["allowed_stale_baseline_speed_bounces"] = int(
+                    stats.get("allowed_stale_baseline_speed_bounces", 0)
+                ) + 1
+                return None
+
+        if reason is None:
+            return None
+        stats[f"skipped_{reason}_bounces"] = int(
+            stats.get(f"skipped_{reason}_bounces", 0)
+        ) + 1
+        stats["last_reject_reason"] = reason
+        stats["last_reject_speed_frame_gap"] = speed_frame_gap
+        stats["last_reject_speed_source"] = speed_source
+        self._remember_yolo_bounce_reject_locked(stats, event, reason)
+        return reason
+
+    def _previous_live_bounce_frame_locked(
+        self,
+        cam_name: str,
+        event_frame: int,
+    ) -> int | None:
+        previous_frame = None
+        for prev in self._live_bounces:
+            if not self._event_matches_camera(prev, cam_name):
+                continue
+            prev_frame = self._event_frame(prev)
+            if prev_frame is None or prev_frame >= event_frame:
+                continue
+            if previous_frame is None or prev_frame > previous_frame:
+                previous_frame = prev_frame
+        return previous_frame
+
+    def _allow_yolo_gap_fill_quality_bounce_locked(
+        self,
+        cam_name: str,
+        event: dict,
+        *,
+        event_frame: int,
+        quality_reject_reason: str,
+        stats: dict,
+    ) -> bool:
+        """Allow a borderline YOLO bounce only when it fills a long live gap."""
+        if quality_reject_reason not in {
+            "quality_short_track",
+            "quality_weak_non_reversal",
+            "quality_low_delta_v",
+        }:
+            return False
+        if not bool(event.get("in_court", True)):
+            return False
+
+        previous_frame = self._previous_live_bounce_frame_locked(cam_name, event_frame)
+        if previous_frame is None:
+            return False
+        gap_frames = event_frame - previous_frame
+        if gap_frames < int(self._YOLO_GAP_FILL_MIN_FRAMES):
+            return False
+
+        try:
+            confidence = float(event.get("confidence", 0.0) or 0.0)
+        except Exception:
+            confidence = 0.0
+        if confidence < float(self._YOLO_GAP_FILL_MIN_CONFIDENCE):
+            return False
+
+        try:
+            score = float(event.get("bounce_signal_score", 0.0) or 0.0)
+        except Exception:
+            score = 0.0
+        try:
+            delta_v = float(event.get("delta_v", 0.0) or 0.0)
+        except Exception:
+            delta_v = 0.0
+        try:
+            history_len = int(float(event.get("queue_history_len", 0) or 0))
+        except Exception:
+            history_len = 0
+        try:
+            queue_speed = float(event.get("queue_speed_px", 0.0) or 0.0)
+        except Exception:
+            queue_speed = 0.0
+
+        allowed = False
+        if quality_reject_reason == "quality_short_track":
+            allowed = history_len >= 5 and score >= float(
+                self._YOLO_GAP_FILL_SHORT_TRACK_MIN_SCORE
+            )
+        elif quality_reject_reason == "quality_weak_non_reversal":
+            allowed = (
+                score >= float(self._YOLO_GAP_FILL_WEAK_MIN_SCORE)
+                or delta_v >= float(self._YOLO_GAP_FILL_WEAK_MIN_DELTA_V)
+            )
+        elif quality_reject_reason == "quality_low_delta_v":
+            allowed = (
+                history_len >= 20
+                and score >= 240.0
+                and delta_v >= 0.8
+                and queue_speed >= 8.0
+            )
+        if not allowed:
+            return False
+
+        event["publish_quality_override"] = quality_reject_reason
+        event["gap_fill_from_frame"] = previous_frame
+        event["gap_fill_frames"] = gap_frames
+        event["gap_fill_reason"] = "long_bounce_gap"
+        stats["gap_filled_quality_bounces"] = int(
+            stats.get("gap_filled_quality_bounces", 0)
+        ) + 1
+        stats[f"gap_filled_{quality_reject_reason}_bounces"] = int(
+            stats.get(f"gap_filled_{quality_reject_reason}_bounces", 0)
+        ) + 1
+        stats["last_gap_fill_frame"] = event_frame
+        stats["last_gap_fill_previous_frame"] = previous_frame
+        stats["last_gap_fill_frames"] = gap_frames
+        return True
+
     def _event_capture_ts_from_event(self, event: dict, now: float) -> float:
         event_capture_ts = event.get("capture_ts", event.get("timestamp", now))
         try:
             return float(event_capture_ts)
         except Exception:
             return now
+
+    def _record_yolo_speed_events_locked(
+        self,
+        cam_name: str,
+        speed_events: list[dict],
+        *,
+        latest_frame: int,
+        last_speed_frame: int | None,
+        seen_speeds,
+        stats: dict,
+        buffered: list[dict] | None = None,
+    ) -> int | None:
+        """Publish YOLO single-camera speed events before related bounces.
+
+        Some YOLO result batches contain both the net/speed event and the
+        following bounce. Recording speed first lets bounce egress attach the
+        speed in the same consumer tick instead of emitting 000.
+        """
+        for event in speed_events:
+            event_frame = self._event_frame(event)
+            if event_frame is None:
+                continue
+            if not self._can_emit_yolo_event(
+                event_frame=event_frame,
+                latest_frame=latest_frame,
+                last_emitted_frame=last_speed_frame,
+                seen_frames=seen_speeds,
+                cooldown_frames=0,
+            ):
+                continue
+            now = time.time()
+            if buffered is not None:
+                event_capture_ts = self._event_capture_ts(buffered, event_frame, now)
+            else:
+                event_capture_ts = self._event_capture_ts_from_event(event, now)
+            speed_event = {
+                "frame": event_frame,
+                "frame_index": event_frame,
+                "x": event.get("x"),
+                "y": event.get("y"),
+                "pixel_x": event.get("pixel_x"),
+                "pixel_y": event.get("pixel_y"),
+                "camera": cam_name,
+                "camera_name": cam_name,
+                "type": "SPEED",
+                "kind": "speed",
+                "speed_kmh": int(round(float(event.get("speed_kmh", 0) or 0))),
+                "direction": event.get("direction"),
+                "timestamp": event_capture_ts,
+                "capture_ts": event_capture_ts,
+                "detect_delay": round(now - event_capture_ts, 2),
+                "bounce_mode": f"mono_{cam_name}",
+                "source": event.get("source", "single_cam_speed_crossing"),
+            }
+            self._record_live_speed_event_locked(speed_event)
+            seen_speeds.append(event_frame)
+            self._yolo_fuzzy_last_emitted_speed_frame[cam_name] = event_frame
+            last_speed_frame = event_frame
+            stats["accepted_speed_events"] = int(stats.get("accepted_speed_events", 0)) + 1
+            stats["last_speed_frame"] = event_frame
+        return last_speed_frame
+
+    def _attach_recent_single_cam_speed_locked(self, bd: dict) -> dict:
+        """Attach the latest preceding single-camera speed to a bounce event."""
+        try:
+            current_speed = int(round(float(bd.get("speed_kmh", 0) or 0)))
+        except Exception:
+            current_speed = 0
+        if current_speed > 0 or not self._live_speed_events:
+            return bd
+
+        event_camera = bd.get("camera_name", bd.get("camera"))
+        if not event_camera:
+            return bd
+        event_frame = self._event_frame(bd)
+        try:
+            event_ts = float(bd.get("timestamp", bd.get("capture_ts", 0.0)) or 0.0)
+        except (TypeError, ValueError):
+            event_ts = 0.0
+
+        max_frame_gap = 600
+        max_age_seconds = 24.0
+        fresh_frame_gap = 320
+        fresh_age_seconds = 12.0
+        best = None
+        best_frame_gap = None
+        best_age_seconds = None
+        for speed_event in reversed(self._live_speed_events):
+            speed_camera = speed_event.get("camera_name", speed_event.get("camera"))
+            if speed_camera and str(speed_camera) != str(event_camera):
+                continue
+
+            speed_frame = self._event_frame(speed_event)
+            if event_frame is not None and speed_frame is not None:
+                frame_gap = event_frame - speed_frame
+                if frame_gap < -max_frame_gap:
+                    continue
+                if frame_gap > max_frame_gap:
+                    break
+            else:
+                frame_gap = None
+
+            try:
+                speed_ts = float(
+                    speed_event.get("timestamp", speed_event.get("capture_ts", event_ts))
+                )
+            except (TypeError, ValueError):
+                speed_ts = event_ts
+            age = None
+            if event_ts and speed_ts:
+                age = event_ts - speed_ts
+                if age < -max_age_seconds:
+                    continue
+                if age > max_age_seconds:
+                    break
+
+            try:
+                speed_kmh = int(round(float(speed_event.get("speed_kmh", 0) or 0)))
+            except Exception:
+                speed_kmh = 0
+            if speed_kmh <= 0:
+                continue
+            best = speed_event
+            best_frame_gap = frame_gap
+            best_age_seconds = age
+            break
+
+        if best is None:
+            return bd
+
+        bd["speed_kmh"] = int(round(float(best.get("speed_kmh", 0) or 0)))
+        bd["speed_direction"] = best.get("direction")
+        is_fresh = True
+        if best_frame_gap is not None and best_frame_gap > fresh_frame_gap:
+            is_fresh = False
+        if best_age_seconds is not None and best_age_seconds > fresh_age_seconds:
+            is_fresh = False
+        if best_frame_gap is not None and best_frame_gap < 0:
+            bd["speed_source"] = "future_single_cam_speed_backfill"
+        else:
+            bd["speed_source"] = (
+                "nearest_single_cam_speed" if is_fresh else "stale_single_cam_speed"
+            )
+        bd["speed_frame"] = best.get("frame_index", best.get("frame"))
+        if best_frame_gap is not None:
+            bd["speed_frame_gap"] = int(best_frame_gap)
+        if best_age_seconds is not None:
+            bd["speed_age_s"] = round(float(best_age_seconds), 3)
+        return bd
 
     def _drain_yolo_event_results_locked(self, cam_name: str) -> dict | None:
         result_queue = self._yolo_event_result_queues.get(cam_name)
@@ -2978,6 +3753,12 @@ class Orchestrator:
         hit_events = result.get("hits", [])
         speed_events = result.get("speed_events", [])
         gate_only_bounce_events = result.get("gate_only_bounces", []) or []
+        self._set_yolo_bounce_debug_list_locked(
+            stats,
+            "last_raw_yolo_bounce_candidates",
+            bounce_events,
+            latest_frame=latest_frame,
+        )
         stats["candidate_bounces"] = int(result.get("count", len(bounce_events)) or 0)
         stats["raw_bounce_candidates"] = int(result.get("raw_bounce_candidate_count", 0) or 0)
         stats["suppressed_bounces_by_hit_window"] = int(result.get("suppressed_bounces_by_hit_window", 0) or 0)
@@ -2986,6 +3767,11 @@ class Orchestrator:
         stats["out_rally_suppressed_bounces"] = int(result.get("out_rally_suppressed_bounce_count", 0) or 0)
         stats["candidate_hits"] = int(result.get("hit_count", len(hit_events)) or 0)
         stats["candidate_speed_events"] = int(result.get("speed_count", len(speed_events)) or 0)
+        stats["auxiliary_fallback_bounce_count"] = int(result.get("auxiliary_fallback_bounce_count", 0) or 0)
+        stats["auxiliary_fallback_speed_count"] = int(result.get("auxiliary_fallback_speed_count", 0) or 0)
+        stats["auxiliary_fallback_speed_ignored_count"] = int(
+            result.get("auxiliary_fallback_speed_ignored_count", 0) or 0
+        )
         if result.get("queue_tracker_stats"):
             stats["queue_tracker_stats"] = dict(result.get("queue_tracker_stats") or {})
         self._remember_yolo_hit_suppressed_result_bounces_locked(cam_name, result, stats)
@@ -3016,8 +3802,51 @@ class Orchestrator:
             getattr(self.config.hit_bounce_refiner, "hit_suppression_frames", 3) or 0
         )
         stats["hit_suppression_frames"] = len(suppression_frames)
+        release_delay = int(getattr(self.config.hit_bounce_refiner, "release_delay_frames", 50) or 0)
+        from app.pipeline.yolo_bounce_filter import filter_dashboard_yolo_publishable_bounces
+        yolo_bounce_events = [event for event in bounce_events if self._is_yolo_queue_event(event)]
+        passthrough_bounce_events = [event for event in bounce_events if not self._is_yolo_queue_event(event)]
+        publish_suppressed_events = []
+        if yolo_bounce_events:
+            publish_filter = filter_dashboard_yolo_publishable_bounces(
+                yolo_bounce_events,
+                hit_events=hit_events,
+                latest_frame=latest_frame,
+                hit_suppress_frames=hit_suppress_frames,
+                clean_time_frames=int(getattr(self.config.hit_bounce_refiner, "clean_time_frames", 25) or 25),
+                clean_space_meters=float(getattr(self.config.hit_bounce_refiner, "clean_space_meters", 1.5)),
+                release_delay_frames=release_delay,
+            )
+            publish_suppressed_events = (
+                publish_filter.get("suppressed_bounces")
+                or publish_filter.get("suppressed")
+                or []
+            )
+            bounce_events = passthrough_bounce_events + (publish_filter.get("bounces") or [])
+            stats["publish_suppression_counts"] = publish_filter.get("suppression_counts", {})
+            stats["publish_suppressed_bounces"] = len(publish_suppressed_events)
+        self._set_yolo_bounce_debug_list_locked(
+            stats,
+            "last_publishable_yolo_bounces",
+            bounce_events,
+            latest_frame=latest_frame,
+        )
+        self._set_yolo_bounce_debug_list_locked(
+            stats,
+            "last_suppressed_yolo_bounces",
+            publish_suppressed_events,
+            latest_frame=latest_frame,
+        )
 
         emitted = None
+        last_speed_frame = self._record_yolo_speed_events_locked(
+            cam_name,
+            speed_events,
+            latest_frame=latest_frame,
+            last_speed_frame=last_speed_frame,
+            seen_speeds=seen_speeds,
+            stats=stats,
+        )
         self._record_yolo_gate_only_bounces_locked(
             cam_name,
             gate_only_bounce_events,
@@ -3030,14 +3859,28 @@ class Orchestrator:
             event_frame = self._event_frame(event)
             if event_frame is None:
                 continue
+            if self._reject_stale_yolo_bounce_frame_locked(cam_name, event_frame, stats, event):
+                continue
             quality_reject_reason = self._reject_yolo_live_bounce_quality_locked(
                 event,
                 event_frame=event_frame,
                 stats=stats,
             )
             if quality_reject_reason:
-                stats["last_reject_reason"] = quality_reject_reason
-                continue
+                if not self._allow_yolo_gap_fill_quality_bounce_locked(
+                    cam_name,
+                    event,
+                    event_frame=event_frame,
+                    quality_reject_reason=quality_reject_reason,
+                    stats=stats,
+                ):
+                    stats["last_reject_reason"] = quality_reject_reason
+                    self._remember_yolo_bounce_reject_locked(
+                        stats,
+                        event,
+                        quality_reject_reason,
+                    )
+                    continue
             suppressing_hit_frame = None
             if hit_suppress_frames > 0:
                 for hit_frame in list(suppression_frames):
@@ -3069,7 +3912,6 @@ class Orchestrator:
                 ) + 1
                 stats["last_reject_reason"] = f"hit_window_shadow:{shadow_frame}"
                 continue
-            release_delay = int(getattr(self.config.hit_bounce_refiner, "release_delay_frames", 50) or 0)
             if release_delay > 0 and latest_frame - event_frame + 1 < release_delay:
                 stats["pending_release_delay_frames"] = release_delay
                 stats["pending_release_bounces"] = int(stats.get("pending_release_bounces", 0)) + 1
@@ -3131,6 +3973,15 @@ class Orchestrator:
                 "queue_static_blocked_history": event.get("queue_static_blocked_history"),
                 "bounce_signal_score": event.get("bounce_signal_score"),
                 "dedupe_cluster_size": event.get("dedupe_cluster_size"),
+                "publish_quality_override": event.get("publish_quality_override"),
+                "slow_queue_shape_override": event.get("slow_queue_shape_override"),
+                "near_side_low_delta_override": event.get("near_side_low_delta_override"),
+                "stale_speed_context_override": event.get("stale_speed_context_override"),
+                "late_yolo_recovery": event.get("late_yolo_recovery"),
+                "late_yolo_recovery_regression_frames": event.get("late_yolo_recovery_regression_frames"),
+                "gap_fill_reason": event.get("gap_fill_reason"),
+                "gap_fill_from_frame": event.get("gap_fill_from_frame"),
+                "gap_fill_frames": event.get("gap_fill_frames"),
             }
             accepted_bd = self._normalize_live_bounce_dict(
                 bd,
@@ -3138,6 +3989,8 @@ class Orchestrator:
                 fallback_speed_kmh=0,
             )
             accepted_bd["refiner_source"] = accepted_bd.get("refiner_source", "yolo_hit_first_final")
+            if self._reject_yolo_live_bounce_speed_context_locked(accepted_bd, stats=stats):
+                continue
             duplicate_action = self._replace_weaker_yolo_duplicate_bounce_locked(
                 cam_name,
                 accepted_bd,
@@ -3150,7 +4003,8 @@ class Orchestrator:
                 self._stash_yolo_out_gate_pending_bounce_locked(cam_name, accepted_bd)
                 stats["last_reject_reason"] = "out_rally_gate"
                 continue
-            self._record_live_bounce_locked(accepted_bd, debug_source=accepted_bd)
+            if not self._record_live_bounce_locked(accepted_bd, debug_source=accepted_bd):
+                continue
             seen.append(event_frame)
             self._yolo_fuzzy_last_emitted_frame[cam_name] = event_frame
             last_emitted_frame = event_frame
@@ -3215,46 +4069,6 @@ class Orchestrator:
         self._remember_yolo_hit_suppressed_result_bounces_locked(cam_name, result, stats)
         self._retract_yolo_live_bounces_shadowing_hit_suppressed_locked(cam_name, stats)
 
-        for event in speed_events:
-            event_frame = self._event_frame(event)
-            if event_frame is None:
-                continue
-            if not self._can_emit_yolo_event(
-                event_frame=event_frame,
-                latest_frame=latest_frame,
-                last_emitted_frame=last_speed_frame,
-                seen_frames=seen_speeds,
-                cooldown_frames=0,
-            ):
-                continue
-            now = time.time()
-            event_capture_ts = self._event_capture_ts_from_event(event, now)
-            speed_event = {
-                "frame": event_frame,
-                "frame_index": event_frame,
-                "x": event.get("x"),
-                "y": event.get("y"),
-                "pixel_x": event.get("pixel_x"),
-                "pixel_y": event.get("pixel_y"),
-                "camera": cam_name,
-                "camera_name": cam_name,
-                "type": "SPEED",
-                "kind": "speed",
-                "speed_kmh": int(round(float(event.get("speed_kmh", 0) or 0))),
-                "direction": event.get("direction"),
-                "timestamp": event_capture_ts,
-                "capture_ts": event_capture_ts,
-                "detect_delay": round(now - event_capture_ts, 2),
-                "bounce_mode": f"mono_{cam_name}",
-                "source": event.get("source", "single_cam_speed_crossing"),
-            }
-            self._record_live_speed_event_locked(speed_event)
-            seen_speeds.append(event_frame)
-            self._yolo_fuzzy_last_emitted_speed_frame[cam_name] = event_frame
-            last_speed_frame = event_frame
-            stats["accepted_speed_events"] = int(stats.get("accepted_speed_events", 0)) + 1
-            stats["last_speed_frame"] = event_frame
-
         return emitted
 
     @staticmethod
@@ -3266,6 +4080,9 @@ class Orchestrator:
             "candidate_bounces",
             "candidate_hits",
             "candidate_speed_events",
+            "auxiliary_fallback_bounce_count",
+            "auxiliary_fallback_speed_count",
+            "auxiliary_fallback_speed_ignored_count",
             "accepted",
             "accepted_hits",
             "accepted_speed_events",
@@ -3274,6 +4091,16 @@ class Orchestrator:
             "last_hit_frame",
             "last_speed_frame",
             "last_reject_reason",
+            "recent_rejected_bounces",
+            "last_raw_yolo_bounce_candidates",
+            "last_raw_yolo_bounce_candidates_latest_frame",
+            "last_publishable_yolo_bounces",
+            "last_publishable_yolo_bounces_latest_frame",
+            "last_suppressed_yolo_bounces",
+            "last_suppressed_yolo_bounces_latest_frame",
+            "recent_raw_yolo_bounce_candidates",
+            "recent_publishable_yolo_bounces",
+            "recent_suppressed_yolo_bounces",
             "player_pose_buffered",
             "analysis_stride",
             "analysis_calls",
@@ -3283,6 +4110,8 @@ class Orchestrator:
             "skipped_quality_warmup_bounces",
             "skipped_quality_short_track_bounces",
             "skipped_quality_weak_non_reversal_bounces",
+            "skipped_quality_no_y_reversal_bounces",
+            "skipped_quality_auxiliary_fallback_bounces",
             "skipped_quality_weak_out_bounces",
             "raw_bounce_candidates",
             "suppressed_bounces_by_hit_window",
@@ -3309,8 +4138,16 @@ class Orchestrator:
             "worker_enabled",
             "worker_last_submitted_task_id",
             "worker_last_result_task_id",
+            "worker_submit_skipped_busy",
+            "worker_submit_replaced_busy",
             "worker_submit_dropped",
             "worker_last_error",
+            "gap_filled_quality_bounces",
+            "gap_filled_quality_short_track_bounces",
+            "gap_filled_quality_weak_non_reversal_bounces",
+            "last_gap_fill_frame",
+            "last_gap_fill_previous_frame",
+            "last_gap_fill_frames",
             "retro_suppressed_bounces_by_hit",
             "retro_suppressed_ws_bounces_by_hit",
             "last_retro_suppress_hit_frame",
@@ -3367,25 +4204,57 @@ class Orchestrator:
             "in_court",
             "timestamp",
             "capture_ts",
+            "time_ms",
             "speed_kmh",
+            "speed",
+            "speed_source",
+            "speed_frame",
+            "speed_frame_gap",
+            "speed_age_s",
             "direction",
+            "speed_direction",
             "legacy_direction",
             "sequence",
+            "raw_x",
+            "raw_y",
+            "projected_x",
+            "projected_y",
+            "ws_x",
+            "ws_y",
+            "court_correction",
+            "publish_quality_override",
+            "gap_fill_reason",
+            "gap_fill_from_frame",
+            "gap_fill_frames",
+            "event_kind",
+            "protocol_version",
         )
         return {key: event.get(key) for key in keep_keys if key in event}
+
+    @staticmethod
+    def _event_has_display_speed(event: dict) -> bool:
+        try:
+            return int(round(float(event.get("speed_kmh", event.get("speed", 0)) or 0))) > 0
+        except Exception:
+            return False
+
+    def _compact_ready_bounces_locked(self, event_limit: int) -> list[dict]:
+        ready_bounces = [
+            event for event in self._live_bounces if self._event_has_display_speed(event)
+        ]
+        return [self._compact_event(e) for e in ready_bounces[-event_limit:]]
 
     def _effective_total_live_bounces(self) -> int:
         return max(0, int(self._total_live_bounces) - int(self._total_retracted_live_bounces))
 
     def _build_compact_live_analytics_locked(self) -> dict:
+        self._refresh_zero_speed_live_bounces_locked()
         event_limit = max(1, int(self._DASHBOARD_ANALYTICS_EVENT_LIMIT))
         speed_limit = max(1, int(self._DASHBOARD_ANALYTICS_SPEED_LIMIT))
         refiner_stats = self._hit_bounce_refiner.get_stats()
         return {
             "rally_state": self._rally_tracker.get_state().to_dict(),
-            "recent_bounces": [
-                self._compact_event(e) for e in self._live_bounces[-event_limit:]
-            ],
+            "recent_bounces": self._compact_ready_bounces_locked(event_limit),
             "total_bounces": self._effective_total_live_bounces(),
             "last_frame_speed_kmh": int(round(float(self._last_frame_speed_kmh or 0.0))),
             "latest_net_crossing": (
@@ -3458,13 +4327,12 @@ class Orchestrator:
             finally:
                 self._analytics_lock.release()
         with self._analytics_lock:
+            self._refresh_zero_speed_live_bounces_locked()
             if compact:
                 event_limit = max(1, int(self._DASHBOARD_ANALYTICS_EVENT_LIMIT))
                 speed_limit = max(1, int(self._DASHBOARD_ANALYTICS_SPEED_LIMIT))
                 refiner_stats = self._hit_bounce_refiner.get_stats()
-                recent_bounces = [
-                    self._compact_event(e) for e in self._live_bounces[-event_limit:]
-                ]
+                recent_bounces = self._compact_ready_bounces_locked(event_limit)
                 recent_hits = [
                     self._compact_event(e) for e in self._live_hits[-event_limit:]
                 ]
@@ -3560,6 +4428,46 @@ class Orchestrator:
             except Exception:
                 speed_val = 0.0
             bd["speed_kmh"] = int(round(speed_val))
+        ts = bd.get("timestamp")
+        try:
+            ts_float = float(ts)
+        except (TypeError, ValueError):
+            ts_float = float(fallback_ts if fallback_ts is not None else time.time())
+            bd["timestamp"] = ts_float
+        bd["time_ms"] = int(round(ts_float * 1000))
+        bd["speed"] = int(round(float(bd.get("speed_kmh", 0) or 0)))
+        bd["event_kind"] = "bounce"
+        bd["protocol_version"] = 1
+        try:
+            raw_x = float(bd.get("x"))
+            raw_y = float(bd.get("y"))
+        except (TypeError, ValueError):
+            return bd
+        is_single_cam = str(bd.get("bounce_mode", "")).startswith("mono_") or str(
+            bd.get("source", "")
+        ).startswith("yolo_")
+        if is_single_cam:
+            half_w = Orchestrator._COURT_HALF_WIDTH_M
+            half_l = Orchestrator._COURT_HALF_LENGTH_M
+            margin = Orchestrator._SINGLE_CAM_CLAMP_MARGIN_M
+            if (
+                -half_w - margin <= raw_x <= half_w + margin
+                and -half_l - margin <= raw_y <= half_l + margin
+                and not (-half_w <= raw_x <= half_w and -half_l <= raw_y <= half_l)
+            ):
+                bd["projected_x"] = round(raw_x, 4)
+                bd["projected_y"] = round(raw_y, 4)
+                raw_x = min(max(raw_x, -half_w), half_w)
+                raw_y = min(max(raw_y, -half_l), half_l)
+                bd["x"] = round(raw_x, 4)
+                bd["y"] = round(raw_y, 4)
+                bd["in_court"] = True
+                bd["type"] = "IN"
+                bd["court_correction"] = "clamped_single_cam_projection"
+        bd["raw_x"] = round(raw_x, 4)
+        bd["raw_y"] = round(raw_y, 4)
+        bd["ws_x"] = round(raw_x * 10.0, 4)
+        bd["ws_y"] = round(raw_y * 10.0, 4)
         return bd
 
     def _enqueue_ws_bounce_locked(self, bd: dict) -> None:
@@ -3571,27 +4479,83 @@ class Orchestrator:
         """
         if not self._ws_enabled:
             return
-        bx, by = bd.get("x"), bd.get("y")
-        if bx is None or by is None:
+        event = self._normalize_live_bounce_dict(bd)
+        if event.get("raw_x") is None or event.get("raw_y") is None:
             return
-        ts = bd.get("timestamp")
-        if ts is None:
-            ts = time.time()
-        speed = bd.get("speed_kmh", 0)
-        try:
-            speed_val = int(round(float(speed or 0)))
-        except Exception:
-            speed_val = 0
-        ws_x = round(float(bx) * 10.0, 4)
-        ws_y = round(float(by) * 10.0, 4)
-        self._ws_bounce_queue.append({
-            "x": ws_x,
-            "y": ws_y,
-            "raw_x": round(float(bx), 4),
-            "raw_y": round(float(by), 4),
-            "speed": speed_val,
-            "timestamp": int(round(float(ts) * 1000)),
-        })
+        payload = {
+            "event_kind": event["event_kind"],
+            "protocol_version": event["protocol_version"],
+            "x": event["ws_x"],
+            "y": event["ws_y"],
+            "ws_x": event["ws_x"],
+            "ws_y": event["ws_y"],
+            "raw_x": event["raw_x"],
+            "raw_y": event["raw_y"],
+            "projected_x": event.get("projected_x"),
+            "projected_y": event.get("projected_y"),
+            "speed": event["speed"],
+            "speed_kmh": event["speed_kmh"],
+            "speed_source": event.get("speed_source"),
+            "speed_frame": event.get("speed_frame"),
+            "speed_frame_gap": event.get("speed_frame_gap"),
+            "speed_age_s": event.get("speed_age_s"),
+            "timestamp": event["time_ms"],
+            "timeStamp": event["time_ms"],
+            "time_ms": event["time_ms"],
+            "_queued_at": time.time(),
+            "capture_ts": event.get("capture_ts"),
+            "frame": event.get("frame"),
+            "frame_index": event.get("frame_index"),
+            "camera": event.get("camera"),
+            "camera_name": event.get("camera_name"),
+            "type": event.get("type"),
+            "in_court": event.get("in_court"),
+            "court_correction": event.get("court_correction"),
+            "direction": event.get("direction"),
+            "speed_direction": event.get("speed_direction"),
+            "sequence": event.get("sequence"),
+        }
+        for key in (
+            "source",
+            "refiner_source",
+            "bounce_mode",
+            "confidence",
+            "pixel_x",
+            "pixel_y",
+            "angle",
+            "delta_v",
+            "y_reversal",
+            "queue_id",
+            "queue_history_len",
+            "queue_speed_px",
+            "queue_track_id",
+            "queue_track_id_unique",
+            "queue_conf_at_event",
+            "queue_conf_last",
+            "queue_conf_max",
+            "queue_conf_avg",
+            "queue_candidate_rank_event",
+            "queue_candidate_rank_last",
+            "queue_candidate_rank_min",
+            "queue_candidate_rank_max",
+            "queue_candidate_rank_avg",
+            "queue_event_frame_gap",
+            "queue_static_blocked_history",
+            "bounce_signal_score",
+            "dedupe_cluster_size",
+            "publish_quality_override",
+            "slow_queue_shape_override",
+            "near_side_low_delta_override",
+            "stale_speed_context_override",
+            "late_yolo_recovery",
+            "late_yolo_recovery_regression_frames",
+            "gap_fill_reason",
+            "gap_fill_from_frame",
+            "gap_fill_frames",
+        ):
+            if key in event:
+                payload[key] = event.get(key)
+        self._ws_bounce_queue.append(payload)
 
     def _build_hit_bounce_player_snapshot(self, now: float) -> list[dict]:
         """Return current player anchors in the shape expected by the refiner."""
@@ -4125,6 +5089,22 @@ class Orchestrator:
             stats["last_duplicate_live_kept_frame"] = self._event_frame(best_prev)
             return "skip"
 
+        previous_still_queued = any(
+            self._ws_payload_matches_bounce(payload, best_prev)
+            for payload in self._ws_bounce_queue
+        )
+        if self._ws_enabled and not previous_still_queued:
+            stats["skipped_late_duplicate_live_bounces"] = int(
+                stats.get("skipped_late_duplicate_live_bounces", 0)
+            ) + 1
+            stats["last_late_duplicate_live_frame"] = event_frame
+            stats["last_late_duplicate_live_kept_frame"] = self._event_frame(best_prev)
+            stats["last_late_duplicate_live_scores"] = {
+                "old": round(float(prev_score), 3),
+                "new": round(float(new_score), 3),
+            }
+            return "skip"
+
         previous = self._live_bounces.pop(best_idx)
         self._total_retracted_live_bounces += 1
         self._drop_ws_payloads_for_bounces_locked([previous])
@@ -4180,6 +5160,12 @@ class Orchestrator:
             bd = pending.get(event_frame)
             if not bd:
                 continue
+            if self._reject_stale_yolo_bounce_frame_locked(cam_name, event_frame, stats, bd):
+                pending.pop(event_frame, None)
+                stats["out_gate_dropped_pending_stale_frame"] = int(
+                    stats.get("out_gate_dropped_pending_stale_frame", 0)
+                ) + 1
+                continue
 
             closed_interval = self._yolo_out_gate_closed_interval_for_frame_locked(cam_name, event_frame)
             if closed_interval is not None:
@@ -4217,7 +5203,8 @@ class Orchestrator:
                 continue
 
             accepted_bd = dict(bd)
-            self._record_live_bounce_locked(accepted_bd, debug_source=accepted_bd)
+            if not self._record_live_bounce_locked(accepted_bd, debug_source=accepted_bd):
+                continue
             seen.append(event_frame)
             last_emitted = self._yolo_fuzzy_last_emitted_frame.get(cam_name)
             if last_emitted is None or event_frame > int(last_emitted):
@@ -4298,6 +5285,7 @@ class Orchestrator:
 
     def _record_live_hit_locked(self, hit: dict) -> None:
         """Publish one HIT to realtime analytics/debug/report buffers only."""
+        self._dashboard_analytics_cache = {}
         clean_time = int(getattr(self.config.hit_bounce_refiner, "clean_time_frames", 25) or 0)
         clean_space = max(float(getattr(self.config.hit_bounce_refiner, "clean_space_meters", 1.5) or 0.0), 1.8)
         hit_frame = self._event_frame(hit)
@@ -4373,6 +5361,52 @@ class Orchestrator:
         self._ws_bounce_queue = kept
         return dropped
 
+    def _retract_live_bounces_locked(
+        self,
+        bounces: list[dict],
+        *,
+        stats: dict | None = None,
+        stat_key: str | None = None,
+    ) -> int:
+        if not bounces or not self._live_bounces:
+            return 0
+        drop_ids = {id(bd) for bd in bounces}
+        kept = [bd for bd in self._live_bounces if id(bd) not in drop_ids]
+        dropped = len(self._live_bounces) - len(kept)
+        if dropped <= 0:
+            return 0
+        self._live_bounces = kept
+        self._total_retracted_live_bounces += dropped
+        self._drop_ws_payloads_for_bounces_locked(bounces)
+        for bd in bounces:
+            self._clear_rally_buffer_bounce_locked(bd)
+        self._dashboard_analytics_cache = {}
+        if stats is not None and stat_key:
+            stats[stat_key] = int(stats.get(stat_key, 0)) + dropped
+        return dropped
+
+    def _drop_live_bounces_for_ws_payload_locked(
+        self,
+        payload: dict,
+        *,
+        stats: dict | None = None,
+    ) -> int:
+        if not self._live_bounces:
+            return 0
+        sequence = payload.get("sequence")
+        matches: list[dict] = []
+        for bd in self._live_bounces:
+            if sequence is not None and bd.get("sequence") == sequence:
+                matches.append(bd)
+                continue
+            if self._ws_payload_matches_bounce(payload, bd):
+                matches.append(bd)
+        return self._retract_live_bounces_locked(
+            matches,
+            stats=stats,
+            stat_key="speed_context_retracted_live_bounces",
+        )
+
     def _clear_rally_buffer_bounce_locked(self, bd: dict) -> None:
         frame = self._event_frame(bd)
         if frame is None:
@@ -4441,12 +5475,229 @@ class Orchestrator:
         ]
         return retracted
 
+    def _update_ws_payload_speed_for_bounce_locked(self, bd: dict) -> int:
+        updated = 0
+        sequence = bd.get("sequence")
+        for payload in self._ws_bounce_queue:
+            if sequence is not None:
+                if payload.get("sequence") != sequence:
+                    continue
+            elif not self._ws_payload_matches_bounce(payload, bd):
+                continue
+
+            speed = int(round(float(bd.get("speed_kmh", 0) or 0)))
+            payload["speed"] = speed
+            payload["speed_kmh"] = speed
+            for key in (
+                "speed_source",
+                "speed_frame",
+                "speed_frame_gap",
+                "speed_age_s",
+                "direction",
+                "speed_direction",
+            ):
+                payload[key] = bd.get(key)
+            updated += 1
+        return updated
+
+    def _refresh_zero_speed_live_bounces_locked(self) -> int:
+        if not self._live_bounces or not self._live_speed_events:
+            return 0
+        refreshed = 0
+        retracted: list[dict] = []
+        for bd in self._live_bounces:
+            try:
+                current_speed = int(round(float(bd.get("speed_kmh", 0) or 0)))
+            except Exception:
+                current_speed = 0
+            if current_speed > 0:
+                continue
+            updated = self._attach_recent_single_cam_speed_locked(dict(bd))
+            try:
+                updated_speed = int(round(float(updated.get("speed_kmh", 0) or 0)))
+            except Exception:
+                updated_speed = 0
+            if updated_speed <= 0:
+                continue
+            camera_name = updated.get("camera_name", updated.get("camera", "unknown"))
+            stats = self._yolo_fuzzy_live_stats.setdefault(str(camera_name or "unknown"), {})
+            if self._reject_yolo_live_bounce_speed_context_locked(updated, stats=stats):
+                retracted.append(bd)
+                continue
+            bd.update(updated)
+            bd.update(self._normalize_live_bounce_dict(bd))
+            self._update_ws_payload_speed_for_bounce_locked(bd)
+            refreshed += 1
+        if retracted:
+            camera_name = retracted[-1].get("camera_name", retracted[-1].get("camera", "unknown"))
+            stats = self._yolo_fuzzy_live_stats.setdefault(str(camera_name or "unknown"), {})
+            self._retract_live_bounces_locked(
+                retracted,
+                stats=stats,
+                stat_key="speed_context_retracted_live_bounces",
+            )
+        if refreshed:
+            self._dashboard_analytics_cache = {}
+            stats = self._yolo_fuzzy_live_stats.setdefault("cam68", {})
+            stats["speed_refreshed_live_bounces"] = int(
+                stats.get("speed_refreshed_live_bounces", 0)
+            ) + refreshed
+        return refreshed
+
+    def _pop_ready_ws_bounce_locked(self) -> dict | None:
+        """Return the next non-zero-speed WS bounce without blocking behind zeros."""
+        if not self._ws_bounce_queue:
+            return None
+        self._refresh_zero_speed_live_bounces_locked()
+
+        idx = 0
+        while idx < len(self._ws_bounce_queue):
+            payload = self._ws_bounce_queue[idx]
+            try:
+                speed_kmh = int(round(float(payload.get("speed_kmh", 0) or 0)))
+            except Exception:
+                speed_kmh = 0
+            if speed_kmh > 0:
+                camera_name = payload.get("camera_name", payload.get("camera", "unknown"))
+                stats = self._yolo_fuzzy_live_stats.setdefault(
+                    str(camera_name or "unknown"), {}
+                )
+                if self._reject_yolo_live_bounce_speed_context_locked(payload, stats=stats):
+                    dropped_payload = dict(payload)
+                    del self._ws_bounce_queue[idx]
+                    self._drop_live_bounces_for_ws_payload_locked(
+                        dropped_payload,
+                        stats=stats,
+                    )
+                    continue
+                del self._ws_bounce_queue[idx]
+                return payload
+            idx += 1
+
+        now = time.time()
+        for idx, payload in enumerate(list(self._ws_bounce_queue)):
+            queued_at = float(payload.get("_queued_at", now) or now)
+            if now - queued_at >= self._ws_zero_speed_grace_seconds:
+                del self._ws_bounce_queue[idx]
+                camera_name = payload.get("camera_name", payload.get("camera", "unknown"))
+                stats = self._yolo_fuzzy_live_stats.setdefault(
+                    str(camera_name or "unknown"), {}
+                )
+                stats["dropped_zero_speed_ws_bounces"] = int(
+                    stats.get("dropped_zero_speed_ws_bounces", 0)
+                ) + 1
+                logger.info(
+                    "3D display: dropped zero-speed bounce frame=%s sequence=%s",
+                    payload.get("frame_index", payload.get("frame")),
+                    payload.get("sequence"),
+                )
+                break
+        return None
+
+    def _backfill_zero_speed_bounces_from_speed_locked(self, speed_event: dict) -> int:
+        try:
+            speed_kmh = int(round(float(speed_event.get("speed_kmh", 0) or 0)))
+        except Exception:
+            speed_kmh = 0
+        if speed_kmh <= 0 or not self._live_bounces:
+            return 0
+
+        speed_camera = speed_event.get("camera_name", speed_event.get("camera"))
+        speed_frame = self._event_frame(speed_event)
+        try:
+            speed_ts = float(speed_event.get("timestamp", speed_event.get("capture_ts", 0.0)) or 0.0)
+        except (TypeError, ValueError):
+            speed_ts = 0.0
+
+        updated = 0
+        retracted: list[dict] = []
+        max_frame_gap = 600
+        max_age_seconds = 24.0
+        fresh_frame_gap = 320
+        fresh_age_seconds = 12.0
+        for bd in reversed(self._live_bounces[-self._LIVE_BOUNCE_HISTORY_LIMIT:]):
+            try:
+                current_speed = int(round(float(bd.get("speed_kmh", 0) or 0)))
+            except Exception:
+                current_speed = 0
+            if current_speed > 0:
+                continue
+
+            bounce_camera = bd.get("camera_name", bd.get("camera"))
+            if speed_camera and bounce_camera and str(speed_camera) != str(bounce_camera):
+                continue
+
+            signed_frame_gap = None
+            bounce_frame = self._event_frame(bd)
+            if bounce_frame is not None and speed_frame is not None:
+                signed_frame_gap = bounce_frame - speed_frame
+                if signed_frame_gap > max_frame_gap:
+                    continue
+                if signed_frame_gap < -max_frame_gap:
+                    break
+
+            signed_age = None
+            try:
+                bounce_ts = float(bd.get("timestamp", bd.get("capture_ts", 0.0)) or 0.0)
+            except (TypeError, ValueError):
+                bounce_ts = 0.0
+            if bounce_ts and speed_ts:
+                signed_age = bounce_ts - speed_ts
+                if signed_age > max_age_seconds:
+                    continue
+                if signed_age < -max_age_seconds:
+                    break
+
+            bd["speed_kmh"] = speed_kmh
+            bd["speed"] = speed_kmh
+            bd["speed_direction"] = speed_event.get("direction")
+            if signed_frame_gap is not None and signed_frame_gap < 0:
+                bd["speed_source"] = "future_single_cam_speed_backfill"
+            else:
+                is_fresh = True
+                if signed_frame_gap is not None and signed_frame_gap > fresh_frame_gap:
+                    is_fresh = False
+                if signed_age is not None and signed_age > fresh_age_seconds:
+                    is_fresh = False
+                bd["speed_source"] = (
+                    "nearest_single_cam_speed" if is_fresh else "stale_single_cam_speed"
+                )
+            bd["speed_frame"] = speed_event.get("frame_index", speed_event.get("frame"))
+            if signed_frame_gap is not None:
+                bd["speed_frame_gap"] = int(signed_frame_gap)
+            if signed_age is not None:
+                bd["speed_age_s"] = round(float(signed_age), 3)
+            bounce_camera = bd.get("camera_name", bd.get("camera", "unknown"))
+            stats = self._yolo_fuzzy_live_stats.setdefault(str(bounce_camera or "unknown"), {})
+            if self._reject_yolo_live_bounce_speed_context_locked(bd, stats=stats):
+                retracted.append(bd)
+                continue
+            self._update_ws_payload_speed_for_bounce_locked(bd)
+            updated += 1
+        if retracted:
+            camera_name = retracted[-1].get("camera_name", retracted[-1].get("camera", "unknown"))
+            stats = self._yolo_fuzzy_live_stats.setdefault(str(camera_name or "unknown"), {})
+            self._retract_live_bounces_locked(
+                retracted,
+                stats=stats,
+                stat_key="speed_context_retracted_live_bounces",
+            )
+        return updated
+
     def _record_live_speed_event_locked(self, event: dict) -> None:
+        self._dashboard_analytics_cache = {}
         self._total_live_speed_events += 1
         event["sequence"] = self._total_live_speed_events
         self._live_speed_events.append(dict(event))
         if len(self._live_speed_events) > self._LIVE_BOUNCE_HISTORY_LIMIT:
             self._live_speed_events = self._live_speed_events[-self._LIVE_BOUNCE_HISTORY_LIMIT:]
+        backfilled = self._backfill_zero_speed_bounces_from_speed_locked(event)
+        if backfilled:
+            cam_name = event.get("camera_name", event.get("camera", "unknown"))
+            stats = self._yolo_fuzzy_live_stats.setdefault(str(cam_name or "unknown"), {})
+            stats["speed_backfilled_bounces"] = int(
+                stats.get("speed_backfilled_bounces", 0)
+            ) + backfilled
         try:
             self._last_frame_speed_kmh = float(event.get("speed_kmh", 0.0) or 0.0)
         except Exception:
@@ -4490,8 +5741,15 @@ class Orchestrator:
             target["bounce_event"] = dict(event)
         target["event_ball"] = event_ball
 
-    def _record_live_bounce_locked(self, bd: dict, *, debug_source=None) -> None:
+    def _record_live_bounce_locked(self, bd: dict, *, debug_source=None) -> bool:
         """Publish one accepted bounce to every realtime consumer from one source dict."""
+        self._dashboard_analytics_cache = {}
+        bd = self._attach_recent_single_cam_speed_locked(dict(bd))
+        bd = self._normalize_live_bounce_dict(bd)
+        camera_name = bd.get("camera_name", bd.get("camera", "unknown"))
+        stats = self._yolo_fuzzy_live_stats.setdefault(str(camera_name or "unknown"), {})
+        if self._reject_yolo_live_bounce_speed_context_locked(bd, stats=stats):
+            return False
         self._total_live_bounces += 1
         bd["sequence"] = self._total_live_bounces
         self._live_bounces.append(bd)
@@ -4500,6 +5758,7 @@ class Orchestrator:
         self._debug_record_bounce(debug_source if debug_source is not None else bd)
         self._enqueue_ws_bounce_locked(bd)
         self._record_yolo_out_gate_bounce_locked(bd)
+        return True
 
     def _gate_live_bounce_candidate_locked(
         self,
@@ -4510,6 +5769,7 @@ class Orchestrator:
     ) -> dict | None:
         """Apply the shared realtime bounce gate to one candidate event."""
         consumed_nc = None
+        consumed_speed_event = None
         if match_speed:
             event_ts = float(bd.get("timestamp", now))
             for nc in reversed(self._net_crossings):
@@ -4525,11 +5785,40 @@ class Orchestrator:
                     consumed_nc = nc
                     break
                 break
+            if consumed_nc is None:
+                event_camera = bd.get("camera_name", bd.get("camera"))
+                for speed_event in reversed(self._live_speed_events):
+                    if speed_event.get("_used_for_bounce"):
+                        continue
+                    speed_camera = speed_event.get("camera_name", speed_event.get("camera"))
+                    if event_camera and speed_camera and str(event_camera) != str(speed_camera):
+                        continue
+                    try:
+                        speed_ts = float(
+                            speed_event.get(
+                                "timestamp",
+                                speed_event.get("capture_ts", event_ts),
+                            )
+                        )
+                    except (TypeError, ValueError):
+                        continue
+                    age = event_ts - speed_ts
+                    if age < 0:
+                        continue
+                    if age < 3.0:
+                        bd["speed_kmh"] = speed_event.get("speed_kmh", 0)
+                        bd["speed_direction"] = speed_event.get("direction")
+                        speed_event["_used_for_bounce"] = True
+                        consumed_speed_event = speed_event
+                        break
+                    break
 
         if self._is_duplicate_bounce(bd):
             self._post_filter_stats["duplicate"] += 1
             if consumed_nc is not None:
                 consumed_nc["_used"] = False
+            if consumed_speed_event is not None:
+                consumed_speed_event["_used_for_bounce"] = False
             return None
 
         ok, reason = self._post_filter_bounce(bd)
@@ -4537,6 +5826,8 @@ class Orchestrator:
         if not ok:
             if consumed_nc is not None:
                 consumed_nc["_used"] = False
+            if consumed_speed_event is not None:
+                consumed_speed_event["_used_for_bounce"] = False
             return None
         return bd
 
@@ -5307,17 +6598,25 @@ class Orchestrator:
         """Enable WebSocket push to 3D display."""
         if url:
             self._ws_url = url
+        with self._analytics_lock:
+            self._ws_bounce_queue.clear()
+            self._ws_last_send_monotonic = 0.0
+            self._ws_generation += 1
+            generation = self._ws_generation
         self._ws_enabled = True
-        if self._ws_thread is None or not self._ws_thread.is_alive():
-            self._ws_thread = threading.Thread(
-                target=self._ws_push_loop, daemon=True, name="ws-3d-push"
-            )
-            self._ws_thread.start()
+        self._ws_thread = threading.Thread(
+            target=self._ws_push_loop, args=(generation,), daemon=True, name="ws-3d-push"
+        )
+        self._ws_thread.start()
         return {"enabled": True, "url": self._ws_url}
 
     def disable_3d_display(self) -> dict:
         """Disable WebSocket push."""
         self._ws_enabled = False
+        with self._analytics_lock:
+            self._ws_bounce_queue.clear()
+            self._ws_last_send_monotonic = 0.0
+            self._ws_generation += 1
         return {"enabled": False}
 
     def enable_ml_rally(self) -> dict:
@@ -5380,7 +6679,24 @@ class Orchestrator:
             "inference": self._inference_enabled,
         }
 
-    def _ws_push_loop(self) -> None:
+    def _ws_seconds_until_next_send(self, *, now: float | None = None) -> float:
+        min_interval = max(0.0, float(self._ws_min_send_interval_seconds or 0.0))
+        if min_interval <= 0.0 or self._ws_last_send_monotonic <= 0.0:
+            return 0.0
+        now_val = float(now if now is not None else time.monotonic())
+        return max(0.0, self._ws_last_send_monotonic + min_interval - now_val)
+
+    def _mark_ws_bounce_sent(self, *, now: float | None = None) -> None:
+        self._ws_last_send_monotonic = float(now if now is not None else time.monotonic())
+
+    def _ws_generation_active(self, generation: int) -> bool:
+        return (
+            self._ws_enabled
+            and int(generation) == int(self._ws_generation)
+            and not self._stopped.is_set()
+        )
+
+    def _ws_push_loop(self, generation: int) -> None:
         """Background thread: push bounce events to 3D display via WebSocket."""
         import asyncio
         import ssl
@@ -5396,30 +6712,63 @@ class Orchestrator:
                 logger.warning("websockets not installed, 3D display push disabled")
                 return
 
-            while self._ws_enabled and not self._stopped.is_set():
+            while self._ws_generation_active(generation):
                 try:
-                    connect_kwargs = {"ssl": ssl_ctx} if self._ws_url.startswith("wss://") else {}
-                    async with websockets.connect(self._ws_url, **connect_kwargs) as ws:
-                        logger.info("3D display connected: %s", self._ws_url)
-                        while self._ws_enabled and not self._stopped.is_set():
-                            if self._ws_bounce_queue:
-                                bd = self._ws_bounce_queue[0]
+                    ws_url = self._ws_url
+                    connect_kwargs = {"ping_interval": None}
+                    if ws_url.startswith("wss://"):
+                        connect_kwargs["ssl"] = ssl_ctx
+                    if "tennisserver.motionrivalry.com" in ws_url:
+                        connect_kwargs["origin"] = "https://tennis.motionrivalry.com"
+                    async with websockets.connect(ws_url, **connect_kwargs) as ws:
+                        logger.info("3D display connected: %s", ws_url)
+                        while self._ws_generation_active(generation):
+                            wait_s = self._ws_seconds_until_next_send()
+                            if wait_s > 0:
+                                await asyncio.sleep(min(wait_s, 0.25))
+                                continue
+                            with self._analytics_lock:
+                                bd = self._pop_ready_ws_bounce_locked()
+                            if bd:
+                                if not self._ws_generation_active(generation):
+                                    break
+                                bd = self._apply_display_orientation_to_ws_payload(bd)
+                                bounce_payload = {
+                                    key: value
+                                    for key, value in bd.items()
+                                    if not str(key).startswith("_")
+                                }
+                                bounce_payload.update({
+                                    "timeStamp": bd["timeStamp"],
+                                    "timestamp": bd["timestamp"],
+                                    "time_ms": bd["time_ms"],
+                                    "capture_ts": bd.get("capture_ts"),
+                                    "x": round(bd["x"], 4),
+                                    "y": round(bd["y"], 4),
+                                    "ws_x": round(bd["ws_x"], 4),
+                                    "ws_y": round(bd["ws_y"], 4),
+                                    "raw_x": round(bd["raw_x"], 4),
+                                    "raw_y": round(bd["raw_y"], 4),
+                                    "projected_x": bd.get("projected_x"),
+                                    "projected_y": bd.get("projected_y"),
+                                    "speed": int(round(bd["speed"])),
+                                    "speed_kmh": int(round(bd["speed_kmh"])),
+                                    "frame": bd.get("frame"),
+                                    "frame_index": bd.get("frame_index"),
+                                    "event_kind": bd.get("event_kind", "bounce"),
+                                    "protocol_version": bd.get("protocol_version", 1),
+                                })
                                 msg = json.dumps({
+                                    "room": "general",
                                     "msg": {
                                         "message": "bounce_data",
                                         "data": {
-                                            "bounce": {
-                                                "timeStamp": bd["timestamp"],
-                                                "x": round(bd["x"], 4),
-                                                "y": round(bd["y"], 4),
-                                                "speed": int(round(bd["speed"])),
-                                            }
+                                            "bounce": bounce_payload,
                                         }
                                     }
                                 })
                                 await ws.send(msg)
-                                if self._ws_bounce_queue and self._ws_bounce_queue[0] is bd:
-                                    self._ws_bounce_queue.popleft()
+                                self._mark_ws_bounce_sent()
                                 logger.info("3D display: sent bounce x=%.3f y=%.3f speed=%.0f",
                                            bd["x"], bd["y"], bd["speed"])
                             else:

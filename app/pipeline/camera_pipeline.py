@@ -198,6 +198,7 @@ def run_pipeline(
                         if w > _preview_max_width
                         else raw_frame
                     )
+                    preview_h, preview_w = preview.shape[:2]
                     _, preview_jpeg = cv2.imencode(
                         ".jpg",
                         preview,
@@ -210,6 +211,10 @@ def run_pipeline(
                             "recording": recording_jpeg.tobytes(),
                             "frame_id": payload_frame_id,
                             "capture_ts": payload_capture_ts,
+                            "source_width": w,
+                            "source_height": h,
+                            "preview_width": preview_w,
+                            "preview_height": preview_h,
                         })
                     else:
                         _push_latest_frame_payload({
@@ -217,6 +222,10 @@ def run_pipeline(
                             "recording": None,
                             "frame_id": payload_frame_id,
                             "capture_ts": payload_capture_ts,
+                            "source_width": w,
+                            "source_height": h,
+                            "preview_width": preview_w,
+                            "preview_height": preview_h,
                         })
                 except Exception:
                     pass

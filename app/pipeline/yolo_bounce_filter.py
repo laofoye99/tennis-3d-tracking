@@ -43,9 +43,42 @@ DEFAULT_DASHBOARD_WEAK_NON_REVERSAL_MAX_ANGLE = 45.0
 DEFAULT_DASHBOARD_WEAK_NON_REVERSAL_MIN_SCORE = 90.0
 DEFAULT_DASHBOARD_LIVE_DUPLICATE_SPACE_METERS = 2.5
 DEFAULT_DASHBOARD_RELEASE_DELAY_FRAMES = 12
-DEFAULT_DASHBOARD_MIN_CONFIDENCE = 0.16
+DEFAULT_DASHBOARD_MIN_CONFIDENCE = 0.10
+DEFAULT_DASHBOARD_NON_REVERSAL_MIN_HISTORY = 30
+DEFAULT_DASHBOARD_NON_REVERSAL_MIN_DELTA_V = 20.0
+DEFAULT_DASHBOARD_NON_REVERSAL_MIN_SCORE = 145.0
+DEFAULT_DASHBOARD_NON_REVERSAL_MIN_ANGLE = 25.0
+DEFAULT_DASHBOARD_MIN_QUEUE_SPEED_PX = 5.0
+DEFAULT_DASHBOARD_MIN_DELTA_V = 2.0
+DEFAULT_DASHBOARD_MIN_SIGNAL_SCORE = 150.0
+DEFAULT_DASHBOARD_CLAMPED_BASELINE_MIN_SCORE = 250.0
+DEFAULT_DASHBOARD_RANKED_LOW_CONFIDENCE = 0.25
+DEFAULT_DASHBOARD_SLOW_QUEUE_OVERRIDE_MIN_SCORE = 180.0
+DEFAULT_DASHBOARD_SLOW_QUEUE_OVERRIDE_MIN_ANGLE = 75.0
+DEFAULT_DASHBOARD_SLOW_QUEUE_OVERRIDE_MIN_DELTA_V = 2.0
+DEFAULT_DASHBOARD_SLOW_QUEUE_OVERRIDE_MIN_CONFIDENCE = 0.18
+DEFAULT_DASHBOARD_SLOW_QUEUE_OVERRIDE_MIN_HISTORY = 15
+DEFAULT_DASHBOARD_SLOW_QUEUE_OVERRIDE_MIN_ABS_Y = 3.0
+DEFAULT_DASHBOARD_BASELINE_SLOW_QUEUE_MIN_SCORE = 120.0
+DEFAULT_DASHBOARD_BASELINE_SLOW_QUEUE_MIN_HISTORY = 30
+DEFAULT_DASHBOARD_NEAR_SIDE_SLOW_QUEUE_MIN_SCORE = 120.0
+DEFAULT_DASHBOARD_NEAR_SIDE_SLOW_QUEUE_MIN_HISTORY = 10
+DEFAULT_DASHBOARD_NEAR_SIDE_SLOW_QUEUE_MAX_HISTORY = 14
+DEFAULT_DASHBOARD_NEAR_SIDE_SLOW_QUEUE_MIN_ANGLE = 45.0
+DEFAULT_DASHBOARD_NEAR_SIDE_SLOW_QUEUE_MAX_DELTA_V = 1.2
+DEFAULT_DASHBOARD_NEAR_SIDE_SLOW_QUEUE_MIN_CONFIDENCE = 0.35
+DEFAULT_DASHBOARD_NEAR_SIDE_SLOW_QUEUE_MAX_Y = -6.0
+DEFAULT_DASHBOARD_NEAR_SIDE_LOW_DELTA_MAX_QUEUE_SPEED = 6.0
+DEFAULT_DASHBOARD_SHORT_EDGE_TRACK_MAX_HISTORY = 20
+DEFAULT_DASHBOARD_SHORT_EDGE_TRACK_MIN_ABS_X = 3.5
+DEFAULT_DASHBOARD_SHORT_EDGE_TRACK_MIN_Y = 5.0
+DEFAULT_DASHBOARD_SHORT_EDGE_TRACK_MIN_SCORE = 260.0
+DEFAULT_DASHBOARD_NEAR_FOLLOWUP_SUPPRESS_FRAMES = 25
+DEFAULT_DASHBOARD_NEAR_FOLLOWUP_PREV_MIN_Y = 3.0
+DEFAULT_DASHBOARD_NEAR_FOLLOWUP_NEXT_MAX_Y = -6.0
 DEFAULT_BOUNCE_SPEED_BONUS_CAP_PX = 8.0
 DEFAULT_BOUNCE_SPEED_BONUS_WEIGHT = 10.0
+DEFAULT_SINGLE_CAM_CLAMP_MARGIN_M = 12.0
 VERIFY_TRK_SEARCH_WINDOW = 10
 VERIFY_TRK_CREATE_THR = 70.0
 VERIFY_TRK_MAX_HISTORY = 60
@@ -522,6 +555,41 @@ def _is_in_court(x: float, y: float) -> bool:
         SINGLES_X_MIN <= x <= SINGLES_X_MAX
         and COURT_Y_MIN <= y <= COURT_Y_MAX
     )
+
+
+def _clamp_single_cam_projection_event(
+    event: dict[str, Any],
+    *,
+    margin_m: float = DEFAULT_SINGLE_CAM_CLAMP_MARGIN_M,
+) -> dict[str, Any]:
+    """Correct near-court single-camera projection drift before OUT gating."""
+    try:
+        x = float(event.get("x"))
+        y = float(event.get("y"))
+    except (TypeError, ValueError):
+        return event
+    if not (math.isfinite(x) and math.isfinite(y)):
+        return event
+    if _is_in_court(x, y):
+        return event
+
+    if not (
+        SINGLES_X_MIN - margin_m <= x <= SINGLES_X_MAX + margin_m
+        and COURT_Y_MIN - margin_m <= y <= COURT_Y_MAX + margin_m
+    ):
+        return event
+
+    clamped_x = min(max(x, SINGLES_X_MIN), SINGLES_X_MAX)
+    clamped_y = min(max(y, COURT_Y_MIN), COURT_Y_MAX)
+    corrected = dict(event)
+    corrected.setdefault("projected_x", round(x, 4))
+    corrected.setdefault("projected_y", round(y, 4))
+    corrected["x"] = round(float(clamped_x), 4)
+    corrected["y"] = round(float(clamped_y), 4)
+    corrected["in_court"] = True
+    corrected["type"] = "IN"
+    corrected["court_correction"] = "clamped_single_cam_projection"
+    return corrected
 
 
 def _dedupe_detections(detections: list[dict]) -> list[_Point]:
@@ -1137,6 +1205,115 @@ def _apply_out_rally_gate(
     return kept, suppressed
 
 
+def _strip_candidate_fields_for_fallback(detections: list[dict]) -> list[dict]:
+    stripped: list[dict] = []
+    for det in detections:
+        item = {
+            key: value
+            for key, value in det.items()
+            if key not in {"candidates", "raw_candidates", "event_only_raw_candidates"}
+        }
+        stripped.append(item)
+    return stripped
+
+
+def _dedupe_events_by_frame(
+    events: list[dict[str, Any]],
+    *,
+    key_fields: tuple[str, ...] = ("frame_index",),
+) -> list[dict[str, Any]]:
+    seen: set[tuple[Any, ...]] = set()
+    deduped: list[dict[str, Any]] = []
+    for event in sorted(events, key=lambda e: int(e.get("frame_index", e.get("frame", 0)))):
+        key = tuple(event.get(field, event.get("frame")) for field in key_fields)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(event)
+    return deduped
+
+
+def _merge_auxiliary_fallback_result(
+    queue_result: dict[str, Any],
+    fallback_result: dict[str, Any],
+    *,
+    clean_time_frames: int,
+    clean_space_meters: float,
+) -> dict[str, Any]:
+    """Merge top-1 fuzzy events into verify-queue events as a gap fallback."""
+    queue_bounces = list(queue_result.get("bounces") or [])
+    fallback_bounces = [
+        {
+            **event,
+            "auxiliary_fallback": "top1_fuzzy",
+        }
+        for event in list(fallback_result.get("bounces") or [])
+        if bool(event.get("in_court", True))
+        and str(event.get("type", "IN") or "IN").upper() != "OUT"
+    ]
+    if not fallback_bounces:
+        return queue_result
+
+    combined_bounces = queue_bounces + fallback_bounces
+    merged_bounces, merge_deduped = _select_strongest_bounces(
+        combined_bounces,
+        clean_time_frames=clean_time_frames,
+        clean_space_meters=clean_space_meters,
+    )
+    hit_events = _dedupe_events_by_frame(
+        list(queue_result.get("hits") or []) + list(fallback_result.get("hits") or []),
+        key_fields=("frame_index", "source"),
+    )
+    fallback_speed_events = list(fallback_result.get("speed_events") or [])
+    speed_events = _dedupe_events_by_frame(
+        list(queue_result.get("speed_events") or []),
+        key_fields=("frame_index", "direction"),
+    )
+    publishable_bounces, gate_only_bounces = _split_gate_only_bounces(merged_bounces)
+    final_bounces, out_rally_suppressed = _apply_out_rally_gate(
+        [*publishable_bounces, *gate_only_bounces],
+        hit_events=hit_events,
+        speed_events=speed_events,
+    )
+    for seq, event in enumerate(final_bounces, start=1):
+        event["sequence"] = seq
+    for seq, event in enumerate(hit_events, start=1):
+        event["sequence"] = seq
+
+    merged = dict(queue_result)
+    merged["bounces"] = final_bounces
+    merged["hits"] = hit_events
+    merged["speed_events"] = speed_events
+    merged["gate_only_bounces"] = gate_only_bounces
+    merged["out_rally_suppressed_bounces"] = (
+        list(queue_result.get("out_rally_suppressed_bounces") or [])
+        + list(fallback_result.get("out_rally_suppressed_bounces") or [])
+        + out_rally_suppressed
+    )
+    merged["deduped_bounce_candidates"] = (
+        list(queue_result.get("deduped_bounce_candidates") or [])
+        + list(fallback_result.get("deduped_bounce_candidates") or [])
+        + merge_deduped
+    )
+    merged["count"] = len(final_bounces)
+    merged["hit_count"] = len(hit_events)
+    merged["speed_count"] = len(speed_events)
+    merged["gate_only_bounce_count"] = len(gate_only_bounces)
+    merged["out_rally_suppressed_bounce_count"] = len(
+        merged["out_rally_suppressed_bounces"]
+    )
+    merged["deduped_bounces_after_hit"] = len(merged["deduped_bounce_candidates"])
+    merged["auxiliary_fallback_bounce_count"] = len(fallback_bounces)
+    merged["auxiliary_fallback_speed_count"] = 0
+    merged["auxiliary_fallback_speed_ignored_count"] = len(fallback_speed_events)
+    merged["event_chain"] = "verify_queue_plus_top1_fallback"
+    params = dict(merged.get("params") or {})
+    params["auxiliary_fallback"] = "top1_fuzzy"
+    params["auxiliary_fallback_speed_events_ignored"] = len(fallback_speed_events)
+    merged["params"] = params
+    return merged
+
+
 def is_yolo_queue_event(event: dict[str, Any]) -> bool:
     source = str(event.get("source", "") or "")
     return (
@@ -1155,10 +1332,22 @@ def dashboard_yolo_quality_reject_reason(
     min_confidence: float = DEFAULT_DASHBOARD_MIN_CONFIDENCE,
     weak_non_reversal_max_angle: float = DEFAULT_DASHBOARD_WEAK_NON_REVERSAL_MAX_ANGLE,
     weak_non_reversal_min_score: float = DEFAULT_DASHBOARD_WEAK_NON_REVERSAL_MIN_SCORE,
+    non_reversal_min_history: int = DEFAULT_DASHBOARD_NON_REVERSAL_MIN_HISTORY,
+    non_reversal_min_delta_v: float = DEFAULT_DASHBOARD_NON_REVERSAL_MIN_DELTA_V,
+    non_reversal_min_score: float = DEFAULT_DASHBOARD_NON_REVERSAL_MIN_SCORE,
+    non_reversal_min_angle: float = DEFAULT_DASHBOARD_NON_REVERSAL_MIN_ANGLE,
+    min_queue_speed_px: float = DEFAULT_DASHBOARD_MIN_QUEUE_SPEED_PX,
+    min_delta_v: float = DEFAULT_DASHBOARD_MIN_DELTA_V,
+    min_signal_score: float = DEFAULT_DASHBOARD_MIN_SIGNAL_SCORE,
+    clamped_baseline_min_score: float = DEFAULT_DASHBOARD_CLAMPED_BASELINE_MIN_SCORE,
+    ranked_low_confidence: float = DEFAULT_DASHBOARD_RANKED_LOW_CONFIDENCE,
 ) -> str | None:
     """Return the dashboard publish-layer quality reject reason, if any."""
     if not is_yolo_queue_event(event):
         return None
+
+    if event.get("auxiliary_fallback") == "top1_fuzzy":
+        return "quality_auxiliary_fallback"
 
     frame = event_frame if event_frame is not None else _event_frame_value(event)
     if frame is not None and frame < int(min_bounce_frame):
@@ -1182,14 +1371,150 @@ def dashboard_yolo_quality_reject_reason(
     if "delta_v" not in event and "confidence" not in event:
         score = _event_float(event, "bounce_signal_score")
     else:
-        score = _bounce_shape_score(event)
-    y_reversal = bool(event.get("y_reversal"))
+        score = max(_event_float(event, "bounce_signal_score"), _bounce_shape_score(event))
+    raw_score = _event_float(event, "bounce_signal_score")
+    y_reversal_raw = event.get("y_reversal")
+    if isinstance(y_reversal_raw, str):
+        y_reversal = y_reversal_raw.strip().lower() in {"1", "true", "yes", "y"}
+    else:
+        y_reversal = bool(y_reversal_raw)
+    if y_reversal_raw is not None and not y_reversal:
+        history = _event_float(event, "queue_history_len")
+        delta_v = _event_float(event, "delta_v")
+        if (
+            event.get("queue_id") is not None
+            and angle >= float(non_reversal_min_angle)
+            and history >= float(non_reversal_min_history)
+            and delta_v >= float(non_reversal_min_delta_v)
+            and score >= float(non_reversal_min_score)
+        ):
+            return None
+        return "quality_no_y_reversal"
+    queue_speed_raw = event.get("queue_speed_px")
+    court_y_raw = event.get("raw_y", event.get("y"))
+    court_y_abs = (
+        abs(_event_float({"y": court_y_raw}, "y"))
+        if court_y_raw is not None
+        else None
+    )
+    near_baseline = (
+        court_y_raw is not None
+        and court_y_abs is not None
+        and court_y_abs >= COURT_Y_MAX - 0.1
+    )
+    court_x_raw = event.get("raw_x", event.get("x"))
+    court_x_abs = (
+        abs(_event_float({"x": court_x_raw}, "x"))
+        if court_x_raw is not None
+        else None
+    )
+    history = _event_float(event, "queue_history_len")
+    confidence = _event_float(event, "confidence")
+    delta_v = _event_float(event, "delta_v")
     if (
-        not y_reversal
-        and angle < float(weak_non_reversal_max_angle)
-        and score < float(weak_non_reversal_min_score)
+        history_len_raw is not None
+        and history <= DEFAULT_DASHBOARD_SHORT_EDGE_TRACK_MAX_HISTORY
+        and court_x_abs is not None
+        and court_x_abs >= DEFAULT_DASHBOARD_SHORT_EDGE_TRACK_MIN_ABS_X
+        and court_y_raw is not None
+        and _event_float({"y": court_y_raw}, "y")
+        >= DEFAULT_DASHBOARD_SHORT_EDGE_TRACK_MIN_Y
+        and raw_score < DEFAULT_DASHBOARD_SHORT_EDGE_TRACK_MIN_SCORE
     ):
-        return "quality_weak_non_reversal"
+        return "quality_short_edge_track"
+    slow_queue_shape_override = False
+    if queue_speed_raw is not None and _event_float(event, "queue_speed_px") < float(min_queue_speed_px):
+        slow_queue_shape_override = (
+            y_reversal
+            and confidence >= DEFAULT_DASHBOARD_SLOW_QUEUE_OVERRIDE_MIN_CONFIDENCE
+            and (
+                (
+                    not near_baseline
+                    and angle >= DEFAULT_DASHBOARD_SLOW_QUEUE_OVERRIDE_MIN_ANGLE
+                    and history >= DEFAULT_DASHBOARD_SLOW_QUEUE_OVERRIDE_MIN_HISTORY
+                    and court_y_abs is not None
+                    and court_y_abs >= DEFAULT_DASHBOARD_SLOW_QUEUE_OVERRIDE_MIN_ABS_Y
+                    and raw_score >= DEFAULT_DASHBOARD_SLOW_QUEUE_OVERRIDE_MIN_SCORE
+                    and delta_v >= DEFAULT_DASHBOARD_SLOW_QUEUE_OVERRIDE_MIN_DELTA_V
+                )
+                or (
+                    near_baseline
+                    and angle >= DEFAULT_DASHBOARD_SLOW_QUEUE_OVERRIDE_MIN_ANGLE
+                    and raw_score >= DEFAULT_DASHBOARD_BASELINE_SLOW_QUEUE_MIN_SCORE
+                    and history >= DEFAULT_DASHBOARD_BASELINE_SLOW_QUEUE_MIN_HISTORY
+                )
+                or (
+                    court_y_raw is not None
+                    and _event_float({"y": court_y_raw}, "y")
+                    <= DEFAULT_DASHBOARD_NEAR_SIDE_SLOW_QUEUE_MAX_Y
+                    and history >= DEFAULT_DASHBOARD_NEAR_SIDE_SLOW_QUEUE_MIN_HISTORY
+                    and history <= DEFAULT_DASHBOARD_NEAR_SIDE_SLOW_QUEUE_MAX_HISTORY
+                    and angle >= DEFAULT_DASHBOARD_NEAR_SIDE_SLOW_QUEUE_MIN_ANGLE
+                    and delta_v <= DEFAULT_DASHBOARD_NEAR_SIDE_SLOW_QUEUE_MAX_DELTA_V
+                    and confidence
+                    >= DEFAULT_DASHBOARD_NEAR_SIDE_SLOW_QUEUE_MIN_CONFIDENCE
+                    and raw_score >= DEFAULT_DASHBOARD_NEAR_SIDE_SLOW_QUEUE_MIN_SCORE
+                )
+            )
+        )
+        if not slow_queue_shape_override:
+            return "quality_slow_queue"
+        event["slow_queue_shape_override"] = True
+    delta_v_raw = event.get("delta_v")
+    near_side_low_delta_override = (
+        y_reversal
+        and queue_speed_raw is not None
+        and delta_v_raw is not None
+        and court_y_raw is not None
+        and _event_float({"y": court_y_raw}, "y")
+        <= DEFAULT_DASHBOARD_NEAR_SIDE_SLOW_QUEUE_MAX_Y
+        and history >= DEFAULT_DASHBOARD_NEAR_SIDE_SLOW_QUEUE_MIN_HISTORY
+        and history <= DEFAULT_DASHBOARD_NEAR_SIDE_SLOW_QUEUE_MAX_HISTORY
+        and angle >= DEFAULT_DASHBOARD_NEAR_SIDE_SLOW_QUEUE_MIN_ANGLE
+        and delta_v <= DEFAULT_DASHBOARD_NEAR_SIDE_SLOW_QUEUE_MAX_DELTA_V
+        and confidence >= DEFAULT_DASHBOARD_NEAR_SIDE_SLOW_QUEUE_MIN_CONFIDENCE
+        and raw_score >= DEFAULT_DASHBOARD_NEAR_SIDE_SLOW_QUEUE_MIN_SCORE
+        and _event_float(event, "queue_speed_px")
+        <= DEFAULT_DASHBOARD_NEAR_SIDE_LOW_DELTA_MAX_QUEUE_SPEED
+    )
+    if near_side_low_delta_override:
+        event["near_side_low_delta_override"] = True
+    quality_override = slow_queue_shape_override or near_side_low_delta_override
+    if (
+        delta_v_raw is not None
+        and _event_float(event, "delta_v") < float(min_delta_v)
+        and not quality_override
+    ):
+        return "quality_low_delta_v"
+    if (
+        queue_speed_raw is not None
+        and delta_v_raw is not None
+        and score_raw is not None
+        and raw_score < float(min_signal_score)
+        and not quality_override
+    ):
+        return "quality_low_bounce_score"
+    if (
+        court_y_raw is not None
+        and queue_speed_raw is not None
+        and delta_v_raw is not None
+        and score_raw is not None
+        and near_baseline
+        and raw_score < float(clamped_baseline_min_score)
+        and not quality_override
+    ):
+        return "quality_clamped_low_score"
+    rank_event_raw = event.get("queue_candidate_rank_event")
+    rank_last_raw = event.get("queue_candidate_rank_last")
+    if (
+        confidence_raw is not None
+        and rank_event_raw is not None
+        and rank_last_raw is not None
+        and _event_float(event, "confidence") < float(ranked_low_confidence)
+        and _event_float(event, "queue_candidate_rank_event") > 0.0
+        and _event_float(event, "queue_candidate_rank_last") > 0.0
+    ):
+        return "quality_ranked_low_confidence"
     return None
 
 
@@ -1293,6 +1618,45 @@ def filter_dashboard_yolo_publishable_bounces(
             continue
 
         candidates.append(dict(event))
+
+    if candidates:
+        kept_candidates: list[dict[str, Any]] = []
+        sorted_candidates = sorted(
+            candidates,
+            key=lambda item: int(item.get("frame_index", item.get("frame", 0))),
+        )
+        for idx, event in enumerate(sorted_candidates):
+            event_frame = _event_frame_value(event)
+            if event_frame is None:
+                kept_candidates.append(event)
+                continue
+            event_y = _event_float(event, "y")
+            suppress_for_followup: dict[str, Any] | None = None
+            if event_y >= DEFAULT_DASHBOARD_NEAR_FOLLOWUP_PREV_MIN_Y:
+                for future in sorted_candidates[idx + 1:]:
+                    future_frame = _event_frame_value(future)
+                    if future_frame is None:
+                        continue
+                    frame_gap = future_frame - event_frame
+                    if frame_gap <= 0:
+                        continue
+                    if frame_gap > DEFAULT_DASHBOARD_NEAR_FOLLOWUP_SUPPRESS_FRAMES:
+                        break
+                    if not bool(future.get("near_side_low_delta_override")):
+                        continue
+                    if _event_float(future, "y") > DEFAULT_DASHBOARD_NEAR_FOLLOWUP_NEXT_MAX_Y:
+                        continue
+                    suppress_for_followup = future
+                    break
+            if suppress_for_followup is not None:
+                _suppress(
+                    event,
+                    "near_side_followup_bounce",
+                    superseded_by_frame=_event_frame_value(suppress_for_followup),
+                )
+                continue
+            kept_candidates.append(event)
+        candidates = kept_candidates
 
     if clean_time_frames > 0 and live_duplicate_space > 0:
         kept, duplicate_suppressed = _select_strongest_bounces(
@@ -2089,12 +2453,12 @@ def _detect_candidate_queue_events(
                 "suppression_reason": "hit_window",
             })
             continue
-        bounce_candidates_after_hit.append({
+        bounce_candidates_after_hit.append(_clamp_single_cam_projection_event({
             **event,
             "kind": "bounce",
             "type": "IN" if event["in_court"] else "OUT",
             "source": "yolo_verify_queue_single_cam",
-        })
+        }))
 
     final_bounces, deduped_bounces = _select_strongest_bounces(
         bounce_candidates_after_hit,
@@ -2254,7 +2618,42 @@ def detect_single_camera_events(
         clean_space_meters=clean_space_meters,
     )
     if queue_result is not None:
-        return queue_result
+        fallback_result = detect_single_camera_events(
+            _strip_candidate_fields_for_fallback(detections),
+            camera_name=camera_name,
+            player_pose_messages=player_pose_messages,
+            homography=homography,
+            fps=fps,
+            max_gap=max_gap,
+            smooth_window=smooth_window,
+            filter_window=filter_window,
+            angle_thresh=angle_thresh,
+            momentum_thresh=momentum_thresh,
+            tolerance=tolerance,
+            hit_angle_thresh=hit_angle_thresh,
+            hit_dist_px_net=hit_dist_px_net,
+            hit_dist_px_base=hit_dist_px_base,
+            hit_search_radius_frames=hit_search_radius_frames,
+            roi_net_margin_m=roi_net_margin_m,
+            speed_min_kmh=speed_min_kmh,
+            speed_max_kmh=speed_max_kmh,
+            speed_cooldown_frames=speed_cooldown_frames,
+            net_offset_px=net_offset_px,
+            speed_line_offset_px=speed_line_offset_px,
+            speed_coef_up=speed_coef_up,
+            speed_coef_down=speed_coef_down,
+            speed_search_frames=speed_search_frames,
+            lookback_frames=lookback_frames,
+            hit_suppress_frames=hit_suppress_frames,
+            clean_time_frames=clean_time_frames,
+            clean_space_meters=clean_space_meters,
+        )
+        return _merge_auxiliary_fallback_result(
+            queue_result,
+            fallback_result,
+            clean_time_frames=clean_time_frames,
+            clean_space_meters=clean_space_meters,
+        )
 
     speed_events = _detect_single_cam_speed_crossings(
         smoothed,
@@ -2415,12 +2814,12 @@ def detect_single_camera_events(
             })
             continue
 
-        bounce_candidates_after_hit.append({
+        bounce_candidates_after_hit.append(_clamp_single_cam_projection_event({
             **event,
             "kind": "bounce",
             "type": "IN" if event["in_court"] else "OUT",
             "source": "yolo_fuzzy_single_cam",
-        })
+        }))
 
     final_bounces, deduped_bounces = _select_strongest_bounces(
         bounce_candidates_after_hit,

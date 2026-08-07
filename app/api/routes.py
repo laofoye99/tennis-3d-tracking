@@ -8,9 +8,14 @@ from pathlib import Path
 
 import cv2
 from fastapi import APIRouter, File, HTTPException, Request, UploadFile
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, Response, StreamingResponse
 
 from app.orchestrator import Orchestrator
+from app.homography_calibration import (
+    estimate_court_corners_from_jpeg,
+    homography_status,
+    update_homography_file,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +71,29 @@ async def dashboard_live():
     """Lightweight live event payload for minimap and video overlays."""
     orch = _get_orch()
     return orch.get_dashboard_live_payload()
+
+
+@router.get("/api/display-orientation")
+async def get_display_orientation():
+    """Return shared display orientation for minimap and 3D push."""
+    orch = _get_orch()
+    return orch.get_display_orientation()
+
+
+@router.post("/api/display-orientation")
+async def set_display_orientation(request: Request):
+    """Update shared display orientation for minimap and 3D push."""
+    orch = _get_orch()
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    if not isinstance(payload, dict):
+        raise HTTPException(400, "Expected JSON object")
+    return orch.set_display_orientation(
+        mirror_x=payload.get("mirror_x"),
+        mirror_y=payload.get("mirror_y"),
+    )
 
 
 # ---- Ball 3D ----
@@ -430,6 +458,121 @@ async def calibration_status():
         return {"calibrated": False, "error": str(e)}
 
 
+@router.get("/api/homography/status")
+async def get_homography_status(camera: str | None = None):
+    """Return current court homography status and projected corner pixels."""
+    orch = _get_orch()
+    camera_key = None
+    if camera:
+        cam_cfg = orch.config.cameras.get(camera)
+        if cam_cfg is None:
+            raise HTTPException(404, f"Unknown camera: {camera}")
+        camera_key = cam_cfg.homography_key
+    try:
+        return homography_status(orch.config.homography.path, camera_key)
+    except Exception as e:
+        logger.exception("Homography status failed")
+        raise HTTPException(500, str(e))
+
+
+@router.get("/api/homography/auto-corners")
+async def auto_homography_corners(camera: str):
+    """Estimate four court corners from the latest camera snapshot."""
+    orch = _get_orch()
+    cam_cfg = orch.config.cameras.get(camera)
+    if cam_cfg is None or not getattr(cam_cfg, "homography_key", None):
+        raise HTTPException(404, f"Unknown homography camera: {camera}")
+
+    info = orch.get_latest_frame_info(camera)
+    if info is None or info.get("jpeg") is None:
+        raise HTTPException(404, f"No preview frame available for {camera}")
+
+    try:
+        result = estimate_court_corners_from_jpeg(
+            info["jpeg"],
+            source_width=info.get("source_width"),
+            source_height=info.get("source_height"),
+        )
+        return {
+            **result,
+            "camera": camera,
+            "camera_key": cam_cfg.homography_key,
+        }
+    except Exception as e:
+        logger.warning("Auto homography corners failed for %s: %s", camera, e)
+        try:
+            status = homography_status(orch.config.homography.path, cam_cfg.homography_key)
+            camera_status = status.get("cameras", {}).get(cam_cfg.homography_key, {})
+            projected = camera_status.get("projected_corners_image")
+            if projected:
+                return {
+                    "status": "ok",
+                    "method": "current_projection_fallback",
+                    "camera": camera,
+                    "camera_key": cam_cfg.homography_key,
+                    "points": {
+                        corner: {"x": float(pt[0]), "y": float(pt[1])}
+                        for corner, pt in projected.items()
+                    },
+                    "warning": str(e),
+                }
+        except Exception:
+            logger.exception("Auto homography fallback failed for %s", camera)
+        raise HTTPException(422, str(e))
+
+
+@router.post("/api/homography/recalibrate")
+async def recalibrate_homography(request: Request):
+    """Update one camera homography from four manually clicked court corners.
+
+    Body:
+    {
+        "camera": "cam68",
+        "points": {
+            "near_left": {"x": 100, "y": 900},
+            "near_right": {"x": 1800, "y": 900},
+            "far_right": {"x": 1500, "y": 200},
+            "far_left": {"x": 400, "y": 200}
+        },
+        "restart_pipeline": true
+    }
+    """
+    orch = _get_orch()
+    try:
+        body = await request.json()
+    except json.JSONDecodeError:
+        raise HTTPException(400, "Invalid JSON body")
+
+    camera = str(body.get("camera") or "").strip()
+    if not camera:
+        raise HTTPException(400, "camera is required")
+    cam_cfg = orch.config.cameras.get(camera)
+    if cam_cfg is None or not getattr(cam_cfg, "homography_key", None):
+        raise HTTPException(404, f"Unknown homography camera: {camera}")
+
+    try:
+        result = update_homography_file(
+            orch.config.homography.path,
+            cam_cfg.homography_key,
+            body.get("points"),
+            backup=bool(body.get("backup", True)),
+        )
+        reload_info = orch.reload_homography(
+            camera,
+            restart_pipeline=bool(body.get("restart_pipeline", False)),
+        )
+        return {
+            **result,
+            "camera": camera,
+            "reload": reload_info,
+        }
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        logger.exception("Homography recalibration failed")
+        raise HTTPException(500, str(e))
+
+
 @router.post("/api/calibration/run-from-points")
 async def run_calibration_from_points(request: Request):
     """Run calibration using manually marked point pairs from the UI.
@@ -669,6 +812,29 @@ async def recording_ffmpeg_stop():
 
 
 # ---- Camera MJPEG stream ----
+
+@router.get("/api/camera/{name}/snapshot")
+async def camera_snapshot(name: str):
+    """Return the latest camera preview frame as a single JPEG snapshot."""
+    orch = _get_orch()
+    info = orch.get_latest_frame_info(name)
+    if info is None or info.get("jpeg") is None:
+        raise HTTPException(404, f"No preview frame available for {name}")
+    headers = {"Cache-Control": "no-store"}
+    frame_id = info.get("frame_id")
+    if frame_id is not None:
+        headers["X-Frame-Id"] = str(frame_id)
+    for meta_key, header_key in (
+        ("source_width", "X-Source-Width"),
+        ("source_height", "X-Source-Height"),
+        ("preview_width", "X-Preview-Width"),
+        ("preview_height", "X-Preview-Height"),
+    ):
+        value = info.get(meta_key)
+        if value is not None:
+            headers[header_key] = str(value)
+    return Response(content=info["jpeg"], media_type="image/jpeg", headers=headers)
+
 
 @router.get("/api/camera/{name}/stream")
 async def camera_mjpeg_stream(name: str, delay: float = 0):

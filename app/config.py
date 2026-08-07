@@ -121,6 +121,11 @@ class HitBounceRefinerConfig(BaseModel):
     history_frames: int = 150
 
 
+class DisplayOrientationConfig(BaseModel):
+    mirror_x: bool = True
+    mirror_y: bool = False
+
+
 class AppConfig(BaseModel):
     cameras: dict[str, CameraConfig]
     model: ModelConfig
@@ -134,6 +139,7 @@ class AppConfig(BaseModel):
     export: ExportConfig = ExportConfig()
     bounce_detection: BounceDetectionConfig = BounceDetectionConfig()
     hit_bounce_refiner: HitBounceRefinerConfig = HitBounceRefinerConfig()
+    display_orientation: DisplayOrientationConfig = DisplayOrientationConfig()
 
 
 def load_config(config_path: str = "config.yaml") -> AppConfig:

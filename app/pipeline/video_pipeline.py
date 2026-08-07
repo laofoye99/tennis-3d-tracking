@@ -6,6 +6,7 @@ inference so the GPU never waits for the CPU.
 
 import logging
 import multiprocessing as mp
+from pathlib import Path
 import queue
 import threading
 import time
@@ -208,13 +209,22 @@ def run_video_pipeline(
         )
         if use_verifier:
             from app.pipeline.blob_verifier import BlobVerifier
-            blob_verifier = BlobVerifier(
-                model_path=blob_verifier_config.get("model_path", "model_weight/blob_verifier_yolo.pt"),
-                crop_size=blob_verifier_config.get("crop_size", 128),
-                conf=blob_verifier_config.get("conf", 0.25),
-                device=device,
+            verifier_path = blob_verifier_config.get(
+                "model_path", "model_weight/blob_verifier_yolo.pt"
             )
-            log.info("Blob verifier enabled: %s", blob_verifier_config.get("model_path"))
+            if not verifier_path or not Path(str(verifier_path)).exists():
+                log.warning(
+                    "Blob verifier disabled, model not found: %s",
+                    verifier_path,
+                )
+            else:
+                blob_verifier = BlobVerifier(
+                    model_path=str(verifier_path),
+                    crop_size=blob_verifier_config.get("crop_size", 128),
+                    conf=blob_verifier_config.get("conf", 0.25),
+                    device=device,
+                )
+                log.info("Blob verifier enabled: %s", verifier_path)
 
         status_dict["state"] = "running"
         status_dict["total_frames"] = total_frames
@@ -357,6 +367,7 @@ def run_video_pipeline(
                         cv2.circle(preview, (draw_x, draw_y), 14, (0, 255, 0), 2)
                         cv2.circle(preview, (draw_x, draw_y), 4, (0, 255, 0), -1)
                     _, jpeg = cv2.imencode(".jpg", preview, [cv2.IMWRITE_JPEG_QUALITY, 75])
+                    preview_h, preview_w = preview.shape[:2]
                     while True:
                         try:
                             frame_queue.get_nowait()
@@ -364,7 +375,14 @@ def run_video_pipeline(
                             break
                         except Exception:
                             break
-                    frame_queue.put_nowait(jpeg.tobytes())
+                    frame_queue.put_nowait({
+                        "preview": jpeg.tobytes(),
+                        "recording": None,
+                        "source_width": w,
+                        "source_height": h,
+                        "preview_width": preview_w,
+                        "preview_height": preview_h,
+                    })
                 except Exception:
                     pass
 

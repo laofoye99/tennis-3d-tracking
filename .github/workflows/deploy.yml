@@ -1,0 +1,71 @@
+name: Deploy
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: tennis-3d-tracking-deploy-main
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy on self-hosted machine
+    runs-on:
+      - self-hosted
+      - windows
+      - tennis-deploy
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout deployment scripts
+        uses: actions/checkout@v4
+
+      - name: Update deployment machine
+        shell: powershell
+        env:
+          TENNIS_DEPLOY_DIR: ${{ vars.TENNIS_DEPLOY_DIR }}
+          TENNIS_DEPLOY_BRANCH: main
+          TENNIS_SERVICE_NAME: ${{ vars.TENNIS_SERVICE_NAME }}
+          TENNIS_APP_URL: ${{ vars.TENNIS_APP_URL }}
+          TENNIS_AUTO_START_CAMERAS: ${{ vars.TENNIS_AUTO_START_CAMERAS }}
+          TENNIS_AUTO_MODEL: ${{ vars.TENNIS_AUTO_MODEL }}
+          TENNIS_ENABLE_3D_PUSH: ${{ vars.TENNIS_ENABLE_3D_PUSH }}
+          TENNIS_3D_PUSH_URL: ${{ vars.TENNIS_3D_PUSH_URL }}
+          TENNIS_WEIGHTS_MANIFEST: ${{ vars.TENNIS_WEIGHTS_MANIFEST }}
+          TENNIS_SYNC_WEIGHTS_SCRIPT: ${{ vars.TENNIS_SYNC_WEIGHTS_SCRIPT }}
+          TENNIS_INSTALL_REQUIREMENTS: ${{ vars.TENNIS_INSTALL_REQUIREMENTS }}
+          TENNIS_FORCE_RESET: ${{ vars.TENNIS_FORCE_RESET }}
+          TENNIS_PYTHON: ${{ vars.TENNIS_PYTHON }}
+          TENNIS_TRACKNET_ONNX_URL: ${{ secrets.TENNIS_TRACKNET_ONNX_URL }}
+          TENNIS_YOLO_ROADMAP_URL: ${{ secrets.TENNIS_YOLO_ROADMAP_URL }}
+          TENNIS_BLOB_VERIFIER_URL: ${{ secrets.TENNIS_BLOB_VERIFIER_URL }}
+          TENNIS_HRNET_ONNX_URL: ${{ secrets.TENNIS_HRNET_ONNX_URL }}
+          TENNIS_PLAYER_POSE_URL: ${{ secrets.TENNIS_PLAYER_POSE_URL }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:TENNIS_DEPLOY_DIR)) {
+            $env:TENNIS_DEPLOY_DIR = "D:\tennis\tennis-3d-tracking"
+          }
+          if ([string]::IsNullOrWhiteSpace($env:TENNIS_SERVICE_NAME)) {
+            $env:TENNIS_SERVICE_NAME = "Tennis3DTracking"
+          }
+          if ([string]::IsNullOrWhiteSpace($env:TENNIS_APP_URL)) {
+            $env:TENNIS_APP_URL = "http://127.0.0.1:8000"
+          }
+          if ([string]::IsNullOrWhiteSpace($env:TENNIS_AUTO_START_CAMERAS)) {
+            $env:TENNIS_AUTO_START_CAMERAS = "cam68"
+          }
+          if ([string]::IsNullOrWhiteSpace($env:TENNIS_AUTO_MODEL)) {
+            $env:TENNIS_AUTO_MODEL = "yolo_roadmap"
+          }
+          if ([string]::IsNullOrWhiteSpace($env:TENNIS_ENABLE_3D_PUSH)) {
+            $env:TENNIS_ENABLE_3D_PUSH = "true"
+          }
+
+          .\scripts\deployment\update_deploy.ps1 `
+            -RepoPath $env:TENNIS_DEPLOY_DIR `
+            -Branch $env:TENNIS_DEPLOY_BRANCH `
+            -ServiceName $env:TENNIS_SERVICE_NAME `
+            -AppUrl $env:TENNIS_APP_URL

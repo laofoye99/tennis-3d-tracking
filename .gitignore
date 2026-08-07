@@ -49,6 +49,12 @@ tools/mediamtx/
 tools/mediamtx/*.exe
 tools/mediamtx/*.zip
 
+# Deployment-local secrets/config
+scripts/deployment/weights_manifest.json
+
+# Dashboard-generated calibration backups
+src/homography_matrices.json.*.bak
+
 # Video output
 output/
 *.mp4
